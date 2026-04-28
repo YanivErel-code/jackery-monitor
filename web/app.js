@@ -1804,9 +1804,10 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-// "At midnight" badge on the battery card — predicted SOC at the end of
-// the current local day, refit hourly. Hidden if location is unset or
-// forecast otherwise unavailable.
+// "At sunrise" badge on the battery card — predicted SOC at the moment
+// just before solar kicks in tomorrow morning (the overnight low).
+// Refit hourly. Hidden if location is unset or forecast otherwise
+// unavailable.
 async function fetchEodForecast() {
   const el = $('eod-forecast');
   if (!el) return;
@@ -1818,22 +1819,19 @@ async function fetchEodForecast() {
       el.hidden = true;
       return;
     }
-    // Target = end of today (= start of tomorrow at 00:00 local). Each
-    // forecast entry's predicted_soc is the SOC at the END of its hour, so
-    // the entry whose ts is the 23:00 hour represents midnight's SOC.
-    const now = new Date();
-    const midnight = new Date(now.getFullYear(), now.getMonth(),
-                              now.getDate() + 1, 0, 0, 0, 0);
-    const targetTs = Math.floor(midnight.getTime() / 1000) - 3600;
-    let best = j.forecast[0];
-    let bestDelta = Math.abs(best.ts - targetTs);
-    for (const f of j.forecast) {
-      const d = Math.abs(f.ts - targetTs);
-      if (d < bestDelta) { bestDelta = d; best = f; }
+    // Walk forward through the forecast: skip any current daylight, then
+    // skip the night hours, then take the entry RIGHT BEFORE solar
+    // returns. That entry's predicted_soc is the overnight low.
+    const fc = j.forecast;
+    let i = 0;
+    while (i < fc.length && (fc[i].solar_w || 0) > 0) i++;     // skip today's sun
+    while (i < fc.length && (fc[i].solar_w || 0) <= 0) i++;    // skip the night
+    if (i === 0 || i >= fc.length) {
+      el.hidden = true;
+      return;
     }
-    // If the closest forecast point is hours away, the forecast doesn't
-    // cover tonight — bail rather than mislead.
-    if (bestDelta > 4 * 3600 || best.predicted_soc == null) {
+    const best = fc[i - 1];
+    if (best.predicted_soc == null) {
       el.hidden = true;
       return;
     }
