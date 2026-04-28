@@ -368,6 +368,36 @@ async def api_clear_credentials():
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
+@app.post("/api/pause_polling")
+async def api_pause_polling(body: Optional[dict] = None):
+    """Pause the cloud poller so the user can use the phone app without the
+       bridge stealing the session back. Body: {seconds: int} (default 600)."""
+    seconds = int((body or {}).get("seconds") or 600)
+    pauser = getattr(state.client, "pause_polling", None)
+    if not pauser:
+        raise HTTPException(501, "Backend does not support pause_polling")
+    try:
+        result = await pauser(seconds)
+    except DeviceClientError as e:
+        raise HTTPException(400, str(e))
+    await broadcast({"type": "status", "data": serialize_status()})
+    return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
+
+
+@app.post("/api/resume_polling")
+async def api_resume_polling():
+    """Cancel any active pause / contested cooldown and reclaim the cloud session."""
+    resumer = getattr(state.client, "resume_polling", None)
+    if not resumer:
+        raise HTTPException(501, "Backend does not support resume_polling")
+    try:
+        result = await resumer()
+    except DeviceClientError as e:
+        raise HTTPException(400, str(e))
+    await broadcast({"type": "status", "data": serialize_status()})
+    return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
+
+
 @app.post("/api/select_device")
 async def api_select_device(body: dict):
     device_id = (body or {}).get("device_id")

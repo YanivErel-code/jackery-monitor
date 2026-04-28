@@ -76,6 +76,18 @@ class CloudAuthError(RuntimeError):
     pass
 
 
+class SessionContestedError(CloudAuthError):
+    """Raised when the cloud rejects our token (401/1001/1002).
+
+    This usually means another device (e.g. the official Jackery iOS app)
+    just signed in on the same account and invalidated our session. We
+    deliberately don't auto-relogin here — that creates a token war that
+    keeps booting the user out of the phone app. The caller decides whether
+    to back off or reclaim immediately.
+    """
+    pass
+
+
 class JackeryCloudClient:
     """Async, single-account Jackery cloud client. Auto-relogins on token expiry."""
 
@@ -176,20 +188,22 @@ class JackeryCloudClient:
         if not self.token:
             await self.login()
         client = await self._client()
-        for attempt in (1, 2):
-            resp = await client.get(
-                path, params=params or {},
-                headers={"token": self.token or "", "content-type": "application/json"},
+        resp = await client.get(
+            path, params=params or {},
+            headers={"token": self.token or "", "content-type": "application/json"},
+        )
+        if resp.status_code != 200:
+            raise CloudAuthError(f"{path} HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        if self._is_token_expired(data):
+            # Drop the cached token so the next intentional login() is fresh,
+            # but don't re-login automatically — that would steal the session
+            # back from whoever just claimed it (typically the iOS app).
+            self.token = None
+            raise SessionContestedError(
+                f"{path}: cloud rejected token ({data.get('code')}: {data.get('msg')})"
             )
-            if resp.status_code != 200:
-                raise CloudAuthError(f"{path} HTTP {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
-            if self._is_token_expired(data) and attempt == 1:
-                log.info("Token expired, re-login...")
-                await self.login()
-                continue
-            return data
-        raise CloudAuthError("authed_get retry exhausted")
+        return data
 
     async def fetch_devices(self) -> list[CloudDevice]:
         # The legacy Jackery app uses /v1/device/bind/list. Response shape:

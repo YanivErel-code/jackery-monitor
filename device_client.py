@@ -280,6 +280,20 @@ class BridgeDeviceClient(DeviceClient):
         self._device = None
         return r
 
+    async def pause_polling(self, seconds: int = 600) -> dict:
+        """Pause cloud polling for `seconds` so the phone app can hold the session."""
+        r = await self._rpc("pause_polling", seconds=int(seconds))
+        if not r.get("ok"):
+            raise DeviceClientError(r.get("error", "pause_polling failed"))
+        return r
+
+    async def resume_polling(self) -> dict:
+        """Cancel any active pause / contested-cooldown and reclaim the session."""
+        r = await self._rpc("resume_polling")
+        if not r.get("ok"):
+            raise DeviceClientError(r.get("error", "resume_polling failed"))
+        return r
+
     async def disconnect(self):
         try:
             await self._rpc("disconnect")
