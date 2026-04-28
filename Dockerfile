@@ -25,7 +25,7 @@ COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
 # Copy everything the server AND the bridge need.
-COPY server.py bridge.py device_client.py energy_db.py cloud_client.py ./
+COPY server.py bridge.py device_client.py energy_db.py cloud_client.py settings.py ./
 COPY web ./web
 
 # Persistent data lives here (energy.db, jackery-creds.json on Linux hosts).
