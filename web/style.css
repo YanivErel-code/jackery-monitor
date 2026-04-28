@@ -424,6 +424,118 @@ main {
 }
 .settings-control input[type="number"]:focus { outline: 1px solid var(--accent); }
 
+/* ============== Automation tab ============== */
+.auto-toolbar {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.auto-discovered {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.auto-discovered .auto-disc-row {
+  display: flex; gap: 10px; padding: 4px 0; align-items: center;
+}
+.auto-discovered .auto-disc-row .alias { color: var(--text); font-weight: 500; }
+.auto-discovered .auto-disc-row .host { font-family: var(--font-mono); }
+.auto-discovered button { font-size: 11px; padding: 3px 8px; }
+
+.auto-rules {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.auto-rule {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  align-items: center;
+}
+.auto-rule.disabled { opacity: 0.55; }
+.auto-rule .ar-title { font-weight: 500; color: var(--text); margin-bottom: 4px; font-size: 14px; }
+.auto-rule .ar-cond {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+.auto-rule .ar-cond .op,
+.auto-rule .ar-cond .val { color: var(--accent-3); font-weight: 500; }
+.auto-rule .ar-cond .device { color: var(--text); }
+.auto-rule .ar-cond .action.on { color: var(--accent); }
+.auto-rule .ar-cond .action.off { color: var(--accent-2); }
+.auto-rule .ar-meta { font-size: 11px; color: var(--text-mute); margin-top: 4px; font-family: var(--font-mono); }
+.auto-rule .ar-meta.err { color: var(--danger); }
+.auto-rule-actions {
+  display: flex; gap: 6px; align-items: center;
+}
+.auto-rule-actions button { font-size: 12px; padding: 4px 10px; }
+.auto-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-dim);
+}
+.auto-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-mute);
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* Rule editor form */
+.auto-form-grid {
+  display: flex; flex-direction: column; gap: 14px;
+}
+.auto-field {
+  display: flex; flex-direction: column; gap: 6px;
+  border: none; padding: 0; margin: 0;
+}
+.auto-field .auto-label,
+.auto-field legend.auto-label {
+  font-size: 11px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .05em;
+  padding: 0;
+}
+.auto-field input[type="text"],
+.auto-field input[type="number"],
+.auto-field select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.auto-field input:focus, .auto-field select:focus { border-color: var(--accent); }
+.auto-condition { display: flex; gap: 8px; align-items: center; }
+.auto-condition select { flex: 0 0 auto; min-width: 140px; }
+.auto-condition input { flex: 0 0 90px; text-align: right; }
+.auto-condition .auto-pct { color: var(--text-dim); font-size: 14px; }
+.auto-action-row {
+  display: flex; gap: 16px;
+  font-size: 14px;
+}
+.auto-action-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.auto-kasa-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+.auto-enabled { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--text-dim); }
+@media (max-width: 600px) {
+  .auto-condition { flex-wrap: wrap; }
+  .auto-kasa-row { grid-template-columns: 1fr; }
+  .auto-rule { grid-template-columns: 1fr; }
+}
+
 /* ============== Logs tab ============== */
 .logs-controls { display: flex; align-items: center; gap: 10px; }
 .logs-auto { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
