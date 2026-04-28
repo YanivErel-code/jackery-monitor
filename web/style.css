@@ -339,6 +339,54 @@ main {
   background: linear-gradient(90deg, #ef4444, var(--accent-3));
   box-shadow: 0 0 12px rgba(239,68,68,.5);
 }
+
+/* EOD-forecast pill: small panel top-right of battery card showing the
+   predicted SOC at midnight tonight. Refit by the forecaster hourly. */
+.eod-forecast {
+  position: absolute;
+  top: 44px;
+  right: 18px;
+  z-index: 2;
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,.03);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  min-width: 96px;
+  transition: border-color .3s, background .3s;
+}
+.eod-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-mute);
+}
+.eod-row {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  display: flex; align-items: baseline; gap: 4px;
+  line-height: 1;
+}
+.eod-row small {
+  font-size: 12px; color: var(--text-dim); margin-left: 2px; font-weight: 500;
+}
+.eod-trend { font-size: 14px; line-height: 1; color: var(--text-dim); }
+.eod-trend.up   { color: var(--accent); }
+.eod-trend.down { color: #ef4444; }
+.eod-forecast.low {
+  border-color: rgba(239,68,68,.5);
+  background: rgba(239,68,68,.06);
+}
+.eod-forecast.low .eod-row { color: #ef4444; }
+@media (max-width: 600px) {
+  .eod-forecast { top: 40px; right: 12px; min-width: 84px; padding: 6px 10px; }
+  .eod-row { font-size: 18px; }
+}
 .battery-meta {
   display: flex; gap: 8px;
   font-size: 12px;
