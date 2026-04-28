@@ -34,6 +34,14 @@ COPY web ./web
 RUN mkdir -p /data
 VOLUME ["/data"]
 
+# Note on non-root: deliberately running as root inside the container.
+# Switching to a non-root UID would break existing deployments where the
+# /data volume already has files owned as root from prior versions, since
+# the new UID couldn't read its own credentials. The container itself
+# is isolated, so root-in-container is acceptable for this app's threat
+# model. Future migration: ship an entrypoint that chowns /data first
+# and then drops via gosu, with a one-time backfill for existing volumes.
+
 EXPOSE 8000 8766
 
 # Default command runs the dashboard. The bridge service in compose
