@@ -59,6 +59,29 @@ def test_simulate_soc_charges_and_discharges():
     assert out[3]["predicted_soc"] == 50.0
 
 
+def test_load_profile_clips_outliers():
+    # 99 normal samples around 100W, plus one 4900W spike. All land in
+    # the same (hour, weekday) bucket because the timestamps are exactly
+    # 7 days apart. Without outlier clipping the bucket would predict
+    # ~100W *or* 4900W depending on which sample lands in the median;
+    # with the 95-percentile cap the 4900W gets clipped before bucketing
+    # so the predicted load stays ~100W.
+    from datetime import datetime
+    base = 1_700_000_000
+    energy = [
+        {"ts": base + i * 7 * 24 * 3600, "output_w": 100, "solar_w": 0,
+         "battery_pct": 80}
+        for i in range(99)
+    ]
+    energy.append({"ts": base + 99 * 7 * 24 * 3600, "output_w": 4900,
+                   "solar_w": 0, "battery_pct": 80})
+    profile = forecaster.fit_load_profile(energy)
+    d = datetime.fromtimestamp(base)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+    bucket = profile[key]
+    assert bucket < 200, f"outlier leaked: bucket={bucket}"
+
+
 def test_simulate_soc_clamps_at_bounds():
     fc = [{"ts": 0, "solar_w": 0, "load_w": 5000}]   # would drop SOC below 0
     out = forecaster.simulate_soc(starting_soc_pct=10.0,
