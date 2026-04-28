@@ -1,0 +1,67 @@
+# Build the Jackery Monitor Docker image on every push to main and publish it
+# to GitHub Container Registry (ghcr.io). The image is public so Synology
+# Container Manager can pull it without needing any login.
+#
+# After this workflow runs once, the image is available at:
+#   ghcr.io/yaniverel-code/jackery-monitor:latest
+#
+# Tag scheme:
+#   latest          -> most recent successful build of main
+#   main-<sha7>     -> immutable per-commit tag (handy for rollback)
+#   v1.2.3          -> auto-tagged when a git tag is pushed
+name: Build and publish Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:        # lets you re-run from the Actions tab
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # e.g. yaniverel-code/jackery-monitor
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # required to push to ghcr.io
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=main-,format=short,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # RS822+ is x86_64 (Ryzen V1500B) — only need amd64. Add linux/arm64
+          # later if you ever migrate to a Synology with a Realtek/ARM CPU.
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

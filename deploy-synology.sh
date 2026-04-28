@@ -5,7 +5,10 @@
 #   1. git pull (if this is already a clone)
 #   2. ensure .env exists  (copies from .env.example on first run, then aborts
 #      so you can fill in your credentials)
-#   3. docker compose up -d --build      (uses docker-compose.yml, the Synology-friendly one)
+#   3. docker compose pull && up -d   (default: pull pre-built image from ghcr.io)
+#                              -- or --
+#      docker compose -f docker-compose.build.yml up -d --build
+#      if BUILD_LOCAL=1 is set or ghcr.io is unreachable.
 #
 # Usage on the NAS (after SSH'ing in):
 #   cd /volume1/docker/jackery-monitor   # or wherever you cloned it
@@ -68,9 +71,18 @@ else
     exit 1
 fi
 
-# ----- 4. build + (re)start -----
-echo "==> ${DC[*]} up -d --build"
-"${DC[@]}" up -d --build
+# ----- 4. (re)start -----
+if [ "${BUILD_LOCAL:-0}" = "1" ]; then
+    COMPOSE_FILE=docker-compose.build.yml
+    echo "==> BUILD_LOCAL=1: building image from local Dockerfile"
+    echo "==> ${DC[*]} -f ${COMPOSE_FILE} up -d --build"
+    "${DC[@]}" -f "${COMPOSE_FILE}" up -d --build
+else
+    echo "==> docker compose pull (latest image from ghcr.io)"
+    "${DC[@]}" pull
+    echo "==> ${DC[*]} up -d"
+    "${DC[@]}" up -d
+fi
 
 echo
 echo "==> Containers:"

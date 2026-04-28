@@ -1,27 +1,23 @@
-# Default deployment — Synology / generic Linux. Pulls the pre-built image
-# from GitHub Container Registry (no local build step).
+# Default deployment — Synology / generic Linux. Two always-on services, no
+# compose profiles (Container Manager's UI doesn't expose --profile).
 #
-# Synology Container Manager workflow:
-#   1. Registry tab -> search "ghcr.io/yaniverel-code/jackery-monitor" -> Download (latest)
-#   2. Project -> Create -> path /docker/jackery-monitor (this folder).
-#      Source: "Use existing docker-compose.yml". Container Manager will pull
-#      the image and start both services. Build step is skipped.
+# Synology Container Manager:
+#   Project > Create
+#     Project name: jackery-monitor
+#     Path:         /docker/jackery-monitor
+#     Source:       Use existing docker-compose.yml   (this file is picked up automatically)
 #
-# To update later: Container Manager -> Image -> right-click image ->
-# "Get latest version", then Project -> jackery-monitor -> "Action -> Restart".
+# Any Linux box from the CLI:
+#   docker compose up -d --build
 #
-# Variants:
-#   docker-compose.build.yml -> build from local Dockerfile (no registry needed).
-#                               Use this if GHCR is unreachable or you want to
-#                               run uncommitted code on the NAS.
-#   docker-compose.dev.yml   -> macOS host-bridge / mock profiles for dev.
+# For macOS development (host bridge) or mock telemetry, see docker-compose.dev.yml.
 
 services:
   # Cloud bridge — holds Jackery credentials, polls the Jackery cloud,
   # exposes JSON-RPC on TCP 8766 (internal docker network only, NOT to the LAN).
   jackery-bridge:
-    image: ghcr.io/yaniverel-code/jackery-monitor:latest
-    pull_policy: always
+    build: .
+    image: jackery-monitor:latest
     container_name: jackery-bridge
     restart: unless-stopped
     command: ["python", "bridge.py"]
@@ -48,8 +44,8 @@ services:
   # FastAPI dashboard — talks to the bridge over the internal docker network.
   # Published on the LAN at http://<nas-ip>:${JACKERY_HTTP_PORT}.
   jackery-monitor:
-    image: ghcr.io/yaniverel-code/jackery-monitor:latest
-    pull_policy: always
+    build: .
+    image: jackery-monitor:latest
     container_name: jackery-monitor
     restart: unless-stopped
     depends_on:

@@ -120,8 +120,10 @@ jackery-monitor/
 ├── cloud_client.py           Jackery cloud API client
 ├── energy_db.py              SQLite energy integrator
 ├── Dockerfile
-├── docker-compose.yml        Synology / Linux production (no profiles)
+├── docker-compose.yml        Synology / Linux production (pulls ghcr.io image)
+├── docker-compose.build.yml  Same services, but builds image from local Dockerfile
 ├── docker-compose.dev.yml    macOS dev + mock profiles
+├── .github/workflows/        builds & publishes the public ghcr.io image on push
 ├── .dockerignore
 ├── requirements.txt
 └── web/                      vanilla HTML/CSS/JS dashboard
@@ -139,50 +141,58 @@ This app is unaffiliated with Jackery Inc.
 
 Tested on Synology DSM 7.2+ (Container Manager) on x86_64 hardware (RS822+, DS+ models). Should work on any Linux box with Docker + Compose v2.
 
-### One-time setup
+The default `docker-compose.yml` pulls a **pre-built public image** from GitHub Container Registry (`ghcr.io/yaniverel-code/jackery-monitor:latest`). New images are published automatically on every push to `main` by the GitHub Actions workflow in `.github/workflows/docker-publish.yml`. No build step happens on the NAS — saves time and CPU.
 
-1. Install **Container Manager** on the Synology (Package Center → Container Manager). DSM 7.2+ ships with Compose v2.
-2. Enable SSH (Control Panel → Terminal & SNMP → Enable SSH). SSH in as your admin user.
-3. Pick a project folder on a real volume (not `/root`). The convention is `/volume1/docker/jackery-monitor`:
+### One-time setup (no SSH required)
 
-   ```bash
-   sudo mkdir -p /volume1/docker
-   cd /volume1/docker
-   sudo git clone https://github.com/YanivErel-code/jackery-monitor.git
-   sudo chown -R "$USER":users jackery-monitor
-   cd jackery-monitor
-   ```
-4. Run the deploy script. The first run creates `.env` from the template and exits so you can fill it in:
+1. Install **Container Manager** on the Synology (Package Center → Container Manager).
+2. Get the project files onto the NAS via **File Station**: download the zip from [github.com/YanivErel-code/jackery-monitor](https://github.com/YanivErel-code/jackery-monitor) and extract into `/docker/jackery-monitor/`.
+3. In File Station, copy `.env.example` → `.env` and edit it (enable "Show hidden files" first; install the **Text Editor** package from Package Center if needed). Fill in `JACKERY_EMAIL` and `JACKERY_PASSWORD`.
+4. **Container Manager → Project → Create**.
+   - Project name: `jackery-monitor`
+   - Path: `/docker/jackery-monitor`
+   - Source: "Use existing docker-compose.yml"
+5. Click **Next** → **Done**. Container Manager will pull the image (~30 sec) and start both services. No `Build` step.
+6. Dashboard at **`http://<your-nas-ip>:8000`**. If port 8000 is taken, set `JACKERY_HTTP_PORT=8123` in `.env` and rebuild the project.
 
-   ```bash
-   ./deploy-synology.sh
-   nano .env          # set JACKERY_EMAIL, JACKERY_PASSWORD, optionally JACKERY_REGION
-   ./deploy-synology.sh
-   ```
-5. Open the dashboard at **`http://<your-nas-ip>:8000`**. If port 8000 is taken, set `JACKERY_HTTP_PORT=8123` (or any free port) in `.env` and re-run.
+### Updating to the latest version
 
-### Synology Container Manager (no SSH)
+No SSH, no zip downloads. Just two clicks:
 
-If you don't want to use SSH, deploy via the DSM **Container Manager** UI:
+1. **Container Manager → Image** → right-click `ghcr.io/yaniverel-code/jackery-monitor:latest` → **Download** (re-pulls the latest tag).
+2. **Container Manager → Project → jackery-monitor → Action → Stop → Action → Start** (or **Restart** in newer DSM).
 
-1. Get the project files onto the NAS — File Station, upload+extract the GitHub zip into `/docker/jackery-monitor`.
-2. In File Station, copy `.env.example` → `.env` and edit it (enable "Show hidden files" first; install the **Text Editor** package from Package Center if needed). Fill in `JACKERY_EMAIL` and `JACKERY_PASSWORD`.
-3. Open **Container Manager** → **Project** → **Create**.
-4. Project name: `jackery-monitor`. Path: `/docker/jackery-monitor`.
-5. **Source**: "Use existing docker-compose.yml". Container Manager will pick up the project's `docker-compose.yml` automatically — it's profile-free and runs both services. (The Mac/mock variants live in `docker-compose.dev.yml` and are ignored here.)
-6. Click **Next** → **Done**. The build takes 2–3 minutes. Two containers (`jackery-bridge` + `jackery-monitor`) will start.
+The energy database in the `jackery-data` volume is preserved across all updates. Old image versions can be deleted from the Image tab.
 
-> If an earlier project run failed with `no service selected`, that was caused by the previous compose file using profiles. Delete the old project (Container Manager → Project → the project → **Action → Delete**, leave **"Also remove volumes" UNCHECKED** to preserve your DB), pull the latest code, and recreate the project.
-7. Dashboard at `http://<your-nas-ip>:8000`.
+> **Tip:** Container Manager → Image → the image row → **Action → Schedule** lets you auto-pull updates on a cron schedule.
 
-### Updating to the latest code
+### Alternative: build on the NAS instead of pulling
+
+If ghcr.io is unreachable or you want to test uncommitted code, use `docker-compose.build.yml` (builds from the local Dockerfile instead of pulling). Either:
+
+- **From SSH:** `BUILD_LOCAL=1 ./deploy-synology.sh` — the script pulls latest git and rebuilds the image locally.
+- **From Container Manager UI:** delete the project, recreate it but in the file picker step, select `docker-compose.build.yml` instead of the default.
+
+### Optional: SSH-based one-command updates
+
+If you've enabled SSH on the NAS (Control Panel → Terminal & SNMP), you can update from the command line:
 
 ```bash
-cd /volume1/docker/jackery-monitor
-./deploy-synology.sh
+sudo mkdir -p /volume1/docker
+cd /volume1/docker
+sudo git clone https://github.com/YanivErel-code/jackery-monitor.git
+sudo chown -R "$USER":users jackery-monitor
+cd jackery-monitor
+./deploy-synology.sh   # creates .env, prompts you to fill it, then pulls image + starts
 ```
 
-Same script — it does `git pull` then rebuilds and restarts. The energy database in the `jackery-data` volume is preserved across rebuilds.
+For every update after that:
+
+```bash
+cd /volume1/docker/jackery-monitor && ./deploy-synology.sh
+```
+
+(`git pull` for compose-file changes + `docker compose pull` for the image + restart, all in one.)
 
 ### How credentials are stored on the NAS
 
