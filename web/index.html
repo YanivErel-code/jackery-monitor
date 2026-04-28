@@ -238,8 +238,11 @@
     <!-- ============== FORECAST TAB ============== -->
     <section id="tab-forecast" class="tab-panel" hidden>
       <section id="forecast-needs-config" class="card" hidden>
-        <h2>Set your location to enable forecasts</h2>
-        <p class="hint">The forecaster pulls solar irradiance + cloud cover from Open-Meteo (free, no API key) and combines it with your historical solar production to predict the next ~5 days of battery state of charge. Add latitude and longitude in the Settings tab to turn it on.</p>
+        <h2>Allow location to enable forecasts</h2>
+        <p class="hint">The forecaster pulls solar irradiance + cloud cover from Open-Meteo (free, no API key) and combines it with your historical solar production to predict the next ~5 days of battery state of charge. It needs your approximate location to know which weather to fetch.</p>
+        <div class="forecast-geo-actions">
+          <button id="forecast-geo-btn" type="button" class="btn btn-primary">Use my location</button>
+        </div>
       </section>
 
       <section id="forecast-content" class="card" hidden>

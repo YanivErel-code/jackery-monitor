@@ -38,6 +38,7 @@ import auth
 import forecaster
 import kasa_client
 import kasa_creds
+import location as device_location
 import settings as user_settings
 import weather_client
 from automation import AutomationEngine, AutomationError
@@ -534,10 +535,9 @@ async def api_forecast(device_sn: str | None = None):
 
     Returns the simulated SOC curve plus the fitted model coefficients so the
     UI can show how confident the prediction is."""
-    lat = float(user_settings.get("latitude") or 0.0)
-    lon = float(user_settings.get("longitude") or 0.0)
-    if lat == 0 and lon == 0:
-        return {"error": "lat/lon not configured", "configured": False}
+    loc = device_location.get()
+    if not loc:
+        return {"error": "location not set", "configured": False}
 
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
@@ -557,7 +557,7 @@ async def api_forecast(device_sn: str | None = None):
     # 14 days of hourly-bucketed history is plenty for both the regression and
     # the load profile.
     energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
-    weather = await weather_client.fetch_irradiance(lat, lon)
+    weather = await weather_client.fetch_irradiance(loc["latitude"], loc["longitude"])
     if weather.get("error"):
         return {"error": f"weather fetch failed: {weather['error']}", "configured": True}
 
@@ -573,6 +573,29 @@ async def api_forecast(device_sn: str | None = None):
         **result,
         "configured": True,
     }
+
+
+@app.get("/api/location")
+def api_location_get():
+    """Return the stored device location, if any."""
+    return device_location.get() or {"latitude": None, "longitude": None}
+
+
+@app.post("/api/location")
+async def api_location_set(req: Request):
+    """Persist the device's latitude + longitude. Called by the browser
+       after the user grants the geolocation prompt on the Forecast tab."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    record = device_location.set(body.get("latitude"), body.get("longitude"))
+    if record is None:
+        raise HTTPException(status_code=400,
+                            detail="latitude/longitude out of range")
+    # Bust the weather cache so the next forecast pulls for the new coords.
+    weather_client.clear_cache()
+    return record
 
 
 @app.get("/api/auth/status")

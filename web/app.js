@@ -920,7 +920,6 @@ function renderSettingsFields(specs) {
   const fields = $('settings-fields');
   fields.innerHTML = '';
   for (const s of specs) {
-    const step = s.type === 'float' ? 'any' : '1';
     const row = document.createElement('div');
     row.className = 'settings-row';
     row.innerHTML = `
@@ -930,8 +929,7 @@ function renderSettingsFields(specs) {
       </label>
       <div class="settings-control">
         <input id="set-${s.key}" name="${s.key}" type="number"
-               data-type="${s.type}"
-               min="${s.min}" max="${s.max}" step="${step}"
+               min="${s.min}" max="${s.max}" step="1"
                value="${s.value}" required />
         <span class="settings-range">${s.min}–${s.max}</span>
       </div>
@@ -948,9 +946,7 @@ document.getElementById('settings-form')?.addEventListener('submit', async (e) =
   const inputs = document.querySelectorAll('#settings-fields input');
   const body = {};
   for (const inp of inputs) {
-    body[inp.name] = inp.dataset.type === 'float'
-      ? parseFloat(inp.value)
-      : parseInt(inp.value, 10);
+    body[inp.name] = parseInt(inp.value, 10);
   }
   status.hidden = false;
   status.textContent = 'Saving…';
@@ -1652,18 +1648,25 @@ async function fetchForecast() {
   const needsConfig = $('forecast-needs-config');
   const content     = $('forecast-content');
   const stats       = $('forecast-stats');
-  const showOnlyNeedsConfig = (msg) => {
+  const heading     = needsConfig.querySelector('h2');
+  const body        = needsConfig.querySelector('p');
+  const showNeedsConfig = (h, p) => {
     needsConfig.hidden = false;
     content.hidden = true;
     stats.hidden = true;
-    if (msg) needsConfig.querySelector('h2').textContent = msg;
+    if (h) heading.textContent = h;
+    if (p) body.textContent = p;
   };
   try {
     const r = await fetch('/api/forecast');
-    if (!r.ok) { showOnlyNeedsConfig(); return; }
+    if (!r.ok) { showNeedsConfig(); return; }
     const j = await r.json();
-    if (!j.configured) { showOnlyNeedsConfig(); return; }
-    if (j.error)       { showOnlyNeedsConfig(j.error); return; }
+    if (!j.configured) {
+      showNeedsConfig('Allow location to enable forecasts',
+        'The forecaster needs your approximate location to know which weather to fetch. Click below to share it.');
+      return;
+    }
+    if (j.error) { showNeedsConfig(j.error, body.textContent); return; }
     needsConfig.hidden = true;
     content.hidden = false;
     stats.hidden = false;
@@ -1680,6 +1683,94 @@ async function fetchForecast() {
     drawForecastChart(j);
   } catch (e) { console.warn('forecast fetch failed', e); }
 }
+
+// Run once on app boot: if the server has no location yet AND the user
+// hasn't previously denied the prompt in this browser, ask. After any
+// denial, set a localStorage flag so we don't pester them on every reload.
+// The Forecast tab still has a manual "Use my location" button for retry.
+async function maybePromptLocationOnBoot() {
+  if (localStorage.getItem('jackery-location-denied') === '1') return;
+  try {
+    const r = await fetch('/api/location');
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.latitude != null && j.longitude != null) return; // already set
+  } catch { return; }
+  const result = await requestAndSaveGeolocation();
+  if (result.denied) {
+    localStorage.setItem('jackery-location-denied', '1');
+  }
+}
+
+// Trigger the browser geolocation prompt and POST the result to the server.
+// Returns {ok, denied}. `denied` is only true when the user explicitly
+// rejected the permission (code 1) — transient errors don't count.
+async function requestAndSaveGeolocation() {
+  const needsConfig = $('forecast-needs-config');
+  const heading     = needsConfig?.querySelector('h2');
+  const body        = needsConfig?.querySelector('p');
+  const setMessage  = (h, p) => {
+    if (heading) heading.textContent = h;
+    if (body)    body.textContent    = p;
+  };
+
+  if (!('geolocation' in navigator)) {
+    setMessage('Location is needed to forecast',
+      'Your browser does not support geolocation. There is no other way to enable forecasts on this build.');
+    return { ok: false, denied: false };
+  }
+  if (!window.isSecureContext) {
+    setMessage('Location is needed to forecast',
+      'Browser geolocation only works over HTTPS. Open the dashboard via your HTTPS (Cloudflare) URL and try again.');
+    return { ok: false, denied: false };
+  }
+
+  const coords = await new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ ok: true, lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      (err) => resolve({ ok: false, err }),
+      { timeout: 15000, maximumAge: 24 * 3600 * 1000 },
+    );
+  });
+
+  if (!coords.ok) {
+    const code = coords.err?.code;
+    const msg = code === 1
+      ? 'Location is needed to forecast. You denied the permission — re-allow it in your browser site settings, or click below to try again.'
+      : code === 2
+      ? 'Could not determine your location. Try again in a moment.'
+      : code === 3
+      ? 'Location request timed out. Click below to try again.'
+      : 'Could not get your location. Click below to try again.';
+    setMessage('Location is needed to forecast', msg);
+    return { ok: false, denied: code === 1 };
+  }
+
+  try {
+    const r = await fetch('/api/location', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ latitude: coords.lat, longitude: coords.lon }),
+    });
+    if (!r.ok) {
+      setMessage('Could not save location', `${r.status} ${r.statusText}`);
+      return { ok: false, denied: false };
+    }
+    return { ok: true, denied: false };
+  } catch (e) {
+    setMessage('Could not save location', e.message || String(e));
+    return { ok: false, denied: false };
+  }
+}
+
+// "Use my location" button — manual retry. Clears the denied flag so the
+// user explicitly opting in unsticks any earlier dismissal.
+document.addEventListener('click', async (e) => {
+  if (e.target?.id !== 'forecast-geo-btn') return;
+  localStorage.removeItem('jackery-location-denied');
+  const result = await requestAndSaveGeolocation();
+  if (result.ok) fetchForecast();
+});
 
 function drawForecastChart(j) {
   const canvas = $('chart-forecast');
@@ -1793,6 +1884,10 @@ function drawForecastChart(j) {
   // (otherwise the user has to switch tabs once before history populates).
   fetchEnergyHistory();
   fetchEnergyAllDevices();
+
+  // Once-per-app-load geolocation prompt for the forecast feature. Skipped
+  // if location is already saved or the user previously denied.
+  if (ok) maybePromptLocationOnBoot();
 
   // Poll /api/status every 2s as a safety net in case the WebSocket lags
   // or drops a frame. The WS still pushes telemetry as it arrives — this

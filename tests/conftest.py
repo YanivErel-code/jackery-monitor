@@ -33,6 +33,7 @@ def isolated_data(tmp_path, monkeypatch):
     monkeypatch.setenv("JACKERY_RULES_FILE",           str(data / "automation.json"))
     monkeypatch.setenv("JACKERY_SETTINGS_FILE",        str(data / "settings.json"))
     monkeypatch.setenv("JACKERY_AUTH_FILE",            str(data / "auth.json"))
+    monkeypatch.setenv("JACKERY_LOCATION_FILE",        str(data / "location.json"))
     # Force module-level path constants to re-read the env vars by reloading.
     # Tests that import these modules import them inside the test function
     # AFTER this fixture runs so the constants pick up the patched paths.
