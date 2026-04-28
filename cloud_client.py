@@ -273,6 +273,8 @@ class JackeryCloudClient:
         log.info("Cloud devices: %s", [(d.name, d.model_code) for d in self.devices])
         return self.devices
 
+    _logged_property_keys: bool = False
+
     async def fetch_properties(self, device_id: str) -> dict[str, Any]:
         # Response shape: {code:0, data:{device:{...}, properties:{rb,bt,ip,op,...}}}
         data = await self._authed_get("/v1/device/property", {"deviceId": device_id})
@@ -280,7 +282,17 @@ class JackeryCloudClient:
             raise CloudAuthError(f"property fetch failed: {data.get('msg') or data}")
         d = data.get("data") or {}
         props = d.get("properties") if isinstance(d, dict) else None
-        return props or {}
+        props = props or {}
+        # One-time log of the full property key set so we can see whether the
+        # cloud is exposing per-input solar fields (HPV/LPV) that aren't in
+        # the reverse-engineered protocol doc. Logged once per process start
+        # to avoid noise.
+        if not type(self)._logged_property_keys and props:
+            type(self)._logged_property_keys = True
+            log.info("Cloud properties keys=%s | sample=%s",
+                     sorted(props.keys()),
+                     {k: props[k] for k in sorted(props.keys())})
+        return props
 
     # ---- MQTT control ----
     # Output toggles (AC/DC/USB/Car/etc.) go over MQTT, NOT the HTTP API.
