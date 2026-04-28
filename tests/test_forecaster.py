@@ -44,6 +44,34 @@ def test_solar_fit_zero_when_device_has_no_panels():
     assert n == 0
 
 
+def test_solar_fit_zero_when_only_sensor_noise():
+    # Some Jackery devices report a few watts on `ip - acip - cip` even
+    # with nothing connected — sensor offset / rounding noise. Tiny
+    # readings should NOT count as "this device has panels"; otherwise
+    # we'd fabricate a forecast for a battery that has none.
+    base = 1_700_000_000
+    weather = [{"ts": base + i * 3600, "ghi_w_m2": 800, "cloud_cover_pct": 0}
+               for i in range(20)]
+    energy = [{"ts": w["ts"], "solar_w": 8, "output_w": 100, "battery_pct": 60}
+              for w in weather]  # 8W of noise, well below threshold
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    assert k == 0.0
+    assert n == 0
+
+
+def test_solar_fit_runs_with_real_small_panel():
+    # A 100W portable panel hits ~80W at peak — should still trigger the
+    # regression rather than be dismissed as noise.
+    base = 1_700_000_000
+    weather = [{"ts": base + i * 3600, "ghi_w_m2": 800, "cloud_cover_pct": 0}
+               for i in range(20)]
+    energy = [{"ts": w["ts"], "solar_w": 80, "output_w": 100, "battery_pct": 60}
+              for w in weather]
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    assert k > 0
+    assert n >= forecaster.MIN_FIT_SAMPLES
+
+
 def test_solar_fit_falls_back_when_too_few_pairs():
     # Only 3 daylight pairs — well under MIN_FIT_SAMPLES (8).
     base = 1_700_000_000

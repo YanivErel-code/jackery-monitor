@@ -86,10 +86,13 @@ def fit_solar_coefficient(
         if sol > prev:
             by_hour_solar[h] = sol
 
-    # If the device has produced literally no solar in 14 days of history,
+    # If the device has produced essentially no solar in 14 days of history,
     # treat it as "no panels detected" rather than guessing with a default.
-    # 5W threshold (not 0) ignores idle-noise readings.
-    if not any(v > 5 for v in by_hour_solar.values()):
+    # 50W threshold (not 0): the "ip - acip - cip" derivation produces a
+    # few watts of sensor noise even when nothing is connected to the DC
+    # bus. Real panels easily exceed 50W in midday sun, so this filters
+    # out phantom readings without missing real (even small) arrays.
+    if not any(v > 50 for v in by_hour_solar.values()):
         return 0.0, 0
 
     pairs: list[tuple[float, float]] = []
