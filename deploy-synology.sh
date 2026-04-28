@@ -69,12 +69,12 @@ else
 fi
 
 # ----- 4. build + (re)start -----
-echo "==> ${DC[*]} --profile synology up -d --build"
-"${DC[@]}" --profile synology up -d --build
+echo "==> ${DC[*]} -f docker-compose.synology.yml up -d --build"
+"${DC[@]}" -f docker-compose.synology.yml up -d --build
 
 echo
 echo "==> Containers:"
-"${DC[@]}" ps
+"${DC[@]}" -f docker-compose.synology.yml ps
 
 NAS_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<your-nas-ip>')"
 PORT="$(grep -E '^JACKERY_HTTP_PORT=' .env | cut -d= -f2 | tr -d '[:space:]')"

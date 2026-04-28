@@ -160,6 +160,18 @@ Tested on Synology DSM 7.2+ (Container Manager) on x86_64 hardware (RS822+, DS+ 
    ```
 5. Open the dashboard at **`http://<your-nas-ip>:8000`**. If port 8000 is taken, set `JACKERY_HTTP_PORT=8123` (or any free port) in `.env` and re-run.
 
+### Synology Container Manager (no SSH)
+
+If you don't want to use SSH, deploy via the DSM **Container Manager** UI:
+
+1. Get the project files onto the NAS — File Station, upload+extract the GitHub zip into `/docker/jackery-monitor`.
+2. In File Station, copy `.env.example` → `.env` and edit it (enable "Show hidden files" first; install the **Text Editor** package from Package Center if needed). Fill in `JACKERY_EMAIL` and `JACKERY_PASSWORD`.
+3. Open **Container Manager** → **Project** → **Create**.
+4. Project name: `jackery-monitor`. Path: `/docker/jackery-monitor`.
+5. **Source**: "Use existing docker-compose.yml" — but **point it at `docker-compose.synology.yml`** (the profile-free version). The default `docker-compose.yml` uses compose profiles which Container Manager's UI does not expose, and you'll get a `no service selected` error.
+6. Click **Next** → **Done**. The build takes 2–3 minutes. Two containers (`jackery-bridge` + `jackery-monitor`) will start.
+7. Dashboard at `http://<your-nas-ip>:8000`.
+
 ### Updating to the latest code
 
 ```bash
