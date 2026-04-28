@@ -41,16 +41,27 @@ BATTERY_CAPACITY_WH: dict[int, int] = {
 DEFAULT_BATTERY_CAPACITY_WH = 3024
 
 # Minimum paired (solar_w, ghi) samples required to trust a regression fit.
-# Below this, fall back to a generic coefficient. 4 = one solid morning of
-# daylight hours; small enough that the model converges to the user's
-# actual array within hours of first run, large enough that one freak
-# hour can't poison the fit.
-MIN_FIT_SAMPLES = 4
+# Below this, fall back to a generic coefficient. 2 is the floor for a
+# regression-through-origin (single point gives a fit but with no degrees
+# of freedom for variance estimate). The SOLAR_RECENT_CAP_MULT cap below
+# guards against runaway overprediction when the regression is noisy.
+MIN_FIT_SAMPLES = 2
 
 # Generic GHI-to-solar coefficient when we don't have enough data yet
 # (assumes ~400W of panels at typical 80% derate). User-specific fits will
 # replace this within a day or so of running.
 DEFAULT_SOLAR_COEFF = 0.32
+
+# Charge efficiency: not all solar Wh ends up as stored Wh. LiFePO4 chemistry
+# + inverter/charger losses typically combine to ~5-10%. 0.90 is the
+# conservative end so the simulator doesn't overpromise SOC headroom.
+CHARGE_EFFICIENCY = 0.90
+
+# Solar overshoot guard: cap forecast solar at this multiple of the device's
+# recent (last 48h) observed peak. Prevents an overfit regression from
+# predicting more solar than the array has ever produced; allows a modest
+# headroom for clearer-sky days without runaway overprediction.
+SOLAR_RECENT_CAP_MULT = 1.5
 
 
 def battery_capacity_wh(model_code: int | None) -> int:
@@ -180,16 +191,22 @@ def simulate_soc(
     """Walk SOC forward through the forecast window.
 
     `forecast_hours` is a list of {ts, solar_w, load_w, cloud_cover_pct}.
-    Output adds `predicted_soc` (clamped 0-100) per hour.
+    Output adds `predicted_soc` (clamped 0-100) per hour. Net positive
+    inflow has CHARGE_EFFICIENCY applied; the simulator was previously
+    over-predicting SOC by ignoring real-world charge losses.
     """
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
     out: list[dict[str, Any]] = []
     for h in forecast_hours:
         solar = float(h.get("solar_w") or 0)
         load = float(h.get("load_w") or 0)
-        # 1 hour interval, simple Euler step
-        delta_wh = solar - load
-        soc += delta_wh / capacity_wh * 100.0
+        # 1 hour interval, simple Euler step. Apply CHARGE_EFFICIENCY when
+        # net inflow positive — discharge already accounts for inverter
+        # losses on the load side.
+        net = solar - load
+        if net > 0:
+            net *= CHARGE_EFFICIENCY
+        soc += net / capacity_wh * 100.0
         soc = max(0.0, min(100.0, soc))
         out.append({**h, "predicted_soc": round(soc, 1)})
     return out
@@ -212,6 +229,19 @@ def build_forecast(
     out_vals = [r["output_w"] for r in energy_history if r.get("output_w") is not None]
     overall_load = sum(out_vals) / len(out_vals) if out_vals else 0.0
 
+    # Cap projected solar by the device's recent observed peak so an
+    # overfit regression can't predict more solar than the array has
+    # actually produced. SOLAR_RECENT_CAP_MULT leaves headroom for
+    # clearer-sky days; falls back to None (no cap) when there's no
+    # recent data to anchor against.
+    recent_cutoff = cutoff - 48 * 3600
+    recent_peak = max(
+        (float(r.get("solar_w") or 0) for r in energy_history
+         if r.get("ts") and r["ts"] >= recent_cutoff),
+        default=0.0,
+    )
+    solar_cap = recent_peak * SOLAR_RECENT_CAP_MULT if recent_peak > 50 else None
+
     future = [w for w in weather_hourly if int(w.get("ts") or 0) >= cutoff]
     future = future[:horizon_hours]
 
@@ -220,6 +250,8 @@ def build_forecast(
         ts = int(w["ts"])
         ghi = float(w.get("ghi_w_m2") or 0)
         solar_w = max(0.0, k * ghi)
+        if solar_cap is not None:
+            solar_w = min(solar_w, solar_cap)
         load_w = expected_load_w(profile, overall_load, ts)
         forecast_hours.append({
             "ts": ts,

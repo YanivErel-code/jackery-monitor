@@ -73,19 +73,19 @@ def test_solar_fit_runs_with_real_small_panel():
 
 
 def test_solar_fit_falls_back_when_too_few_pairs():
-    # Only 3 daylight pairs — well under MIN_FIT_SAMPLES (8).
+    # Only 1 daylight pair — under MIN_FIT_SAMPLES (2). Falls back to the
+    # generic DEFAULT_SOLAR_COEFF rather than fitting on a single point.
     base = 1_700_000_000
-    weather = [{"ts": base + i * 3600, "ghi_w_m2": 500, "cloud_cover_pct": 0}
-               for i in range(3)]
-    energy = [{"ts": w["ts"], "solar_w": 300, "output_w": 100, "battery_pct": 50}
-              for w in weather]
+    weather = [{"ts": base, "ghi_w_m2": 500, "cloud_cover_pct": 0}]
+    energy = [{"ts": base, "solar_w": 300, "output_w": 100, "battery_pct": 50}]
     k, n = forecaster.fit_solar_coefficient(energy, weather)
     assert k == forecaster.DEFAULT_SOLAR_COEFF
-    assert n == 3
+    assert n == 1
 
 
 def test_simulate_soc_charges_and_discharges():
     # 5kWh battery, 1h windows: +1000W net for 2h, then -1000W net for 2h.
+    # Charging now applies CHARGE_EFFICIENCY (0.90); discharge does not.
     fc = [
         {"ts": 0, "solar_w": 1000, "load_w": 0},
         {"ts": 3600, "solar_w": 1000, "load_w": 0},
@@ -94,11 +94,11 @@ def test_simulate_soc_charges_and_discharges():
     ]
     out = forecaster.simulate_soc(starting_soc_pct=50.0,
                                   capacity_wh=5000, forecast_hours=fc)
-    # +20% over 2h, then -20% over 2h → 50 → 70 → 70 (clamp irrelevant) → 50
-    assert out[0]["predicted_soc"] == 70.0
-    assert out[1]["predicted_soc"] == 90.0
-    assert out[2]["predicted_soc"] == 70.0
-    assert out[3]["predicted_soc"] == 50.0
+    # +18% per charge hour (1000W * 0.9 / 5000), -20% per discharge hour
+    assert out[0]["predicted_soc"] == 68.0
+    assert out[1]["predicted_soc"] == 86.0
+    assert out[2]["predicted_soc"] == 66.0
+    assert out[3]["predicted_soc"] == 46.0
 
 
 def test_load_profile_clips_outliers():
