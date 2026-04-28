@@ -282,28 +282,71 @@
 
     <!-- ============== AUTOMATION TAB ============== -->
     <section id="tab-automation" class="tab-panel" hidden>
+
+      <!-- DEVICES section: add, test, save Kasa plugs separately from rules. -->
       <section class="card">
         <div class="card-header">
-          <h2>Battery-driven automations</h2>
-          <span class="hint">Edge-triggered · fires once per crossing</span>
+          <h2>Kasa devices</h2>
+          <span id="auto-status" class="hint" hidden></span>
         </div>
         <p class="hint" style="margin:6px 0 14px">
-          Turn Kasa smart plugs on or off when the battery state of charge crosses a threshold. Each rule fires once when its condition becomes true (won't fire again until the battery moves out of range and back).
+          Add the Kasa smart plugs you want to control. The container connects directly to each device by IP — discovery may not work in Docker bridge mode, but direct connection always does.
         </p>
 
         <div class="auto-toolbar">
-          <button id="auto-add" class="btn btn-primary" type="button">+ New rule</button>
-          <button id="kasa-discover" class="btn btn-ghost" type="button">Discover Kasa devices</button>
-          <span id="auto-status" class="hint" hidden></span>
+          <button id="kasa-add" class="btn btn-primary" type="button">+ Add device</button>
+          <button id="kasa-discover" class="btn btn-ghost" type="button">Discover on LAN</button>
         </div>
 
         <div id="auto-discovered" class="auto-discovered" hidden></div>
 
+        <div id="kasa-list" class="kasa-list"></div>
+      </section>
+
+      <!-- Device editor: shown inline when adding/editing a Kasa device. -->
+      <section id="kasa-editor" class="card" hidden>
+        <div class="card-header">
+          <h2 id="kasa-editor-title">Add Kasa device</h2>
+          <button id="kasa-editor-close" class="btn btn-ghost" type="button">Cancel</button>
+        </div>
+        <form id="kasa-form">
+          <div class="auto-form-grid">
+            <label class="auto-field">
+              <span class="auto-label">IP address</span>
+              <input id="kasa-host" type="text" required placeholder="192.168.1.50" autocomplete="off" />
+            </label>
+            <label class="auto-field">
+              <span class="auto-label">Alias (optional)</span>
+              <input id="kasa-alias" type="text" placeholder="Auto-fills from device" autocomplete="off" />
+            </label>
+            <div id="kasa-test-result" class="hint" hidden></div>
+          </div>
+          <div style="margin-top:14px; display:flex; gap:8px">
+            <button id="kasa-test-btn" class="btn btn-ghost" type="button">Test</button>
+            <button class="btn btn-primary" type="submit">Save device</button>
+            <button id="kasa-cancel" class="btn btn-ghost" type="button">Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- RULES section: now a pure list — pick from saved devices, no IP entry. -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Battery-driven rules</h2>
+          <span class="hint">Edge-triggered · fires once per crossing</span>
+        </div>
+        <p class="hint" style="margin:6px 0 14px">
+          When the battery state of charge crosses a threshold, turn one of the saved Kasa devices on or off. Add at least one device above before creating rules.
+        </p>
+
+        <div class="auto-toolbar">
+          <button id="auto-add" class="btn btn-primary" type="button">+ New rule</button>
+        </div>
+
         <div id="auto-rules" class="auto-rules"></div>
       </section>
 
-      <!-- Rule editor: shown inline when adding/editing. Lives outside the
-           list so it doesn't wrestle with the list rerender. -->
+      <!-- Rule editor: shown inline. Now picks from saved devices. -->
       <section id="auto-editor" class="card" hidden>
         <div class="card-header">
           <h2 id="auto-editor-title">New rule</h2>
@@ -341,12 +384,10 @@
 
             <label class="auto-field">
               <span class="auto-label">Kasa device</span>
-              <div class="auto-kasa-row">
-                <input id="auto-kasa-host" type="text" required placeholder="192.168.1.50" />
-                <input id="auto-kasa-alias" type="text" placeholder="Alias (optional)" />
-                <button id="auto-kasa-test" class="btn btn-ghost" type="button">Test</button>
-              </div>
-              <span id="auto-kasa-test-result" class="hint" hidden></span>
+              <select id="auto-kasa-pick" required>
+                <option value="">— choose a saved device —</option>
+              </select>
+              <span class="hint" id="auto-kasa-pick-hint"></span>
             </label>
 
             <label class="auto-enabled">

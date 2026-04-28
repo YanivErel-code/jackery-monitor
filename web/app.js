@@ -321,10 +321,158 @@ function switchTab(name) {
 // ============================================================
 // AUTOMATION TAB
 // ============================================================
+let _savedKasaDevices = [];   // last loaded list of saved devices
+
 async function loadAutomation() {
+  // Load both saved devices and rules in parallel; both rerender on completion.
+  await Promise.all([loadSavedKasa(), loadRules()]);
+}
+
+async function loadSavedKasa() {
+  const list = $('kasa-list');
+  if (!list) return;
+  list.innerHTML = '<div class="auto-empty">Loading devices…</div>';
+  try {
+    const r = await fetch('/api/kasa/saved?refresh=true');
+    const j = await r.json();
+    _savedKasaDevices = j.devices || [];
+    renderSavedKasa(_savedKasaDevices);
+  } catch (e) {
+    list.innerHTML = `<div class="auto-empty">Failed to load: ${e.message || e}</div>`;
+  }
+}
+
+function renderSavedKasa(devices) {
+  const list = $('kasa-list');
+  if (!devices.length) {
+    list.innerHTML = '<div class="auto-empty">No Kasa devices yet. Click "+ Add device" to add one.</div>';
+    return;
+  }
+  const safe = (s) => String(s ?? '').replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  list.innerHTML = devices.map((d) => {
+    const stateClass = d.online === false ? 'offline' : (d.is_on === true ? 'on' : (d.is_on === false ? 'off' : 'offline'));
+    const stateText = d.online === false ? 'OFFLINE' : (d.is_on === true ? 'ON' : (d.is_on === false ? 'OFF' : '—'));
+    const meta = [d.model, d.host].filter(Boolean).map((s, i) => i === 0 ? safe(s) : `<span class="host">${safe(s)}</span>`).join(' · ');
+    return `<div class="kasa-row" data-host="${safe(d.host)}">
+      <span class="kr-state ${stateClass}">${stateText}</span>
+      <div class="kr-name">
+        <div class="kr-alias">${safe(d.alias)}</div>
+        <div class="kr-meta">${meta}</div>
+      </div>
+      <div class="kasa-row-actions">
+        <button class="btn btn-ghost" data-toggle="${safe(d.host)}" data-onstate="${d.is_on ? '1' : '0'}" type="button">${d.is_on ? 'Turn off' : 'Turn on'}</button>
+      </div>
+      <div class="kasa-row-actions">
+        <button class="btn btn-ghost" data-edit-kasa="${safe(d.host)}" type="button">Edit</button>
+        <button class="btn btn-ghost" data-del-kasa="${safe(d.host)}" type="button">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('[data-toggle]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const host = b.dataset.toggle;
+      const turnOn = b.dataset.onstate !== '1';
+      b.disabled = true; b.textContent = '…';
+      try {
+        await fetch('/api/kasa/test', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ host, on: turnOn }),
+        });
+      } catch (e) {
+        alert('Toggle failed: ' + (e.message || e));
+      } finally {
+        b.disabled = false;
+        loadSavedKasa();
+      }
+    });
+  });
+  list.querySelectorAll('[data-edit-kasa]').forEach((b) => {
+    b.addEventListener('click', () => openKasaEditor(devices.find((d) => d.host === b.dataset.editKasa)));
+  });
+  list.querySelectorAll('[data-del-kasa]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const d = devices.find((dd) => dd.host === b.dataset.delKasa);
+      if (!d) return;
+      if (!confirm(`Remove "${d.alias}" (${d.host})?\nAny rules using it will start failing.`)) return;
+      const r = await fetch('/api/kasa/saved/' + encodeURIComponent(d.host), { method: 'DELETE' });
+      const j = await r.json();
+      if (j.rules_referencing && j.rules_referencing.length) {
+        alert(`Removed. Note: ${j.rules_referencing.length} rule(s) still reference this device and will start logging errors.`);
+      }
+      loadSavedKasa();
+    });
+  });
+}
+
+function openKasaEditor(device) {
+  const ed = $('kasa-editor');
+  if (!ed) return;
+  ed.hidden = false;
+  $('kasa-editor-title').textContent = device ? 'Edit Kasa device' : 'Add Kasa device';
+  $('kasa-host').value  = device?.host  || '';
+  $('kasa-host').disabled = !!device;   // host is the primary key — locked when editing
+  $('kasa-alias').value = device?.alias || '';
+  $('kasa-test-result').hidden = true;
+  ed.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeKasaEditor() {
+  const ed = $('kasa-editor');
+  if (ed) ed.hidden = true;
+  $('kasa-host').disabled = false;
+}
+
+$('kasa-add')?.addEventListener('click', () => openKasaEditor(null));
+$('kasa-cancel')?.addEventListener('click', closeKasaEditor);
+$('kasa-editor-close')?.addEventListener('click', closeKasaEditor);
+
+$('kasa-test-btn')?.addEventListener('click', async () => {
+  const host = $('kasa-host').value.trim();
+  const result = $('kasa-test-result');
+  result.hidden = false; result.textContent = 'Connecting…';
+  if (!host) { result.textContent = 'Enter an IP first.'; return; }
+  try {
+    const r = await fetch('/api/kasa/status?host=' + encodeURIComponent(host));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    result.textContent = `OK · ${j.alias} (${j.model || 'unknown'}) currently ${j.is_on ? 'ON' : 'OFF'}`;
+    if (j.alias && !$('kasa-alias').value) $('kasa-alias').value = j.alias;
+  } catch (e) {
+    result.textContent = 'Failed: ' + (e.message || e);
+  }
+});
+
+document.getElementById('kasa-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    host:  $('kasa-host').value.trim(),
+    alias: $('kasa-alias').value.trim(),
+  };
+  if (!body.host) return;
+  const result = $('kasa-test-result');
+  result.hidden = false; result.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/kasa/saved', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    closeKasaEditor();
+    loadSavedKasa();
+  } catch (err) {
+    result.textContent = 'Save failed: ' + (err.message || err);
+  }
+});
+
+async function loadRules() {
   const list = $('auto-rules');
   if (!list) return;
-  list.innerHTML = 'Loading…';
+  list.innerHTML = '<div class="auto-empty">Loading rules…</div>';
   try {
     const r = await fetch('/api/automation/rules');
     const j = await r.json();
@@ -404,21 +552,35 @@ function renderAutomationRules(rules) {
 function openAutomationEditor(rule) {
   const ed = $('auto-editor');
   if (!ed) return;
+  // Repopulate the device dropdown from the saved-devices list each time
+  // so newly added devices appear without a tab switch.
+  const pick = $('auto-kasa-pick');
+  const hint = $('auto-kasa-pick-hint');
+  if (!_savedKasaDevices.length) {
+    pick.innerHTML = '<option value="">(no saved devices)</option>';
+    pick.disabled = true;
+    if (hint) hint.textContent = 'Add a Kasa device above before creating a rule.';
+  } else {
+    pick.disabled = false;
+    pick.innerHTML = '<option value="">— choose a device —</option>' +
+      _savedKasaDevices.map((d) =>
+        `<option value="${d.host}">${d.alias} (${d.host})</option>`
+      ).join('');
+    if (hint) hint.textContent = '';
+  }
   ed.hidden = false;
   $('auto-editor-title').textContent = rule ? 'Edit rule' : 'New rule';
-  $('auto-id').value         = rule?.id || '';
-  $('auto-name').value       = rule?.name || '';
-  $('auto-operator').value   = rule?.operator || '<';
-  $('auto-value').value      = rule?.value ?? 20;
-  $('auto-kasa-host').value  = rule?.kasa_host || '';
-  $('auto-kasa-alias').value = rule?.kasa_alias || '';
-  $('auto-enabled').checked  = rule ? !!rule.enabled : true;
+  $('auto-id').value       = rule?.id || '';
+  $('auto-name').value     = rule?.name || '';
+  $('auto-operator').value = rule?.operator || '<';
+  $('auto-value').value    = rule?.value ?? 20;
+  $('auto-kasa-pick').value = rule?.kasa_host || '';
+  $('auto-enabled').checked = rule ? !!rule.enabled : true;
   // Action radios
   const action = rule?.action || 'off';
   document.querySelectorAll('input[name="auto-action"]').forEach((el) => {
     el.checked = (el.value === action);
   });
-  $('auto-kasa-test-result').hidden = true;
   ed.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -434,14 +596,22 @@ $('auto-editor-close')?.addEventListener('click', closeAutomationEditor);
 document.getElementById('auto-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const action = document.querySelector('input[name="auto-action"]:checked')?.value || 'off';
+  const host = $('auto-kasa-pick').value;
+  if (!host) {
+    alert('Pick a saved Kasa device first.');
+    return;
+  }
+  // Look up the alias from the saved-devices cache so the rule list shows
+  // the friendly name even if the device record changes later.
+  const dev = _savedKasaDevices.find((d) => d.host === host);
   const body = {
     id: $('auto-id').value || undefined,
     name: $('auto-name').value.trim(),
     operator: $('auto-operator').value,
     value: Number($('auto-value').value),
     action,
-    kasa_host: $('auto-kasa-host').value.trim(),
-    kasa_alias: $('auto-kasa-alias').value.trim(),
+    kasa_host: host,
+    kasa_alias: dev?.alias || host,
     enabled: $('auto-enabled').checked,
     trigger: 'battery_percent',
   };
@@ -464,23 +634,6 @@ document.getElementById('auto-form')?.addEventListener('submit', async (e) => {
   }
 });
 
-$('auto-kasa-test')?.addEventListener('click', async () => {
-  const host = $('auto-kasa-host').value.trim();
-  const result = $('auto-kasa-test-result');
-  result.hidden = false; result.textContent = 'Connecting…';
-  if (!host) { result.textContent = 'Enter an IP first.'; return; }
-  // Toggle ON briefly to verify reachability — we don't change state long-term.
-  try {
-    const r = await fetch('/api/kasa/status?host=' + encodeURIComponent(host));
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
-    result.textContent = `OK · ${j.alias} (${j.model || 'unknown'}) currently ${j.is_on ? 'ON' : 'OFF'}`;
-    if (j.alias && !$('auto-kasa-alias').value) $('auto-kasa-alias').value = j.alias;
-  } catch (e) {
-    result.textContent = 'Failed: ' + (e.message || e);
-  }
-});
-
 $('kasa-discover')?.addEventListener('click', async () => {
   const wrap = $('auto-discovered');
   const status = $('auto-status');
@@ -498,13 +651,25 @@ $('kasa-discover')?.addEventListener('click', async () => {
           <span class="alias">${d.alias}</span>
           <span class="host">${d.host}</span>
           <span class="hint">${d.model || ''} · ${d.is_on ? 'on' : 'off'}</span>
-          <button class="btn btn-ghost" data-use-host="${d.host}" data-use-alias="${d.alias}" type="button">Use</button>
+          <button class="btn btn-ghost" data-add-host="${d.host}" data-add-alias="${d.alias}" type="button">Add</button>
         </div>`).join('');
-      wrap.querySelectorAll('[data-use-host]').forEach((b) => {
-        b.addEventListener('click', () => {
-          openAutomationEditor(null);
-          $('auto-kasa-host').value = b.dataset.useHost;
-          $('auto-kasa-alias').value = b.dataset.useAlias;
+      // "Add" saves the discovered device into the registry so it appears
+      // in the rule editor's dropdown.
+      wrap.querySelectorAll('[data-add-host]').forEach((b) => {
+        b.addEventListener('click', async () => {
+          b.disabled = true; b.textContent = 'Adding…';
+          try {
+            await fetch('/api/kasa/saved', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ host: b.dataset.addHost, alias: b.dataset.addAlias }),
+            });
+            loadSavedKasa();
+          } catch (e) {
+            alert('Failed: ' + (e.message || e));
+          } finally {
+            b.disabled = false; b.textContent = 'Add';
+          }
         });
       });
     }
