@@ -18,6 +18,7 @@ let lastStatus = null;
 let lastDevices = [];
 let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
+let forecastCache = null;     // last /api/forecast response
 let activeTab = 'live';
 
 // ---------- chart palette ----------
@@ -37,8 +38,9 @@ const _seriesVisible = {
 
 // Adding a new chart? Just register its redraw + cache-getter here.
 const _chartRedraw = {
-  live:   () => lastStatus && drawLiveChart(lastStatus),
-  energy: () => energyHistoryCache && drawEnergyChart(energyHistoryCache),
+  live:     () => lastStatus && drawLiveChart(lastStatus),
+  energy:   () => energyHistoryCache && drawEnergyChart(energyHistoryCache),
+  forecast: () => forecastCache && drawForecastChart(forecastCache),
 };
 
 document.addEventListener('click', (e) => {
@@ -346,6 +348,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.toggleAttribute('hidden', p.id !== `tab-${name}`));
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
+  if (name === 'forecast') { fetchForecast(); }
   if (name === 'settings') { loadSettings(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') { loadAutomation(); }
@@ -917,6 +920,7 @@ function renderSettingsFields(specs) {
   const fields = $('settings-fields');
   fields.innerHTML = '';
   for (const s of specs) {
+    const step = s.type === 'float' ? 'any' : '1';
     const row = document.createElement('div');
     row.className = 'settings-row';
     row.innerHTML = `
@@ -926,7 +930,8 @@ function renderSettingsFields(specs) {
       </label>
       <div class="settings-control">
         <input id="set-${s.key}" name="${s.key}" type="number"
-               min="${s.min}" max="${s.max}" step="1"
+               data-type="${s.type}"
+               min="${s.min}" max="${s.max}" step="${step}"
                value="${s.value}" required />
         <span class="settings-range">${s.min}–${s.max}</span>
       </div>
@@ -943,7 +948,9 @@ document.getElementById('settings-form')?.addEventListener('submit', async (e) =
   const inputs = document.querySelectorAll('#settings-fields input');
   const body = {};
   for (const inp of inputs) {
-    body[inp.name] = parseInt(inp.value, 10);
+    body[inp.name] = inp.dataset.type === 'float'
+      ? parseFloat(inp.value)
+      : parseInt(inp.value, 10);
   }
   status.hidden = false;
   status.textContent = 'Saving…';
@@ -1635,9 +1642,145 @@ function drawEnergyChart(j) {
 
 // Redraw on resize
 window.addEventListener('resize', () => {
-  if (activeTab === 'live')   drawLiveChart(lastStatus);
-  if (activeTab === 'energy' && energyHistoryCache) drawEnergyChart(energyHistoryCache);
+  _chartRedraw[activeTab]?.();
 });
+
+// ============================================================
+// FORECAST TAB
+// ============================================================
+async function fetchForecast() {
+  const needsConfig = $('forecast-needs-config');
+  const content     = $('forecast-content');
+  try {
+    const r = await fetch('/api/forecast');
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j.configured) {
+      needsConfig.hidden = false;
+      content.hidden = true;
+      return;
+    }
+    if (j.error) {
+      needsConfig.hidden = false;
+      content.hidden = true;
+      needsConfig.querySelector('h2').textContent = j.error;
+      return;
+    }
+    needsConfig.hidden = true;
+    content.hidden = false;
+    forecastCache = j;
+    set('forecast-capacity', j.capacity_wh);
+    set('forecast-coeff',    j.solar_coefficient);
+    set('forecast-avg-load', j.overall_load_w);
+    const sub = $('forecast-coeff-sub');
+    if (sub) {
+      sub.textContent = j.fit_samples >= 8
+        ? `learned from ${j.fit_samples} hourly samples`
+        : `default — need ${8 - j.fit_samples} more daylight hours of data to fit`;
+    }
+    drawForecastChart(j);
+  } catch (e) { console.warn('forecast fetch failed', e); }
+}
+
+function drawForecastChart(j) {
+  const canvas = $('chart-forecast');
+  if (!canvas) return;
+  const { ctx, w, h } = setCanvasSize(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 42, padR = 50, padT = 14, padB = 28;
+  drawAxes(ctx, w, h, padL, padR, padT, padB);
+
+  const fc = j?.forecast || [];
+  if (!fc.length) {
+    ctx.fillStyle = '#6b7280'; ctx.font = '12px Inter';
+    ctx.fillText('No forecast yet — keep the monitor running and check back.', padL + 8, padT + 16);
+    return;
+  }
+
+  const totalW = w - padL - padR;
+  const innerH = h - padT - padB;
+  const n = fc.length;
+  const xAt = (i) => padL + (i / (n - 1)) * totalW;
+  const ts0 = fc[0].ts, ts1 = fc[fc.length - 1].ts;
+
+  // Threshold band — shade where predicted SOC dips below user's low-batt %.
+  const threshold = j.low_battery_threshold || 20;
+  const yThreshold = padT + innerH * (1 - threshold / 100);
+  ctx.fillStyle = 'rgba(248, 113, 113, 0.08)';
+  ctx.fillRect(padL, yThreshold, totalW, h - padB - yThreshold);
+  ctx.strokeStyle = 'rgba(248, 113, 113, 0.4)';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(padL, yThreshold); ctx.lineTo(w - padR, yThreshold);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Right-axis grid: power scale (use the higher of solar/load peak)
+  const maxPower = Math.max(1, ...fc.map(p => Math.max(p.solar_w || 0, p.load_w || 0)));
+  // Round to a nice number for the right-hand axis label.
+  const niceMax = Math.ceil(maxPower / 100) * 100;
+
+  // Left-axis: SOC % grid + labels
+  ctx.strokeStyle = '#1c2128'; ctx.lineWidth = 1;
+  ctx.fillStyle = '#6b7280'; ctx.font = '11px Inter';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + (innerH * i) / 4;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+    ctx.fillText(`${100 - i * 25}%`, padL - 6, y + 3);
+    ctx.fillText(`${Math.round(niceMax * (4 - i) / 4)}W`, w - padR + 36, y + 3);
+  }
+  ctx.textAlign = 'start';
+
+  // X-axis labels
+  const fmtTs = (ts) => {
+    const d = new Date(ts * 1000);
+    const span = ts1 - ts0;
+    if (span > 24 * 3600) return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+  ctx.fillStyle = '#6b7280';
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const idx = Math.floor((n - 1) * (i / ticks));
+    ctx.fillText(fmtTs(fc[idx].ts), xAt(idx) - 18, h - 8);
+  }
+
+  // Solar line (sky)
+  ctx.strokeStyle = SERIES_COLORS.input;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  fc.forEach((p, i) => {
+    const x = xAt(i);
+    const y = padT + innerH * (1 - (p.solar_w || 0) / niceMax);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Load line (green, dashed so it visually reads as "demand" not "production")
+  ctx.strokeStyle = SERIES_COLORS.output;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  fc.forEach((p, i) => {
+    const x = xAt(i);
+    const y = padT + innerH * (1 - (p.load_w || 0) / niceMax);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // SOC line (amber, thicker — the headline metric)
+  ctx.strokeStyle = SERIES_COLORS.battery;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  fc.forEach((p, i) => {
+    const x = xAt(i);
+    const y = padT + innerH * (1 - (p.predicted_soc || 0) / 100);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
 
 // ============================================================
 // BOOT
@@ -1665,6 +1808,11 @@ window.addEventListener('resize', () => {
   // Refresh energy history at a slower cadence — it's a heavier query and
   // doesn't change every tick. Picks up new samples for the chart.
   setInterval(fetchEnergyHistory, 30000);
+
+  // Forecast: weather updates hourly, fit + simulation are cheap, refresh
+  // every 5 min while the tab is visible. fetchForecast is a no-op if the
+  // result hasn't changed visibly.
+  setInterval(() => { if (activeTab === 'forecast') fetchForecast(); }, 5 * 60_000);
 
   // If auth was missing the user is in the modal — when they sign in successfully
   // the modal hides and the WS snapshot will populate the UI.

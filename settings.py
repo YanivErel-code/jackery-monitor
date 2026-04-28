@@ -27,8 +27,7 @@ log = logging.getLogger("settings")
 SETTINGS_PATH = os.environ.get("JACKERY_SETTINGS_FILE", "/data/settings.json")
 
 # Schema: key -> (env_var, default_value, type, min, max, description)
-# `type` must be `int`. (We keep it scalar-only on purpose — keeps the UI
-# trivial.) min/max are inclusive bounds enforced on save.
+# `type` is "int" or "float". min/max are inclusive bounds enforced on save.
 SCHEMA: dict[str, dict[str, Any]] = {
     "poll_interval_s": {
         "env": "POLL_INTERVAL_S",
@@ -66,11 +65,29 @@ SCHEMA: dict[str, dict[str, Any]] = {
         "label": "Low-battery alert threshold (%)",
         "hint": "Battery percentage below which the dashboard fires a low-battery alert.",
     },
+    "latitude": {
+        "env": "JACKERY_LATITUDE",
+        "default": 0.0,
+        "type": "float",
+        "min": -90.0,
+        "max": 90.0,
+        "label": "Latitude",
+        "hint": "Decimal latitude for weather forecasts (e.g. 37.7749 for SF). Leave 0 to disable forecasts.",
+    },
+    "longitude": {
+        "env": "JACKERY_LONGITUDE",
+        "default": 0.0,
+        "type": "float",
+        "min": -180.0,
+        "max": 180.0,
+        "label": "Longitude",
+        "hint": "Decimal longitude for weather forecasts (e.g. -122.4194 for SF).",
+    },
 }
 
 
 _lock = threading.Lock()
-_cache: dict[str, int] = {}
+_cache: dict[str, int | float] = {}
 _cache_mtime: float = 0.0
 
 
@@ -86,32 +103,35 @@ def _read_file() -> dict[str, Any]:
         return {}
 
 
-def _coerce(key: str, raw: Any) -> int | None:
+def _coerce(key: str, raw: Any) -> int | float | None:
     spec = SCHEMA.get(key)
     if not spec:
         return None
+    cast = float if spec.get("type") == "float" else int
     try:
-        v = int(raw)
+        v = cast(raw)
     except (TypeError, ValueError):
         return None
     lo, hi = spec.get("min"), spec.get("max")
     if lo is not None and v < lo:
-        v = lo
+        v = cast(lo)
     if hi is not None and v > hi:
-        v = hi
+        v = cast(hi)
     return v
 
 
-def _default_for(key: str) -> int:
+def _default_for(key: str) -> int | float:
     spec = SCHEMA[key]
+    cast = float if spec.get("type") == "float" else int
     env = os.environ.get(spec["env"])
     if env is not None:
         try:
-            v = int(env)
-            return _coerce(key, v) or v
+            v = cast(env)
+            coerced = _coerce(key, v)
+            return coerced if coerced is not None else v
         except ValueError:
             pass
-    return int(spec["default"])
+    return cast(spec["default"])
 
 
 def _refresh_cache() -> None:
@@ -124,7 +144,7 @@ def _refresh_cache() -> None:
     if mtime == _cache_mtime and _cache:
         return
     file_data = _read_file()
-    new_cache: dict[str, int] = {}
+    new_cache: dict[str, int | float] = {}
     for k in SCHEMA:
         v = _coerce(k, file_data.get(k)) if k in file_data else None
         new_cache[k] = v if v is not None else _default_for(k)
@@ -132,7 +152,7 @@ def _refresh_cache() -> None:
     _cache_mtime = mtime
 
 
-def get(key: str) -> int:
+def get(key: str) -> int | float:
     """Return the current value for `key`. Cheap; uses an mtime-checked cache."""
     if key not in SCHEMA:
         raise KeyError(f"unknown setting: {key!r}")
@@ -141,7 +161,7 @@ def get(key: str) -> int:
         return _cache[key]
 
 
-def all_values() -> dict[str, int]:
+def all_values() -> dict[str, int | float]:
     """Snapshot of all current values."""
     with _lock:
         _refresh_cache()
@@ -157,7 +177,7 @@ def schema() -> list[dict[str, Any]]:
     ]
 
 
-def update(values: dict[str, Any]) -> dict[str, int]:
+def update(values: dict[str, Any]) -> dict[str, int | float]:
     """Persist a partial update. Returns the new full settings snapshot.
        Keys not in SCHEMA are silently ignored. Values out-of-range are clamped."""
     with _lock:
