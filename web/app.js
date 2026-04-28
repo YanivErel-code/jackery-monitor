@@ -210,22 +210,42 @@ function applyStatus(s) {
     $('battery-pct').textContent = fmt(t.battery_percent);
     $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
   }
-  // Battery time label: charging -> "X h to full", discharging -> "X h remaining",
-  // idle (no input AND no output) -> "Idle".
-  const inW  = Number(t.input_power_w  ?? 0);
-  const outW = Number(t.output_power_w ?? 0);
-  const hRem = t.battery_time_remaining_h;
+  // Battery time label. The Jackery cloud sends two fields:
+  //   time_to_full_h     -> ETA to 100% when the unit is charging
+  //   time_remaining_h   -> ETA to empty when the unit is discharging
+  // It populates only the relevant one; the other is 0 or stale. We pick the
+  // right one based on net power flow. If neither is meaningful and the unit
+  // is barely doing anything, show "Idle". As a last resort, synthesise an
+  // ETA from SOC and net W.
+  const inW   = Number(t.input_power_w  ?? 0);
+  const outW  = Number(t.output_power_w ?? 0);
+  const netW  = inW - outW;                      // + charging, - discharging
+  const soc   = Number(t.battery_percent ?? 0);  // 0..100
+  const PACK_KWH = 5.04;                         // Explorer 5000 Plus usable kWh
+  const IDLE_W   = 25;                           // below this we call it idle
+  const ttFull  = Number(t.time_to_full_h    ?? 0);
+  const ttEmpty = Number(t.time_remaining_h  ?? 0);
   let timeLabel;
-  if (hRem != null && hRem > 0) {
-    timeLabel = inW > outW
-      ? `${fmt(hRem, 1)} h to full`
-      : `${fmt(hRem, 1)} h remaining`;
-  } else if (inW < 5 && outW < 5) {
+  if (Math.abs(netW) < IDLE_W) {
     timeLabel = 'Idle';
-  } else if (inW > outW) {
-    timeLabel = 'Charging…';
+  } else if (netW > 0) {
+    // Charging
+    if (ttFull > 0) {
+      timeLabel = `${fmt(ttFull, 1)} h to full`;
+    } else {
+      const wh = ((100 - soc) / 100) * PACK_KWH * 1000;
+      const eta = wh / netW;
+      timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h to full` : 'Charging…';
+    }
   } else {
-    timeLabel = 'Discharging…';
+    // Discharging
+    if (ttEmpty > 0) {
+      timeLabel = `${fmt(ttEmpty, 1)} h remaining`;
+    } else {
+      const wh = (soc / 100) * PACK_KWH * 1000;
+      const eta = wh / Math.abs(netW);
+      timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h remaining` : 'Discharging…';
+    }
   }
   $('battery-time').textContent = timeLabel;
   if (t.battery_temp_c != null) $('battery-temp').textContent = `${fmt(t.battery_temp_c, 0)} °C`;
