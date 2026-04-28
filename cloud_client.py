@@ -174,23 +174,42 @@ class JackeryCloudClient:
         data = resp.json()
         if data.get("code") != 0:
             raise CloudAuthError(f"login failed: {data.get('msg') or data}")
-        token = data.get("token") or ""
+        # Walk both the top level and any nested `data` dict to find token,
+        # userId, mqttPassWord. The protocol doc says they're top-level but
+        # the actual server has been seen putting them under a nested `data`
+        # — be tolerant. Also tolerant of casing variations (mqttPassWord vs
+        # mqttPassword vs mqtt_password) noted across reverse-engineered
+        # write-ups.
+        def _pick(d: dict, *keys: str):
+            for k in keys:
+                if k in d and d[k] is not None:
+                    return d[k]
+            return None
+
+        nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+        token = _pick(data, "token", "Token") or _pick(nested, "token", "Token") or ""
         if not token:
-            raise CloudAuthError("login succeeded but no token in response")
-        self.token = token
-        # userId and mqttPassWord come back at the top level of the response;
-        # we need them to authenticate with the MQTT broker for output control.
-        # Tolerant of casing variations seen in different reverse-engineering
-        # write-ups ("mqttPassWord" vs "mqttPassword").
-        self.user_id = (
-            str(data.get("userId")) if data.get("userId") is not None else None
+            raise CloudAuthError(f"login succeeded but no token in response (keys: {sorted(data.keys())})")
+        self.token = str(token)
+        user_id_raw = (
+            _pick(data, "userId", "userid", "user_id")
+            or _pick(nested, "userId", "userid", "user_id")
         )
+        self.user_id = str(user_id_raw) if user_id_raw is not None else None
         self.mqtt_password = (
-            data.get("mqttPassWord") or data.get("mqttPassword") or None
+            _pick(data, "mqttPassWord", "mqttPassword", "mqtt_password")
+            or _pick(nested, "mqttPassWord", "mqttPassword", "mqtt_password")
         )
-        log.info("Cloud login OK (token len=%d, userId=%s, mqtt_password=%s)",
-                 len(token), self.user_id, "set" if self.mqtt_password else "MISSING")
-        return token
+        # Diagnostic so we can see at a glance whether MQTT control will work
+        # without dumping the actual password to the log.
+        log.info(
+            "Cloud login OK (token len=%d, userId=%s, mqtt_password=%s, top_keys=%s, data_keys=%s)",
+            len(self.token), self.user_id,
+            "set" if self.mqtt_password else "MISSING",
+            sorted(data.keys()),
+            sorted(nested.keys()) if nested else [],
+        )
+        return self.token
 
     @staticmethod
     def _is_token_expired(data: dict) -> bool:
