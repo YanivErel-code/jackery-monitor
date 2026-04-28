@@ -210,9 +210,24 @@ function applyStatus(s) {
     $('battery-pct').textContent = fmt(t.battery_percent);
     $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
   }
-  if (t.battery_time_remaining_h != null) {
-    $('battery-time').textContent = `${fmt(t.battery_time_remaining_h, 1)} h remaining`;
-  } else { $('battery-time').textContent = '— h remaining'; }
+  // Battery time label: charging -> "X h to full", discharging -> "X h remaining",
+  // idle (no input AND no output) -> "Idle".
+  const inW  = Number(t.input_power_w  ?? 0);
+  const outW = Number(t.output_power_w ?? 0);
+  const hRem = t.battery_time_remaining_h;
+  let timeLabel;
+  if (hRem != null && hRem > 0) {
+    timeLabel = inW > outW
+      ? `${fmt(hRem, 1)} h to full`
+      : `${fmt(hRem, 1)} h remaining`;
+  } else if (inW < 5 && outW < 5) {
+    timeLabel = 'Idle';
+  } else if (inW > outW) {
+    timeLabel = 'Charging…';
+  } else {
+    timeLabel = 'Discharging…';
+  }
+  $('battery-time').textContent = timeLabel;
   if (t.battery_temp_c != null) $('battery-temp').textContent = `${fmt(t.battery_temp_c, 0)} °C`;
 
   $('output-w').textContent = fmt(t.output_power_w);
