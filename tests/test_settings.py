@@ -63,6 +63,7 @@ def test_update_ignores_non_int_values(isolated_data):
 
 def test_get_unknown_key_raises(isolated_data):
     import pytest
+
     import settings
     importlib.reload(settings)
     with pytest.raises(KeyError):

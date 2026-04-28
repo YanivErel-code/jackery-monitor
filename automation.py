@@ -37,7 +37,6 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, Optional
 
 import kasa_client
 
@@ -62,11 +61,16 @@ def _matches(rule: dict, soc: float) -> bool:
         threshold = float(rule.get("value"))
     except (TypeError, ValueError):
         return False
-    if op == "<":   return soc <  threshold
-    if op == "<=": return soc <= threshold
-    if op == "=":   return abs(soc - threshold) <= EQUALS_TOLERANCE
-    if op == ">=": return soc >= threshold
-    if op == ">":   return soc >  threshold
+    if op == "<":
+        return soc < threshold
+    if op == "<=":
+        return soc <= threshold
+    if op == "=":
+        return abs(soc - threshold) <= EQUALS_TOLERANCE
+    if op == ">=":
+        return soc >= threshold
+    if op == ">":
+        return soc > threshold
     return False
 
 
@@ -166,7 +170,7 @@ class AutomationEngine:
         return changed
 
     # ---- evaluation ----
-    async def evaluate(self, soc_by_sn: dict, active_sn: Optional[str] = None) -> list[dict]:
+    async def evaluate(self, soc_by_sn: dict, active_sn: str | None = None) -> list[dict]:
         """Walk all enabled rules. `soc_by_sn` is a dict mapping each Jackery
            device's serial number to its current battery_percent (None for
            devices we don't have data for yet). Each rule is evaluated

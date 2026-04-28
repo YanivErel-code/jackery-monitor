@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import time
-from typing import Any, Optional
 
 log = logging.getLogger("kasa_devices")
 
@@ -59,11 +58,11 @@ class KasaRegistry:
     def list_devices(self) -> list[dict]:
         return list(self.devices)
 
-    def get(self, host: str) -> Optional[dict]:
+    def get(self, host: str) -> dict | None:
         return next((d for d in self.devices if d.get("host") == host), None)
 
-    def upsert(self, host: str, alias: str = "", model: Optional[str] = None,
-               type_: Optional[str] = None, mark_tested: bool = False) -> dict:
+    def upsert(self, host: str, alias: str = "", model: str | None = None,
+               type_: str | None = None, mark_tested: bool = False) -> dict:
         host = (host or "").strip()
         if not host:
             raise ValueError("host is required")

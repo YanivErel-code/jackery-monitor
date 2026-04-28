@@ -7,8 +7,8 @@ import time
 
 
 def test_hash_and_verify_password_round_trip(isolated_data):
-    import crypto_util  # noqa: F401 — needed first to set up key path
     import auth
+    import crypto_util
     importlib.reload(auth)
 
     h = auth.hash_password("correct horse battery staple")
@@ -25,7 +25,8 @@ def test_password_format_invalid_returns_false(isolated_data):
 
 
 def test_save_and_load_user(isolated_data):
-    import crypto_util, auth
+    import auth
+    import crypto_util
     importlib.reload(crypto_util)
     importlib.reload(auth)
 
@@ -42,7 +43,8 @@ def test_save_and_load_user(isolated_data):
 
 
 def test_clear_user_removes_file(isolated_data):
-    import crypto_util, auth
+    import auth
+    import crypto_util
     importlib.reload(crypto_util)
     importlib.reload(auth)
 
@@ -54,7 +56,8 @@ def test_clear_user_removes_file(isolated_data):
 
 
 def test_session_round_trip(isolated_data):
-    import crypto_util, auth
+    import auth
+    import crypto_util
     importlib.reload(crypto_util)
     importlib.reload(auth)
 
@@ -65,7 +68,8 @@ def test_session_round_trip(isolated_data):
 
 
 def test_session_rejects_tampered_token(isolated_data):
-    import crypto_util, auth
+    import auth
+    import crypto_util
     importlib.reload(crypto_util)
     importlib.reload(auth)
 
@@ -77,7 +81,8 @@ def test_session_rejects_tampered_token(isolated_data):
 
 
 def test_session_rejects_expired_token(isolated_data):
-    import crypto_util, auth
+    import auth
+    import crypto_util
     importlib.reload(crypto_util)
     importlib.reload(auth)
 
@@ -87,7 +92,8 @@ def test_session_rejects_expired_token(isolated_data):
 
 
 def test_session_rejects_missing_or_garbage(isolated_data):
-    import crypto_util, auth
+    import auth
+    import crypto_util
     importlib.reload(crypto_util)
     importlib.reload(auth)
 

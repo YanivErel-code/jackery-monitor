@@ -17,9 +17,8 @@ import json
 import logging
 import os
 import threading
-import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger("settings")
 
@@ -87,7 +86,7 @@ def _read_file() -> dict[str, Any]:
         return {}
 
 
-def _coerce(key: str, raw: Any) -> Optional[int]:
+def _coerce(key: str, raw: Any) -> int | None:
     spec = SCHEMA.get(key)
     if not spec:
         return None

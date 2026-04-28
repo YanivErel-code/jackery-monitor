@@ -57,7 +57,6 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Optional
 
 from Crypto.Cipher import AES
 
@@ -74,7 +73,6 @@ PORT = int(os.environ.get("BRIDGE_PORT", "8766"))
 # inside the settings module. We read them per-loop-iteration so a settings
 # change applies on the next cycle without a bridge restart.
 import settings as user_settings  # noqa: E402  -- after env reads above
-
 
 # ---- credential storage (multi-backend) ----
 #
@@ -147,7 +145,7 @@ def _encrypt_creds(plaintext: bytes) -> dict:
     }
 
 
-def _decrypt_creds(blob: dict) -> Optional[bytes]:
+def _decrypt_creds(blob: dict) -> bytes | None:
     """Decrypt a dict produced by _encrypt_creds. Returns None on failure."""
     try:
         key = _get_or_create_creds_key()
@@ -161,7 +159,7 @@ def _decrypt_creds(blob: dict) -> Optional[bytes]:
         return None
 
 
-def keychain_get(service: str, account: str) -> Optional[str]:
+def keychain_get(service: str, account: str) -> str | None:
     """Read a password from macOS keychain. Returns None if missing or non-mac."""
     try:
         out = subprocess.run(
@@ -188,7 +186,7 @@ def keychain_set(service: str, account: str, password: str) -> bool:
         return False
 
 
-def _load_creds_file() -> Optional[dict]:
+def _load_creds_file() -> dict | None:
     """Read the on-disk credentials file. Supports both the new encrypted
     format ({v,alg,nonce,tag,ct}) and the legacy plaintext format
     ({email,password,region}); the latter is auto-migrated to encrypted on
@@ -274,7 +272,7 @@ def _delete_creds_file() -> bool:
         return False
 
 
-def load_cloud_credentials() -> Optional[dict]:
+def load_cloud_credentials() -> dict | None:
     """Return {email, password, region} from env / file / keychain, or None."""
     # 1. Environment variables (Synology / generic Linux deployment)
     env_email = os.environ.get("JACKERY_EMAIL")
@@ -394,9 +392,9 @@ def get_events(limit: int = 100, since: float = 0.0) -> list[dict]:
 # ---- shared state ----
 class State:
     def __init__(self) -> None:
-        self.cloud_creds: Optional[dict] = None
+        self.cloud_creds: dict | None = None
         self.cloud_state: str = "needs-credentials"  # needs-credentials | logging-in | connected | error
-        self.cloud_device: Optional[dict] = None
+        self.cloud_device: dict | None = None
         # ---- per-device telemetry (keyed by device_sn) ----
         # We poll EVERY Jackery device on the account so automation rules can
         # target a specific device, not just whichever the dashboard happens
@@ -407,18 +405,18 @@ class State:
         self.props_raw_by_sn: dict[str, dict] = {}
         self.telemetry_by_sn: dict[str, dict] = {}
         self.ts_by_sn: dict[str, float] = {}
-        self.cloud_telemetry: Optional[dict] = None
+        self.cloud_telemetry: dict | None = None
         self.cloud_props_raw: dict = {}
-        self.cloud_ts: Optional[float] = None
-        self.cloud_error: Optional[str] = None
+        self.cloud_ts: float | None = None
+        self.cloud_error: str | None = None
         self.cloud_client = None               # JackeryCloudClient | None
-        self.cloud_device_id: Optional[str] = None
+        self.cloud_device_id: str | None = None
         # full list of devices on the account (for the UI dropdown)
         self.cloud_devices: list[dict] = []
         # set this to force a re-poll on the next loop iteration
         self.cloud_force_repoll: asyncio.Event = asyncio.Event()
         # background task handle for cloud_loop so we can cancel/restart it
-        self.cloud_task: Optional[asyncio.Task] = None
+        self.cloud_task: asyncio.Task | None = None
         # User-initiated polling pause (epoch seconds, 0 = not paused).
         # Set via pause_polling RPC; the cloud poller skips iterations until
         # `time.time() >= pause_until`.
@@ -468,7 +466,7 @@ async def cloud_loop() -> None:
     # if a device firmware update starts pushing per-PV solar fields).
     _seen_push_keys: set[str] = set()
 
-    async def _on_property_push(body: dict, device_sn: Optional[str] = None):
+    async def _on_property_push(body: dict, device_sn: str | None = None):
         if not isinstance(body, dict) or not body:
             return
         if not device_sn:
@@ -635,7 +633,7 @@ async def cloud_loop() -> None:
             await asyncio.wait_for(state.cloud_force_repoll.wait(),
                                    timeout=user_settings.get("cloud_poll_interval_s"))
             state.cloud_force_repoll.clear()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 

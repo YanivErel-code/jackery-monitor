@@ -25,7 +25,6 @@ import logging
 import os
 import secrets
 import time
-from typing import Optional
 
 import crypto_util
 
@@ -70,7 +69,7 @@ def has_user() -> bool:
     return load_user() is not None
 
 
-def load_user() -> Optional[dict]:
+def load_user() -> dict | None:
     try:
         with open(AUTH_PATH) as f:
             blob = json.load(f)
@@ -130,7 +129,7 @@ def clear_user() -> bool:
 def _session_secret() -> bytes:
     """Use the same /data/.jackery-creds.key everything else is keyed off.
        crypto_util manages it; we just need stable bytes for HMAC."""
-    return crypto_util._get_or_create_key()  # noqa: SLF001 — internal helper, intentional
+    return crypto_util._get_or_create_key()
 
 
 def _b64u_encode(data: bytes) -> str:
@@ -154,7 +153,7 @@ def make_session(username: str, ttl: int = SESSION_TTL_S) -> str:
     return body + "." + _b64u_encode(sig)
 
 
-def verify_session(token: Optional[str]) -> Optional[dict]:
+def verify_session(token: str | None) -> dict | None:
     if not token or "." not in token:
         return None
     try:
