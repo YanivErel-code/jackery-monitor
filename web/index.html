@@ -74,7 +74,7 @@
     <section id="tab-live" class="tab-panel">
       <!-- Hero: battery + key KPIs -->
       <div class="grid hero-grid">
-        <section class="card battery-card">
+        <section id="battery-card" class="card battery-card has-accent">
           <div class="card-eyebrow">
             <span>State of charge</span>
             <span id="source-badge" class="pill pill-source">—</span>
@@ -92,7 +92,7 @@
           </div>
         </section>
 
-        <section class="card kpi-card">
+        <section class="card kpi-card output has-accent">
           <div class="card-eyebrow"><span>Output now</span></div>
           <div class="kpi-value"><span id="output-w">—</span><small>W</small></div>
           <div class="kpi-sub">
@@ -102,7 +102,7 @@
           </div>
         </section>
 
-        <section class="card kpi-card">
+        <section class="card kpi-card input has-accent">
           <div class="card-eyebrow"><span>Input now</span></div>
           <div class="kpi-value"><span id="input-w">—</span><small>W</small></div>
           <div class="kpi-sub" id="input-source-line">
@@ -112,7 +112,7 @@
           </div>
         </section>
 
-        <section class="card kpi-card">
+        <section class="card kpi-card today has-accent">
           <div class="card-eyebrow"><span>Today</span></div>
           <div class="kpi-value">
             <span id="today-out-kwh">—</span><small>kWh consumed</small>

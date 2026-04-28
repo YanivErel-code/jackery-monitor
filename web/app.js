@@ -34,6 +34,46 @@ function fmtKwh(wh) {
 }
 function show(el, on = true) { if (!el) return; if (on) el.removeAttribute('hidden'); else el.setAttribute('hidden', ''); }
 
+// Animate a number element from its current value to a new one, with a brief
+// amber pulse on the parent .kpi-value when the value actually changes. Used
+// for "live" feel on output/input/battery KPIs without per-tick churn.
+const _animState = new WeakMap();
+function animateNumber(el, target, digits = 0, duration = 600) {
+  if (!el || target == null || Number.isNaN(target)) return;
+  const numericTarget = Number(target);
+  const previous = _animState.get(el)?.value ?? Number(el.textContent.replace(/[^\-\d.]/g,''));
+  if (!isFinite(previous) || previous === numericTarget) {
+    el.textContent = numericTarget.toFixed(digits);
+    _animState.set(el, { value: numericTarget });
+    return;
+  }
+  // Pulse the wrapping .kpi-value (if any) to flash the colour briefly.
+  const pulseHost = el.closest('.kpi-value');
+  if (pulseHost) {
+    pulseHost.classList.remove('changed');
+    void pulseHost.offsetWidth;  // restart animation
+    pulseHost.classList.add('changed');
+  }
+  // Cancel any previous tween still running.
+  const prev = _animState.get(el);
+  if (prev?.raf) cancelAnimationFrame(prev.raf);
+  const start = performance.now();
+  const from = previous;
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    // ease-out cubic
+    const k = 1 - Math.pow(1 - t, 3);
+    const v = from + (numericTarget - from) * k;
+    el.textContent = v.toFixed(digits);
+    if (t < 1) {
+      _animState.set(el, { value: v, raf: requestAnimationFrame(tick) });
+    } else {
+      _animState.set(el, { value: numericTarget });
+    }
+  };
+  _animState.set(el, { value: from, raf: requestAnimationFrame(tick) });
+}
+
 // ============================================================
 // LOGIN
 // ============================================================
@@ -446,7 +486,7 @@ function applyStatus(s) {
   // Telemetry
   const t = s.telemetry || {};
   if (t.battery_percent != null) {
-    $('battery-pct').textContent = fmt(t.battery_percent);
+    animateNumber($('battery-pct'), t.battery_percent);
     $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
   }
   // Battery time label. The Jackery cloud sends two fields:
@@ -489,10 +529,22 @@ function applyStatus(s) {
   $('battery-time').textContent = timeLabel;
   if (t.battery_temp_c != null) $('battery-temp').textContent = `${fmt(t.battery_temp_c, 0)} °C`;
 
-  $('output-w').textContent = fmt(t.output_power_w);
-  $('input-w').textContent  = fmt(t.input_power_w);
-  $('input-grid-w').textContent  = fmt(t.ac_input_w ?? 0);
-  $('input-solar-w').textContent = fmt(t.solar_input_w ?? 0);
+  animateNumber($('output-w'), t.output_power_w);
+  animateNumber($('input-w'),  t.input_power_w);
+  animateNumber($('input-grid-w'),  t.ac_input_w ?? 0);
+  animateNumber($('input-solar-w'), t.solar_input_w ?? 0);
+
+  // Battery card mood: charging / discharging / low / idle. Drives the soft
+  // glow + bar color via CSS classes.
+  const batCard = $('battery-card');
+  if (batCard) {
+    const inW = Number(t.input_power_w ?? 0);
+    const outW = Number(t.output_power_w ?? 0);
+    const net = inW - outW;
+    batCard.classList.toggle('charging',    net >  25);
+    batCard.classList.toggle('discharging', net < -25);
+    batCard.classList.toggle('low',         (t.battery_percent ?? 100) <= 20);
+  }
   if (t.ac_output_v != null) $('ac-out-v').textContent  = fmt(t.ac_output_v, 0);
   if (t.ac_output_hz != null)        $('ac-out-hz').textContent = fmt(t.ac_output_hz, 0);
 
