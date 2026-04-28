@@ -324,9 +324,57 @@ function switchTab(name) {
 let _savedKasaDevices = [];   // last loaded list of saved devices
 
 async function loadAutomation() {
-  // Load both saved devices and rules in parallel; both rerender on completion.
-  await Promise.all([loadSavedKasa(), loadRules()]);
+  // Load creds-status, saved devices, and rules in parallel.
+  await Promise.all([loadKasaCreds(), loadSavedKasa(), loadRules()]);
 }
+
+async function loadKasaCreds() {
+  const status = $('kasa-creds-status');
+  const emailIn = $('kasa-creds-email');
+  if (!status) return;
+  try {
+    const r = await fetch('/api/kasa/credentials');
+    const j = await r.json();
+    if (j.has_credentials) {
+      status.textContent = `saved · ${j.email || ''}`;
+      if (emailIn && !emailIn.value) emailIn.value = j.email || '';
+    } else {
+      status.textContent = 'not set';
+    }
+  } catch (e) {
+    status.textContent = 'failed to load';
+  }
+}
+
+document.getElementById('kasa-creds-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = $('kasa-creds-email').value.trim();
+  const password = $('kasa-creds-password').value;
+  const msg = $('kasa-creds-msg');
+  msg.hidden = false; msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/kasa/credentials', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    msg.textContent = 'Saved.';
+    $('kasa-creds-password').value = '';
+    setTimeout(() => { msg.hidden = true; }, 2000);
+    loadKasaCreds();
+  } catch (err) {
+    msg.textContent = 'Failed: ' + (err.message || err);
+  }
+});
+
+$('kasa-creds-clear')?.addEventListener('click', async () => {
+  if (!confirm('Forget saved Kasa credentials?')) return;
+  await fetch('/api/kasa/credentials', { method: 'DELETE' });
+  $('kasa-creds-password').value = '';
+  loadKasaCreds();
+});
 
 async function loadSavedKasa() {
   const list = $('kasa-list');
