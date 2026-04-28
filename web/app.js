@@ -1070,10 +1070,13 @@ function applyStatus(s) {
   }
   // Same idea for the Forecast tab: forecast is per-device (battery
   // capacity, solar regression, load profile all differ), so re-fetch on
-  // device switch.
-  if (activeTab === 'forecast' && prevDeviceSn !== newDeviceSn) {
-    forecastCache = null;
-    fetchForecast();
+  // device switch. The EOD badge on the battery card is also per-device.
+  if (prevDeviceSn !== newDeviceSn && newDeviceSn) {
+    if (activeTab === 'forecast') {
+      forecastCache = null;
+      fetchForecast();
+    }
+    fetchEodForecast();
   }
 
   // Connection pill
@@ -1714,6 +1717,10 @@ async function maybePromptLocationOnBoot() {
   const result = await requestAndSaveGeolocation();
   if (result.denied) {
     localStorage.setItem('jackery-location-denied', '1');
+  } else if (result.ok) {
+    // Location just saved — populate the EOD badge right away rather than
+    // waiting for the hourly tick.
+    fetchEodForecast();
   }
 }
 
@@ -1784,8 +1791,67 @@ document.addEventListener('click', async (e) => {
   if (e.target?.id !== 'forecast-geo-btn') return;
   localStorage.removeItem('jackery-location-denied');
   const result = await requestAndSaveGeolocation();
-  if (result.ok) fetchForecast();
+  if (result.ok) {
+    fetchForecast();
+    fetchEodForecast();
+  }
 });
+
+// "At midnight" badge on the battery card — predicted SOC at the end of
+// the current local day, refit hourly. Hidden if location is unset or
+// forecast otherwise unavailable.
+async function fetchEodForecast() {
+  const el = $('eod-forecast');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/forecast');
+    if (!r.ok) { el.hidden = true; return; }
+    const j = await r.json();
+    if (!j.configured || j.error || !Array.isArray(j.forecast) || !j.forecast.length) {
+      el.hidden = true;
+      return;
+    }
+    // Target = end of today (= start of tomorrow at 00:00 local). Each
+    // forecast entry's predicted_soc is the SOC at the END of its hour, so
+    // the entry whose ts is the 23:00 hour represents midnight's SOC.
+    const now = new Date();
+    const midnight = new Date(now.getFullYear(), now.getMonth(),
+                              now.getDate() + 1, 0, 0, 0, 0);
+    const targetTs = Math.floor(midnight.getTime() / 1000) - 3600;
+    let best = j.forecast[0];
+    let bestDelta = Math.abs(best.ts - targetTs);
+    for (const f of j.forecast) {
+      const d = Math.abs(f.ts - targetTs);
+      if (d < bestDelta) { bestDelta = d; best = f; }
+    }
+    // If the closest forecast point is hours away, the forecast doesn't
+    // cover tonight — bail rather than mislead.
+    if (bestDelta > 4 * 3600 || best.predicted_soc == null) {
+      el.hidden = true;
+      return;
+    }
+    const pct = $('eod-pct');
+    const trend = $('eod-trend');
+    pct.textContent = Math.round(best.predicted_soc);
+    const start = j.starting_soc_pct ?? best.predicted_soc;
+    const delta = best.predicted_soc - start;
+    trend.classList.remove('up', 'down');
+    if (Math.abs(delta) < 1) {
+      trend.textContent = '→';
+    } else if (delta > 0) {
+      trend.textContent = '↗';
+      trend.classList.add('up');
+    } else {
+      trend.textContent = '↘';
+      trend.classList.add('down');
+    }
+    const threshold = j.low_battery_threshold || 20;
+    el.classList.toggle('low', best.predicted_soc < threshold);
+    el.hidden = false;
+  } catch (e) {
+    console.warn('EOD forecast fetch failed:', e);
+  }
+}
 
 function drawForecastChart(j) {
   const canvas = $('chart-forecast');
@@ -1903,6 +1969,11 @@ function drawForecastChart(j) {
   // Once-per-app-load geolocation prompt for the forecast feature. Skipped
   // if location is already saved or the user previously denied.
   if (ok) maybePromptLocationOnBoot();
+
+  // EOD forecast badge on the battery card: populate once on boot, then
+  // refit hourly (weather forecast itself only updates ~hourly).
+  if (ok) fetchEodForecast();
+  setInterval(fetchEodForecast, 60 * 60_000);
 
   // Poll /api/status every 2s as a safety net in case the WebSocket lags
   // or drops a frame. The WS still pushes telemetry as it arrives — this
