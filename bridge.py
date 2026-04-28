@@ -453,18 +453,36 @@ async def cloud_loop() -> None:
     # Realtime push handler — called from the asyncio loop whenever MQTT
     # pushes a property delta. Blends into cloud_props_raw + cloud_telemetry
     # so the UI gets ~500ms-fresh updates without our HTTP polling speeding up.
+    # Keys that ride along on every MQTT push but aren't device properties —
+    # broker envelope / metadata. Filtered out before merging into the
+    # property dict and before logging so the Logs tab isn't noisy.
+    _IGNORE_PUSH_KEYS = {"messageId", "msgId", "id"}
+    # Cumulative set of every property key we've ever seen pushed by MQTT,
+    # used for one-off discovery logging when a brand-new key appears (e.g.
+    # if a device firmware update starts pushing per-PV solar fields).
+    _seen_push_keys: set[str] = set()
+
     async def _on_property_push(body: dict):
         if not isinstance(body, dict) or not body:
             return
-        state.cloud_props_raw.update(body)
+        props = {k: v for k, v in body.items() if k not in _IGNORE_PUSH_KEYS}
+        if not props:
+            return  # broker ack only, no actual property updates
+        # Discovery log: emit an event the first time we see any key — handy
+        # for spotting per-input solar fields (hpv/lpv/pv1/...) if/when the
+        # device starts pushing them.
+        new_keys = sorted(set(props.keys()) - _seen_push_keys)
+        if new_keys:
+            _seen_push_keys.update(new_keys)
+            event("info", "mqtt", f"New MQTT key(s) discovered: {', '.join(new_keys)}",
+                  new_keys=new_keys, total_seen=len(_seen_push_keys))
+        state.cloud_props_raw.update(props)
         state.cloud_telemetry = cloud_props_to_telemetry(state.cloud_props_raw)
         state.cloud_ts = time.time()
         if state.cloud_state not in ("paused", "contested"):
             state.cloud_state = "connected"
-        # Compact log line; sample of changed keys goes to extras for the
-        # Logs tab so it's visible what's actually pushing.
-        event("info", "mqtt", f"Realtime update ({len(body)} keys)",
-              keys=sorted(body.keys())[:8])
+        event("info", "mqtt", f"Realtime update ({len(props)} keys)",
+              keys=sorted(props.keys())[:8])
 
     realtime_subscribed = False
     while True:
