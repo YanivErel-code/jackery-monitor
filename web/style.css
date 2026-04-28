@@ -277,6 +277,7 @@ main {
 }
 .card-header {
   display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 10px;
   margin-bottom: 14px;
 }
 .card-header .hint { font-size: 12px; color: var(--text-mute); }
@@ -772,7 +773,7 @@ main {
 
 /* ============== Range picker ============== */
 .range-picker {
-  display: inline-flex;
+  display: inline-flex; flex-wrap: wrap;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
   border-radius: 8px;
