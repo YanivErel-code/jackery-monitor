@@ -39,23 +39,11 @@ if [ ! -f .env ]; then
     chmod 600 .env
     echo
     echo "================================================================"
-    echo " First run detected: .env was just created from .env.example."
-    echo " Edit it now and put your Jackery email/password in, then re-run"
-    echo " this script:"
-    echo
-    echo "     nano .env"
-    echo "     ./deploy-synology.sh"
-    echo
+    echo " First run: .env was created from .env.example."
+    echo " Defaults are fine -- you'll sign in with your Jackery account"
+    echo " through the dashboard UI on first load (credentials are encrypted"
+    echo " and saved to the jackery-data Docker volume)."
     echo "================================================================"
-    exit 0
-fi
-
-# Quick sanity check that the user actually filled .env in.
-if grep -qE '^JACKERY_EMAIL=you@example\.com\s*$' .env \
-   || grep -qE '^JACKERY_PASSWORD=your-password-here\s*$' .env; then
-    echo "ERROR: .env still has placeholder values. Edit it first:" >&2
-    echo "    nano .env" >&2
-    exit 1
 fi
 
 # ----- 3. pick the right docker compose binary -----

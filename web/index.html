@@ -17,7 +17,7 @@
         <span class="logo-dot"></span>
         <h1>Jackery Monitor</h1>
       </div>
-      <p class="login-sub">Sign in with your Jackery account to pull device data from the cloud. Credentials are stored locally in macOS Keychain — never sent anywhere except Jackery.</p>
+      <p class="login-sub">Sign in with your Jackery account to pull device data from the cloud. Credentials are encrypted (AES-256-GCM) and stored locally in this container's data volume — never sent anywhere except Jackery.</p>
 
       <label class="field">
         <span class="field-label">Email</span>
@@ -38,7 +38,7 @@
       <div id="login-error" class="login-error" hidden></div>
 
       <button id="login-submit" class="btn btn-primary" type="submit">Sign in</button>
-      <p class="login-foot">We'll verify against Jackery before saving. Your password stays on this Mac.</p>
+      <p class="login-foot">We'll verify against Jackery before saving. Your password stays on this device.</p>
     </form>
   </div>
 
@@ -226,6 +226,17 @@
           <dt>UPS / Super charge</dt><dd id="dev-ups">—</dd>
           <dt>Error code</dt><dd id="dev-err">—</dd>
         </dl>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>Account</h2>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Your Jackery credentials are encrypted on disk. Sign out to wipe them — you'll be asked to sign in again on next load.
+        </p>
+        <button id="forget-creds" class="btn btn-ghost" type="button">Sign out / Forget credentials</button>
+        <p id="forget-msg" class="login-error" hidden style="margin-top:10px"></p>
       </section>
     </section>
 

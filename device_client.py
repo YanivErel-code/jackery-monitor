@@ -272,6 +272,14 @@ class BridgeDeviceClient(DeviceClient):
         self._device = None
         return r
 
+    async def clear_credentials(self) -> dict:
+        """Wipe stored cloud creds, stop the cloud poller, return to needs-credentials state."""
+        r = await self._rpc("clear_credentials")
+        if not r.get("ok"):
+            raise DeviceClientError(r.get("error", "clear_credentials failed"))
+        self._device = None
+        return r
+
     async def disconnect(self):
         try:
             await self._rpc("disconnect")

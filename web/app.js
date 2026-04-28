@@ -91,6 +91,37 @@ $('login-form')?.addEventListener('submit', async (e) => {
 });
 
 // ============================================================
+// FORGET CREDENTIALS (Device tab > Account)
+// ============================================================
+$('forget-creds')?.addEventListener('click', async () => {
+  const btn = $('forget-creds');
+  const msg = $('forget-msg');
+  if (!confirm('Wipe stored Jackery credentials? You will need to sign in again to keep monitoring.')) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Signing out…';
+  msg.hidden = true;
+  try {
+    const r = await fetch('/api/auth/forget', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) {
+      const m = j.detail || j.error || ('HTTP ' + r.status);
+      msg.textContent = m + ((m && m.toLowerCase().includes('env')) ? ' — remove JACKERY_EMAIL / JACKERY_PASSWORD from your .env, then redeploy.' : '');
+      msg.hidden = false;
+      return;
+    }
+    // Show the login modal right away. Polling will also catch it within 30s.
+    showLogin();
+  } catch (e) {
+    msg.textContent = String(e);
+    msg.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
+
+// ============================================================
 // TABS
 // ============================================================
 document.querySelectorAll('.tab').forEach((tab) => {

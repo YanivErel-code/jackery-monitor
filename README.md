@@ -147,13 +147,13 @@ The default `docker-compose.yml` pulls a **pre-built public image** from GitHub 
 
 1. Install **Container Manager** on the Synology (Package Center → Container Manager).
 2. Get the project files onto the NAS via **File Station**: download the zip from [github.com/YanivErel-code/jackery-monitor](https://github.com/YanivErel-code/jackery-monitor) and extract into `/docker/jackery-monitor/`.
-3. In File Station, copy `.env.example` → `.env` and edit it (enable "Show hidden files" first; install the **Text Editor** package from Package Center if needed). Fill in `JACKERY_EMAIL` and `JACKERY_PASSWORD`.
+3. In File Station, copy `.env.example` → `.env`. The defaults are fine — leave `JACKERY_EMAIL` / `JACKERY_PASSWORD` blank or commented out (you'll sign in through the dashboard).
 4. **Container Manager → Project → Create**.
    - Project name: `jackery-monitor`
    - Path: `/docker/jackery-monitor`
    - Source: "Use existing docker-compose.yml"
 5. Click **Next** → **Done**. Container Manager will pull the image (~30 sec) and start both services. No `Build` step.
-6. Dashboard at **`http://<your-nas-ip>:8000`**. If port 8000 is taken, set `JACKERY_HTTP_PORT=8123` in `.env` and rebuild the project.
+6. Open **`http://<your-nas-ip>:8000`** in a browser. You'll be greeted with a sign-in form — enter your Jackery email + password. The bridge verifies them against the cloud and saves them encrypted (AES-256-GCM) inside the `jackery-data` Docker volume. You won't see this form again unless you click **Sign out / Forget credentials** on the **Device** tab. If port 8000 is taken, set `JACKERY_HTTP_PORT=8123` in `.env` and rebuild the project.
 
 ### Updating to the latest version
 
@@ -196,12 +196,17 @@ cd /volume1/docker/jackery-monitor && ./deploy-synology.sh
 
 ### How credentials are stored on the NAS
 
-Two options, in priority order:
+**Default flow (recommended): sign in through the dashboard.** On first load, the UI shows a sign-in form. Submitting it sends the credentials to the bridge, which:
 
-1. **`.env` file** (recommended). Lives only on the NAS, mode `0600`, never committed to git. The bridge reads `JACKERY_EMAIL` / `JACKERY_PASSWORD` / `JACKERY_REGION` from environment at startup.
-2. **Sign in via the dashboard**. If `.env` is empty, the bridge starts idle and the dashboard shows a sign-in form. Submitting it persists the credentials to `/data/jackery-creds.json` inside the `jackery-data` volume (mode `0600`). Same place the energy database lives. Survives container restarts.
+1. Verifies them against the Jackery cloud (so a typo fails fast).
+2. Generates a 32-byte random key at `/data/.jackery-creds.key` (mode `0600`) on first use.
+3. Writes the credentials to `/data/jackery-creds.json` encrypted with **AES-256-GCM** using that key.
 
-The `set_credentials` web endpoint refuses to write when `.env` has pinned credentials — that prevents the dashboard from overriding what the operator configured.
+Both files live inside the `jackery-data` Docker volume — the same volume that holds the energy database. They survive container restarts and image updates, and never appear in plaintext on disk. To rotate / wipe them, click **Sign out / Forget credentials** on the **Device** tab — the bridge stops the cloud poller, deletes the encrypted JSON, and the dashboard goes back to the sign-in form.
+
+**Alternative: pin credentials via env (e.g. CI).** If you set `JACKERY_EMAIL` and `JACKERY_PASSWORD` in `.env`, the bridge uses those at startup and **disables** the UI sign-in / sign-out flow. Both the `set_credentials` and `clear_credentials` endpoints refuse to write while env-pinned, so the dashboard can never override the operator's config.
+
+Legacy plaintext `jackery-creds.json` files (from older versions) are still read on startup and auto-migrated to the encrypted format on the next save.
 
 ### Networking notes
 

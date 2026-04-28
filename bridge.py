@@ -48,14 +48,18 @@ Env:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import secrets
 import signal
 import subprocess
 import sys
 import time
 from typing import Optional
+
+from Crypto.Cipher import AES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,10 +80,81 @@ CLOUD_POLL = int(os.environ.get("CLOUD_POLL_INTERVAL_S", "15"))
 # Env-var creds are read-only — we never overwrite them.
 
 CREDS_FILE_DEFAULT = "/data/jackery-creds.json"
+CREDS_KEY_DEFAULT  = "/data/.jackery-creds.key"
+CREDS_ENV          = "v1"  # version tag in the encrypted blob
 
 
 def _creds_file_path() -> str:
     return os.environ.get("JACKERY_CREDS_FILE", CREDS_FILE_DEFAULT)
+
+
+def _creds_key_path() -> str:
+    """Path of the secret key file used to encrypt the creds JSON at rest.
+    Lives next to the creds file by default; never written to git/env/logs."""
+    custom = os.environ.get("JACKERY_CREDS_KEY_FILE")
+    if custom:
+        return custom
+    base = os.path.dirname(_creds_file_path()) or "."
+    return os.path.join(base, ".jackery-creds.key")
+
+
+def _get_or_create_creds_key() -> bytes:
+    """Return a 32-byte AES-256 key from /data/.jackery-creds.key, creating it
+    on first use. The key is stored mode 0600 inside the persistent docker
+    volume, not in any image, env file, or git repo."""
+    path = _creds_key_path()
+    try:
+        with open(path, "rb") as f:
+            key = f.read()
+        if len(key) == 32:
+            return key
+        log.warning("creds key at %s has wrong length (%d); regenerating", path, len(key))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("creds key at %s unreadable (%s); regenerating", path, e)
+    # Generate fresh
+    key = secrets.token_bytes(32)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(key)
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
+    os.replace(tmp, path)
+    log.info("generated new at-rest credentials key at %s", path)
+    return key
+
+
+def _encrypt_creds(plaintext: bytes) -> dict:
+    """Encrypt with AES-256-GCM. Returns a JSON-safe dict."""
+    key = _get_or_create_creds_key()
+    nonce = secrets.token_bytes(12)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    ct, tag = cipher.encrypt_and_digest(plaintext)
+    return {
+        "v": CREDS_ENV,
+        "alg": "AES-256-GCM",
+        "nonce": base64.b64encode(nonce).decode(),
+        "tag":   base64.b64encode(tag).decode(),
+        "ct":    base64.b64encode(ct).decode(),
+    }
+
+
+def _decrypt_creds(blob: dict) -> Optional[bytes]:
+    """Decrypt a dict produced by _encrypt_creds. Returns None on failure."""
+    try:
+        key = _get_or_create_creds_key()
+        nonce = base64.b64decode(blob["nonce"])
+        tag   = base64.b64decode(blob["tag"])
+        ct    = base64.b64decode(blob["ct"])
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        return cipher.decrypt_and_verify(ct, tag)
+    except Exception as e:
+        log.error("decrypt creds failed: %s", e)
+        return None
 
 
 def keychain_get(service: str, account: str) -> Optional[str]:
@@ -110,32 +185,66 @@ def keychain_set(service: str, account: str, password: str) -> bool:
 
 
 def _load_creds_file() -> Optional[dict]:
+    """Read the on-disk credentials file. Supports both the new encrypted
+    format ({v,alg,nonce,tag,ct}) and the legacy plaintext format
+    ({email,password,region}); the latter is auto-migrated to encrypted on
+    next save."""
     path = _creds_file_path()
     try:
         with open(path) as f:
             data = json.load(f)
-        if isinstance(data, dict) and data.get("email") and data.get("password"):
-            return {
-                "email": str(data["email"]),
-                "password": str(data["password"]),
-                "region": str(data.get("region") or "US").upper(),
-            }
     except FileNotFoundError:
         return None
     except Exception as e:
         log.warning("creds file %s unreadable: %s", path, e)
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    # Encrypted (current) format
+    if "ct" in data and "nonce" in data:
+        pt = _decrypt_creds(data)
+        if pt is None:
+            return None
+        try:
+            inner = json.loads(pt.decode())
+        except Exception as e:
+            log.error("creds payload not valid JSON after decrypt: %s", e)
+            return None
+        if inner.get("email") and inner.get("password"):
+            return {
+                "email": str(inner["email"]),
+                "password": str(inner["password"]),
+                "region": str(inner.get("region") or "US").upper(),
+            }
+        return None
+
+    # Legacy plaintext format
+    if data.get("email") and data.get("password"):
+        log.warning("loaded legacy plaintext creds file at %s; will re-encrypt on next save", path)
+        return {
+            "email": str(data["email"]),
+            "password": str(data["password"]),
+            "region": str(data.get("region") or "US").upper(),
+        }
     return None
 
 
 def _save_creds_file(email: str, password: str, region: str) -> bool:
+    """Encrypt with AES-256-GCM and write to disk atomically."""
     path = _creds_file_path()
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        payload = json.dumps(
+            {"email": email, "password": password, "region": region}
+        ).encode()
+        blob = _encrypt_creds(payload)
         # Write to a temp file first, then rename, so a crash mid-write
         # can't leave a half-written creds file behind.
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"email": email, "password": password, "region": region}, f)
+            json.dump(blob, f)
         try:
             os.chmod(tmp, 0o600)  # rw for owner only
         except Exception:
@@ -144,6 +253,20 @@ def _save_creds_file(email: str, password: str, region: str) -> bool:
         return True
     except Exception as e:
         log.error("failed to write creds file %s: %s", path, e)
+        return False
+
+
+def _delete_creds_file() -> bool:
+    """Remove the on-disk creds. Returns True if file is gone after the call."""
+    path = _creds_file_path()
+    try:
+        os.remove(path)
+        log.info("removed creds file at %s", path)
+        return True
+    except FileNotFoundError:
+        return True
+    except Exception as e:
+        log.error("failed to remove creds file %s: %s", path, e)
         return False
 
 
@@ -178,6 +301,30 @@ def load_cloud_credentials() -> Optional[dict]:
              "cloud poller idle. Sign in via the web UI or set JACKERY_EMAIL / "
              "JACKERY_PASSWORD env vars.")
     return None
+
+
+def clear_cloud_credentials() -> tuple[bool, str]:
+    """Wipe persisted credentials. Refuses if env vars are pinning them.
+    Removes keychain entries on macOS and the encrypted JSON on Linux/NAS."""
+    if os.environ.get("JACKERY_EMAIL") and os.environ.get("JACKERY_PASSWORD"):
+        return False, ("credentials are pinned via JACKERY_EMAIL/JACKERY_PASSWORD "
+                       "environment variables \u2014 unset them or edit your .env to clear")
+    cleared = []
+    # macOS keychain best-effort delete (no-op on Linux)
+    for acct in ("cloud-email", "cloud-password", "cloud-region"):
+        try:
+            r = subprocess.run(
+                ["security", "delete-generic-password", "-s", "jackery-monitor", "-a", acct],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                cleared.append(f"keychain:{acct}")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    # JSON file (Linux / Synology / Docker)
+    if _delete_creds_file():
+        cleared.append(_creds_file_path())
+    return True, ", ".join(cleared) or "nothing to clear"
 
 
 def save_cloud_credentials(email: str, password: str, region: str) -> tuple[bool, str]:
@@ -431,6 +578,35 @@ async def handle(method: str, params: dict) -> dict:
             state.cloud_ts = None
             state.cloud_force_repoll.set()
         return {"ok": True, "device_id": device_id, "name": match["name"]}
+
+    if method == "clear_credentials":
+        ok, where = clear_cloud_credentials()
+        if not ok:
+            return {"ok": False, "error": where}
+        log.info("cleared persisted credentials (%s)", where)
+        # Stop the cloud loop and reset session state.
+        if state.cloud_client:
+            try:
+                await state.cloud_client.aclose()
+            except Exception:
+                pass
+            state.cloud_client = None
+        if state.cloud_task and not state.cloud_task.done():
+            state.cloud_task.cancel()
+            try:
+                await state.cloud_task
+            except Exception:
+                pass
+            state.cloud_task = None
+        state.cloud_creds = None
+        state.cloud_state = "needs-credentials"
+        state.cloud_error = None
+        state.cloud_device = None
+        state.cloud_devices = []
+        state.cloud_device_id = None
+        state.cloud_telemetry = None
+        state.cloud_ts = None
+        return {"ok": True, "cleared": where}
 
     if method == "set_output":
         # Cloud API does not expose port toggles; this build is read-only.

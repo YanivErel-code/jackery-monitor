@@ -25,7 +25,8 @@ services:
       BRIDGE_HOST: 0.0.0.0
       BRIDGE_PORT: "8766"
       CLOUD_POLL_INTERVAL_S: "15"
-      # These come from the .env file next to this compose file.
+      # Leave JACKERY_EMAIL/JACKERY_PASSWORD blank in .env to use the UI sign-in flow
+      # (credentials encrypted to /data). Set them only to pin via env (CI etc).
       JACKERY_EMAIL: "${JACKERY_EMAIL:-}"
       JACKERY_PASSWORD: "${JACKERY_PASSWORD:-}"
       JACKERY_REGION: "${JACKERY_REGION:-US}"

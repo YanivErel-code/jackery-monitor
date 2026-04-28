@@ -348,6 +348,26 @@ async def api_set_credentials(body: dict):
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
+@app.post("/api/auth/forget")
+async def api_clear_credentials():
+    """Wipe stored Jackery cloud credentials. Bridge stops the cloud poller and
+       returns to needs-credentials state. UI will show the sign-in screen again."""
+    clearer = getattr(state.client, "clear_credentials", None)
+    if not clearer:
+        raise HTTPException(501, "This backend does not support clearing credentials")
+    try:
+        result = await clearer()
+    except DeviceClientError as e:
+        # most common: env vars are pinning the creds
+        raise HTTPException(400, str(e))
+    # Clear cached telemetry so the UI immediately reflects logged-out state
+    state.device = None
+    state.last_status = None
+    state.last_update_ts = None
+    await broadcast({"type": "status", "data": serialize_status()})
+    return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
+
+
 @app.post("/api/select_device")
 async def api_select_device(body: dict):
     device_id = (body or {}).get("device_id")
