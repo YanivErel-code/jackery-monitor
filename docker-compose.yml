@@ -40,6 +40,8 @@ services:
       - "8766"
     volumes:
       - jackery-data:/data
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8766)); s.close()"]
       interval: 10s
@@ -66,6 +68,23 @@ services:
       JACKERY_DB: /data/energy.db
     volumes:
       - jackery-data:/data
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  # Auto-update the two services above when a new :latest image is published
+  # to GHCR (by .github/workflows/docker-publish.yml on push to main).
+  # Polls every 60s; only touches containers with the watchtower.enable label.
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "60"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_LABEL_ENABLE: "true"
+    command: --label-enable
 
 volumes:
   jackery-data:
