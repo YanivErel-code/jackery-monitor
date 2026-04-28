@@ -546,11 +546,14 @@ function renderAutomationRules(rules) {
     const errLine = r.last_error
       ? `<div class="ar-meta err">last error: ${safe(r.last_error)}</div>`
       : '';
+    // Make it explicit which Jackery device's SOC drives this rule.
+    const jackeryName = r.jackery_device_name || r.jackery_device_sn || '(any device)';
     return `<div class="auto-rule ${r.enabled ? '' : 'disabled'}" data-id="${r.id}">
       <div>
         <div class="ar-title">${safe(r.name)}</div>
         <div class="ar-cond">
-          when battery <span class="op">${opLabel[r.operator] || r.operator}</span>
+          when <span class="device">${safe(jackeryName)}</span>
+          battery <span class="op">${opLabel[r.operator] || r.operator}</span>
           <span class="val">${r.value}%</span>,
           turn <span class="action ${r.action}">${r.action.toUpperCase()}</span>
           → <span class="device">${safe(r.kasa_alias || r.kasa_host)}</span>
@@ -600,8 +603,8 @@ function renderAutomationRules(rules) {
 function openAutomationEditor(rule) {
   const ed = $('auto-editor');
   if (!ed) return;
-  // Repopulate the device dropdown from the saved-devices list each time
-  // so newly added devices appear without a tab switch.
+  // Repopulate the Kasa device dropdown from the saved-devices list each
+  // time so newly added devices appear without a tab switch.
   const pick = $('auto-kasa-pick');
   const hint = $('auto-kasa-pick-hint');
   if (!_savedKasaDevices.length) {
@@ -616,6 +619,20 @@ function openAutomationEditor(rule) {
       ).join('');
     if (hint) hint.textContent = '';
   }
+  // Populate the Jackery device picker from lastStatus.cloud.devices —
+  // the WS broadcast keeps that current.
+  const jpick = $('auto-jackery');
+  const jdevs = (lastStatus && lastStatus.cloud && lastStatus.cloud.devices) || [];
+  if (!jdevs.length) {
+    jpick.innerHTML = '<option value="">(no Jackery devices yet)</option>';
+    jpick.disabled = true;
+  } else {
+    jpick.disabled = false;
+    jpick.innerHTML = '<option value="">— choose a device —</option>' +
+      jdevs.map((d) =>
+        `<option value="${d.device_sn}">${d.name || d.model_name || d.device_sn}</option>`
+      ).join('');
+  }
   ed.hidden = false;
   $('auto-editor-title').textContent = rule ? 'Edit rule' : 'New rule';
   $('auto-id').value       = rule?.id || '';
@@ -623,6 +640,7 @@ function openAutomationEditor(rule) {
   $('auto-operator').value = rule?.operator || '<';
   $('auto-value').value    = rule?.value ?? 20;
   $('auto-kasa-pick').value = rule?.kasa_host || '';
+  $('auto-jackery').value   = rule?.jackery_device_sn || '';
   $('auto-enabled').checked = rule ? !!rule.enabled : true;
   // Action radios
   const action = rule?.action || 'off';
@@ -645,13 +663,20 @@ document.getElementById('auto-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const action = document.querySelector('input[name="auto-action"]:checked')?.value || 'off';
   const host = $('auto-kasa-pick').value;
+  const jackerySn = $('auto-jackery').value;
   if (!host) {
     alert('Pick a saved Kasa device first.');
+    return;
+  }
+  if (!jackerySn) {
+    alert('Pick which Jackery device this rule should watch.');
     return;
   }
   // Look up the alias from the saved-devices cache so the rule list shows
   // the friendly name even if the device record changes later.
   const dev = _savedKasaDevices.find((d) => d.host === host);
+  const jdev = ((lastStatus && lastStatus.cloud && lastStatus.cloud.devices) || [])
+    .find((d) => d.device_sn === jackerySn);
   const body = {
     id: $('auto-id').value || undefined,
     name: $('auto-name').value.trim(),
@@ -660,6 +685,8 @@ document.getElementById('auto-form')?.addEventListener('submit', async (e) => {
     action,
     kasa_host: host,
     kasa_alias: dev?.alias || host,
+    jackery_device_sn:   jackerySn,
+    jackery_device_name: jdev?.name || jdev?.model_name || jackerySn,
     enabled: $('auto-enabled').checked,
     trigger: 'battery_percent',
   };

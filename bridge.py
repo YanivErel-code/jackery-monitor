@@ -397,11 +397,17 @@ class State:
         self.cloud_creds: Optional[dict] = None
         self.cloud_state: str = "needs-credentials"  # needs-credentials | logging-in | connected | error
         self.cloud_device: Optional[dict] = None
+        # ---- per-device telemetry (keyed by device_sn) ----
+        # We poll EVERY Jackery device on the account so automation rules can
+        # target a specific device, not just whichever the dashboard happens
+        # to be viewing. The "active" device (cloud_device_id) is what the
+        # live tab renders; the others poll quietly in the background.
+        # cloud_props_raw / cloud_telemetry / cloud_ts below are convenience
+        # mirrors of the active device for existing callers.
+        self.props_raw_by_sn: dict[str, dict] = {}
+        self.telemetry_by_sn: dict[str, dict] = {}
+        self.ts_by_sn: dict[str, float] = {}
         self.cloud_telemetry: Optional[dict] = None
-        # Raw property dict accumulated from BOTH HTTP polls (full snapshot)
-        # and MQTT pushes (incremental deltas). Telemetry is rebuilt from
-        # this on every update so the UI sees real-time MQTT pushes blended
-        # seamlessly with HTTP poll backstops.
         self.cloud_props_raw: dict = {}
         self.cloud_ts: Optional[float] = None
         self.cloud_error: Optional[str] = None
@@ -465,12 +471,8 @@ async def cloud_loop() -> None:
     async def _on_property_push(body: dict, device_sn: Optional[str] = None):
         if not isinstance(body, dict) or not body:
             return
-        # The MQTT push topic is per-userId, not per-device. Multiple devices
-        # on the same account (e.g. 5000 Plus + HomePower 3000) all push to
-        # the same topic. Drop pushes for the device the user isn't viewing.
-        active_sn = (state.cloud_device or {}).get("device_sn")
-        if device_sn and active_sn and device_sn != active_sn:
-            return
+        if not device_sn:
+            return  # we route by device_sn now; can't apply a push without it
         props = {k: v for k, v in body.items() if k not in _IGNORE_PUSH_KEYS}
         if not props:
             return  # broker ack only, no actual property updates
@@ -482,13 +484,23 @@ async def cloud_loop() -> None:
             _seen_push_keys.update(new_keys)
             event("info", "mqtt", f"New MQTT key(s) discovered: {', '.join(new_keys)}",
                   new_keys=new_keys, total_seen=len(_seen_push_keys))
-        state.cloud_props_raw.update(props)
-        state.cloud_telemetry = cloud_props_to_telemetry(state.cloud_props_raw)
-        state.cloud_ts = time.time()
+        # Update the per-device dicts. Active-device convenience mirrors get
+        # written by the cloud_loop step that runs after this returns.
+        raw = state.props_raw_by_sn.setdefault(device_sn, {})
+        raw.update(props)
+        state.telemetry_by_sn[device_sn] = cloud_props_to_telemetry(raw)
+        state.ts_by_sn[device_sn] = time.time()
+        # Mirror onto the active-device fields if this push is for the
+        # device the dashboard is viewing.
+        active_sn = (state.cloud_device or {}).get("device_sn")
+        if device_sn == active_sn:
+            state.cloud_props_raw = raw
+            state.cloud_telemetry = state.telemetry_by_sn[device_sn]
+            state.cloud_ts = state.ts_by_sn[device_sn]
         if state.cloud_state not in ("paused", "contested"):
             state.cloud_state = "connected"
-        event("info", "mqtt", f"Realtime update ({len(props)} keys)",
-              keys=sorted(props.keys())[:8])
+        event("info", "mqtt", f"Realtime update ({len(props)} keys) [{device_sn[-6:]}]",
+              keys=sorted(props.keys())[:8], device_sn=device_sn)
 
     realtime_subscribed = False
     while True:
@@ -546,14 +558,42 @@ async def cloud_loop() -> None:
                 log.info("Cloud device active: %s (model %s); %d total on account",
                          sel.name, sel.model_code, len(devs))
 
-            props = await c.fetch_properties(state.cloud_device_id)
-            if props:
-                # Merge into accumulated raw state (vs replace) so a sparse
-                # MQTT push between this poll and the next doesn't get its
-                # keys overwritten by stale-but-fuller HTTP data.
-                state.cloud_props_raw.update(props)
-                state.cloud_telemetry = cloud_props_to_telemetry(state.cloud_props_raw)
-                state.cloud_ts = time.time()
+            # Poll EVERY device on the account. Active device first (the one
+            # the dashboard is currently viewing) so it gets fresh data with
+            # minimum latency; the others follow in the same iteration.
+            now_ts = time.time()
+            active_sn = (state.cloud_device or {}).get("device_sn")
+            ordered_devs = sorted(
+                state.cloud_devices,
+                key=lambda d: 0 if d.get("device_sn") == active_sn else 1,
+            )
+            any_polled = False
+            for dev in ordered_devs:
+                dev_id = dev.get("device_id")
+                dev_sn = dev.get("device_sn")
+                if not dev_id or not dev_sn:
+                    continue
+                try:
+                    props = await c.fetch_properties(dev_id)
+                except SessionContestedError:
+                    raise  # let outer handler trigger cooldown
+                except Exception as e:
+                    log.warning("fetch_properties(%s) failed: %s", dev_sn, e)
+                    continue
+                if not props:
+                    continue
+                raw = state.props_raw_by_sn.setdefault(dev_sn, {})
+                raw.update(props)
+                state.telemetry_by_sn[dev_sn] = cloud_props_to_telemetry(raw)
+                state.ts_by_sn[dev_sn] = now_ts
+                any_polled = True
+            # Mirror the active device onto the legacy single-device fields
+            # so existing merged_poll consumers see no change in shape.
+            if active_sn and active_sn in state.telemetry_by_sn:
+                state.cloud_props_raw = state.props_raw_by_sn[active_sn]
+                state.cloud_telemetry = state.telemetry_by_sn[active_sn]
+                state.cloud_ts = state.ts_by_sn[active_sn]
+            if any_polled:
                 state.cloud_state = "connected"
                 state.cloud_error = None
             # Subscribe to MQTT pushes once per cloud_loop lifetime, after
@@ -611,6 +651,15 @@ def merged_poll() -> dict:
 
     pause_remaining = max(0.0, state.pause_until - now) if state.pause_until else 0.0
     contested_remaining = max(0.0, state.contested_until - now) if state.contested_until else 0.0
+    # Build a per-device telemetry dict so the server can evaluate automation
+    # rules against any device, not just the active one.
+    devices_telemetry = {
+        sn: {
+            "telemetry": state.telemetry_by_sn.get(sn),
+            "ts": state.ts_by_sn.get(sn),
+        }
+        for sn in state.telemetry_by_sn
+    }
     return {
         "telemetry": tele,
         "source": src,
@@ -622,6 +671,7 @@ def merged_poll() -> dict:
             "error": state.cloud_error,
             "device": state.cloud_device,
             "devices": list(state.cloud_devices),
+            "devices_telemetry": devices_telemetry,
             "selected_device_id": state.cloud_device_id,
             "pause_until": state.pause_until or None,
             "pause_remaining_s": round(pause_remaining, 1) if pause_remaining else None,
