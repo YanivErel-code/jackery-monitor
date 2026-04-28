@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import kasa_client
+import kasa_creds
 import settings as user_settings
 from automation import AutomationEngine, AutomationError
 from kasa_devices import KasaRegistry
@@ -460,6 +461,37 @@ def api_automation_upsert(body: dict):
 def api_automation_delete(rule_id: str):
     deleted = state.automation.delete(rule_id)
     return {"ok": True, "deleted": deleted}
+
+
+@app.get("/api/kasa/credentials")
+def api_kasa_creds_status():
+    """Tell the UI whether Kasa cloud credentials are saved (without
+       returning the password). Used to decide whether to show the
+       "credentials needed" banner on newer-device test failures."""
+    creds = kasa_creds.load()
+    return {
+        "has_credentials": creds is not None,
+        "email": creds.get("email") if creds else None,
+    }
+
+
+@app.post("/api/kasa/credentials")
+def api_kasa_creds_save(body: dict):
+    """Persist Kasa cloud-account email + password (encrypted at rest).
+       Required for newer Kasa SMART devices (KP125M, EP25, KP405, etc.)."""
+    email = ((body or {}).get("email") or "").strip()
+    password = ((body or {}).get("password") or "")
+    if not email or not password:
+        raise HTTPException(400, "email and password are required")
+    if not kasa_creds.save(email, password):
+        raise HTTPException(500, "failed to save credentials")
+    return {"ok": True, "email": email}
+
+
+@app.delete("/api/kasa/credentials")
+def api_kasa_creds_clear():
+    kasa_creds.clear()
+    return {"ok": True}
 
 
 @app.get("/api/kasa/devices")

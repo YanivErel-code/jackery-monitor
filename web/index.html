@@ -283,6 +283,34 @@
     <!-- ============== AUTOMATION TAB ============== -->
     <section id="tab-automation" class="tab-panel" hidden>
 
+      <!-- KASA ACCOUNT section: cloud credentials for newer SMART devices -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Kasa account</h2>
+          <span id="kasa-creds-status" class="hint">—</span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Newer Kasa "SMART" devices (KP125M, EP25, KP405, etc.) require your Kasa cloud account credentials even for local control. Older devices (KP115, HS103) ignore them. Stored encrypted at rest in the data volume.
+        </p>
+        <form id="kasa-creds-form">
+          <div class="auto-form-grid">
+            <label class="auto-field">
+              <span class="auto-label">Email</span>
+              <input id="kasa-creds-email" type="email" required autocomplete="username" />
+            </label>
+            <label class="auto-field">
+              <span class="auto-label">Password</span>
+              <input id="kasa-creds-password" type="password" required autocomplete="current-password" />
+            </label>
+            <span id="kasa-creds-msg" class="hint" hidden></span>
+          </div>
+          <div style="margin-top:14px; display:flex; gap:8px">
+            <button class="btn btn-primary" type="submit">Save credentials</button>
+            <button id="kasa-creds-clear" class="btn btn-ghost" type="button">Forget</button>
+          </div>
+        </form>
+      </section>
+
       <!-- DEVICES section: add, test, save Kasa plugs separately from rules. -->
       <section class="card">
         <div class="card-header">
