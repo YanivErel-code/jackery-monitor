@@ -1651,23 +1651,22 @@ window.addEventListener('resize', () => {
 async function fetchForecast() {
   const needsConfig = $('forecast-needs-config');
   const content     = $('forecast-content');
+  const stats       = $('forecast-stats');
+  const showOnlyNeedsConfig = (msg) => {
+    needsConfig.hidden = false;
+    content.hidden = true;
+    stats.hidden = true;
+    if (msg) needsConfig.querySelector('h2').textContent = msg;
+  };
   try {
     const r = await fetch('/api/forecast');
-    if (!r.ok) return;
+    if (!r.ok) { showOnlyNeedsConfig(); return; }
     const j = await r.json();
-    if (!j.configured) {
-      needsConfig.hidden = false;
-      content.hidden = true;
-      return;
-    }
-    if (j.error) {
-      needsConfig.hidden = false;
-      content.hidden = true;
-      needsConfig.querySelector('h2').textContent = j.error;
-      return;
-    }
+    if (!j.configured) { showOnlyNeedsConfig(); return; }
+    if (j.error)       { showOnlyNeedsConfig(j.error); return; }
     needsConfig.hidden = true;
     content.hidden = false;
+    stats.hidden = false;
     forecastCache = j;
     set('forecast-capacity', j.capacity_wh);
     set('forecast-coeff',    j.solar_coefficient);
