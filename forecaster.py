@@ -113,24 +113,37 @@ def fit_solar_coefficient(
 def fit_load_profile(
     energy_history: list[dict[str, Any]],
 ) -> dict[tuple[int, int], float]:
-    """Average output_w by (hour-of-day, weekend-flag) over the input history.
+    """Median output_w by (hour-of-day, weekend-flag), with outlier capping.
 
-    Returns dict keyed by (hour 0-23, weekend 0|1) → average watts. Hours
-    not present in the history are absent — the simulator falls back to the
-    overall average then.
+    Clips each sample at the global 95th percentile *before* bucketing so a
+    single heavy-load moment (microwave, dryer, EV) doesn't poison the
+    forecast for that hour-of-day forever. Then median per bucket — also
+    robust to single spikes when the bucket has just a couple samples.
+
+    Returns dict keyed by (hour 0-23, weekend 0|1) → watts. Hours not
+    present are absent; the simulator falls back to the overall average.
     """
-    sums: dict[tuple[int, int], float] = {}
-    counts: dict[tuple[int, int], int] = {}
+    all_vals = sorted(
+        float(r["output_w"]) for r in energy_history
+        if r.get("output_w") is not None
+    )
+    if not all_vals:
+        return {}
+    # 95th-percentile cap. With <20 samples, take the max — there's no
+    # meaningful percentile yet.
+    cap = all_vals[min(len(all_vals) - 1, int(len(all_vals) * 0.95))]
+
+    buckets: dict[tuple[int, int], list[float]] = {}
     for row in energy_history:
         ts = row.get("ts")
         out_w = row.get("output_w")
         if ts is None or out_w is None:
             continue
+        v = min(float(out_w), cap)
         d = datetime.fromtimestamp(int(ts))
         key = (d.hour, 1 if d.weekday() >= 5 else 0)
-        sums[key] = sums.get(key, 0.0) + float(out_w)
-        counts[key] = counts.get(key, 0) + 1
-    return {k: sums[k] / counts[k] for k in sums}
+        buckets.setdefault(key, []).append(v)
+    return {k: sorted(v)[len(v) // 2] for k, v in buckets.items()}
 
 
 def expected_load_w(
