@@ -981,6 +981,13 @@ function renderDevicePicker(devices, selectedId) {
 // ============================================================
 // RECONNECT
 // ============================================================
+$('logout')?.addEventListener('click', async () => {
+  if (!confirm('Sign out of the Jackery Monitor?')) return;
+  try { await fetch('/api/auth/logout', { method: 'POST' }); }
+  catch (_e) {}
+  window.location.replace('/login');
+});
+
 $('reconnect')?.addEventListener('click', async () => {
   $('reconnect').disabled = true;
   try { await fetch('/api/reconnect', { method: 'POST' }); }
