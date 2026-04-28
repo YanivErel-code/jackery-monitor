@@ -44,7 +44,11 @@ def _credentials():
         from kasa import Credentials  # type: ignore
     except ImportError:
         return None
-    return Credentials(saved["email"], saved["password"])
+    # Kasa cloud expects emails lowercased and trimmed — case mismatches are
+    # the #1 reason for "challenge did not match" errors with valid creds.
+    email = (saved.get("email") or "").strip().lower()
+    password = saved.get("password") or ""
+    return Credentials(username=email, password=password)
 
 
 async def discover(timeout: float = 3.0) -> list[dict]:
