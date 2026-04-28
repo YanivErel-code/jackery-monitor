@@ -44,9 +44,11 @@ def _credentials():
         from kasa import Credentials  # type: ignore
     except ImportError:
         return None
-    # Kasa cloud expects emails lowercased and trimmed — case mismatches are
-    # the #1 reason for "challenge did not match" errors with valid creds.
-    email = (saved.get("email") or "").strip().lower()
+    # Trim whitespace from copy-paste, but DON'T lowercase the email — the
+    # Kasa cloud's KLAP challenge-hash uses the email exactly as registered,
+    # and we don't know what case the user signed up with. Password is case-
+    # sensitive too, untouched.
+    email = (saved.get("email") or "").strip()
     password = saved.get("password") or ""
     return Credentials(username=email, password=password)
 
