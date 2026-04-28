@@ -33,12 +33,12 @@ SETTINGS_PATH = os.environ.get("JACKERY_SETTINGS_FILE", "/data/settings.json")
 SCHEMA: dict[str, dict[str, Any]] = {
     "poll_interval_s": {
         "env": "POLL_INTERVAL_S",
-        "default": 5,
+        "default": 2,
         "type": "int",
         "min": 1,
         "max": 300,
         "label": "Server poll interval (s)",
-        "hint": "How often the dashboard polls the bridge. The bridge has MQTT push from the device, so 1-5s is fine.",
+        "hint": "How often the dashboard polls the bridge. The bridge has MQTT push from the device, so 1-2s is fine for snappy UI.",
     },
     "cloud_poll_interval_s": {
         "env": "CLOUD_POLL_INTERVAL_S",

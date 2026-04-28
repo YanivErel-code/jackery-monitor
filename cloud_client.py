@@ -388,9 +388,14 @@ class JackeryCloudClient:
             body = payload.get("body")
             if not isinstance(body, dict):
                 return
-            # paho callbacks fire on a network thread; bounce onto asyncio.
+            # The push topic is per-userId not per-deviceSn, so a single
+            # account with multiple devices (e.g. Explorer 5000 Plus +
+            # HomePower 3000) gets cross-talk. Pass deviceSn to the callback
+            # so the bridge can filter to the active device.
+            device_sn = payload.get("deviceSn")
             try:
-                asyncio.run_coroutine_threadsafe(on_property_change(body), loop)
+                asyncio.run_coroutine_threadsafe(
+                    on_property_change(body, device_sn), loop)
             except RuntimeError:
                 pass  # loop shutting down
 

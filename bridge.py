@@ -462,8 +462,14 @@ async def cloud_loop() -> None:
     # if a device firmware update starts pushing per-PV solar fields).
     _seen_push_keys: set[str] = set()
 
-    async def _on_property_push(body: dict):
+    async def _on_property_push(body: dict, device_sn: Optional[str] = None):
         if not isinstance(body, dict) or not body:
+            return
+        # The MQTT push topic is per-userId, not per-device. Multiple devices
+        # on the same account (e.g. 5000 Plus + HomePower 3000) all push to
+        # the same topic. Drop pushes for the device the user isn't viewing.
+        active_sn = (state.cloud_device or {}).get("device_sn")
+        if device_sn and active_sn and device_sn != active_sn:
             return
         props = {k: v for k, v in body.items() if k not in _IGNORE_PUSH_KEYS}
         if not props:
