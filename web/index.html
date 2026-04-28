@@ -80,6 +80,7 @@
     <nav class="tabs">
       <button class="tab on" data-tab="live">Live</button>
       <button class="tab" data-tab="energy">Energy</button>
+      <button class="tab" data-tab="forecast">Forecast</button>
       <button class="tab" data-tab="device">Device</button>
       <button class="tab" data-tab="automation">Automation</button>
       <button class="tab" data-tab="logs">Logs</button>
@@ -232,6 +233,45 @@
           <tbody id="energy-devices-body"></tbody>
         </table>
       </section>
+    </section>
+
+    <!-- ============== FORECAST TAB ============== -->
+    <section id="tab-forecast" class="tab-panel" hidden>
+      <section id="forecast-needs-config" class="card" hidden>
+        <h2>Set your location to enable forecasts</h2>
+        <p class="hint">The forecaster pulls solar irradiance + cloud cover from Open-Meteo (free, no API key) and combines it with your historical solar production to predict the next ~5 days of battery state of charge. Add latitude and longitude in the Settings tab to turn it on.</p>
+      </section>
+
+      <section id="forecast-content" class="card" hidden>
+        <div class="card-header">
+          <h2>State of charge — next 5 days</h2>
+          <div class="forecast-meta">
+            <span class="hint" id="forecast-fit">—</span>
+          </div>
+        </div>
+        <canvas id="chart-forecast" class="chart chart-tall"></canvas>
+        <div class="legend forecast-legend">
+          <span><i class="lg-bat"></i> Predicted SOC</span>
+          <span><i class="lg-out"></i> Expected load</span>
+          <span><i class="lg-in"></i> Expected solar</span>
+        </div>
+      </section>
+
+      <div class="grid">
+        <section class="card">
+          <div class="card-eyebrow"><span>Battery capacity</span></div>
+          <div class="kpi-value"><span id="forecast-capacity">—</span><small>Wh</small></div>
+        </section>
+        <section class="card">
+          <div class="card-eyebrow"><span>Solar coefficient (W per W/m²)</span></div>
+          <div class="kpi-value"><span id="forecast-coeff">—</span></div>
+          <div class="kpi-sub" id="forecast-coeff-sub">—</div>
+        </section>
+        <section class="card">
+          <div class="card-eyebrow"><span>Avg load</span></div>
+          <div class="kpi-value"><span id="forecast-avg-load">—</span><small>W</small></div>
+        </section>
+      </div>
     </section>
 
     <!-- ============== DEVICE TAB ============== -->

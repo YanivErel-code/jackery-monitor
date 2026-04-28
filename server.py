@@ -35,9 +35,11 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import auth
+import forecaster
 import kasa_client
 import kasa_creds
 import settings as user_settings
+import weather_client
 from automation import AutomationEngine, AutomationError
 from device_client import DeviceClient, DeviceClientError, DeviceInfo, make_client
 from energy_db import EnergyDB
@@ -186,6 +188,7 @@ async def poll_loop() -> None:
                         float(status_dict.get("input_power_w") or 0),
                         float(status_dict.get("output_power_w") or 0),
                         int(status_dict.get("battery_percent") or 0),
+                        solar_w=float(status_dict.get("solar_input_w") or 0),
                     )
 
                     # Hydrate the live chart from the energy DB on the first
@@ -523,6 +526,53 @@ def api_energy_history(hours: int = 24, device_sn: str | None = None):
 def api_energy_devices():
     """All devices ever recorded, with their totals (for cross-device comparison)."""
     return {"devices": state.energy.all_totals()}
+
+
+@app.get("/api/forecast")
+async def api_forecast(device_sn: str | None = None):
+    """SOC forecast for the next ~5 days based on weather + per-device history.
+
+    Returns the simulated SOC curve plus the fitted model coefficients so the
+    UI can show how confident the prediction is."""
+    lat = float(user_settings.get("latitude") or 0.0)
+    lon = float(user_settings.get("longitude") or 0.0)
+    if lat == 0 and lon == 0:
+        return {"error": "lat/lon not configured", "configured": False}
+
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"error": "no active device", "configured": True}
+
+    # Starting SOC: the latest battery reading we have. Falls back to 50% if
+    # the bridge hasn't returned a fresh poll yet (the simulation still works,
+    # the curve will just be offset by the SOC error).
+    starting_soc = 50.0
+    if state.last_status and state.last_status.get("battery_percent") is not None:
+        starting_soc = float(state.last_status["battery_percent"])
+
+    model_code = getattr(state.device, "model_code", None) if state.device else None
+    capacity = forecaster.battery_capacity_wh(model_code)
+
+    # 14 days of hourly-bucketed history is plenty for both the regression and
+    # the load profile.
+    energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+    weather = await weather_client.fetch_irradiance(lat, lon)
+    if weather.get("error"):
+        return {"error": f"weather fetch failed: {weather['error']}", "configured": True}
+
+    result = forecaster.build_forecast(
+        energy_history=energy_hist,
+        weather_hourly=weather["hourly"],
+        starting_soc_pct=starting_soc,
+        capacity_wh=capacity,
+    )
+    return {
+        "device_sn": device_sn,
+        "low_battery_threshold": user_settings.get("low_battery_threshold"),
+        **result,
+        "configured": True,
+    }
 
 
 @app.get("/api/auth/status")
