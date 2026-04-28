@@ -425,6 +425,45 @@ main {
 .settings-control input[type="number"]:focus { outline: 1px solid var(--accent); }
 
 /* ============== Automation tab ============== */
+.kasa-list {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.kasa-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  align-items: center;
+}
+.kasa-row .kr-state {
+  width: 44px; padding: 3px 8px;
+  border-radius: 999px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  color: var(--text-mute);
+  background: rgba(0,0,0,.2);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.kasa-row .kr-state.on { color: var(--accent); border-color: rgba(74,222,128,.3); background: rgba(74,222,128,.08); }
+.kasa-row .kr-state.off { color: var(--accent-2); border-color: rgba(56,189,248,.3); background: rgba(56,189,248,.08); }
+.kasa-row .kr-state.offline { color: var(--text-mute); }
+.kasa-row .kr-name {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.kasa-row .kr-alias { font-weight: 500; color: var(--text); font-size: 14px; }
+.kasa-row .kr-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+.kasa-row .kr-meta .host { color: var(--text-mute); }
+.kasa-row-actions { display: flex; gap: 6px; }
+.kasa-row-actions button { font-size: 12px; padding: 4px 10px; }
+
+
 .auto-toolbar {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
   margin-bottom: 14px;

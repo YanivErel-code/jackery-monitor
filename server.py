@@ -37,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 import kasa_client
 import settings as user_settings
 from automation import AutomationEngine, AutomationError
+from kasa_devices import KasaRegistry
 from device_client import DeviceClient, DeviceInfo, DeviceClientError, make_client
 from energy_db import EnergyDB
 
@@ -81,6 +82,10 @@ class AppState:
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
         self.automation: AutomationEngine = AutomationEngine()
+        # Saved Kasa device registry — devices the user has manually added &
+        # tested. Rule editor picks from this list instead of asking for an
+        # IP each time.
+        self.kasa: KasaRegistry = KasaRegistry()
 
     @property
     def backend(self) -> str:
@@ -490,6 +495,62 @@ async def api_kasa_status(host: str):
         return {"ok": True, **(await kasa_client.status(host))}
     except kasa_client.KasaError as e:
         raise HTTPException(400, str(e))
+
+
+# ---- saved Kasa device registry (separate from rules) ----
+@app.get("/api/kasa/saved")
+async def api_kasa_saved_list(refresh: bool = False):
+    """Return all saved Kasa devices. If `refresh=true`, also probe each
+       one in parallel so the UI can display current on/off state."""
+    devices = state.kasa.list_devices()
+    if not refresh or not devices:
+        return {"devices": [{**d, "is_on": None, "online": None} for d in devices]}
+
+    async def _probe(d):
+        try:
+            info = await kasa_client.status(d["host"])
+            return {**d, "is_on": info.get("is_on"),
+                    "model": d.get("model") or info.get("model"),
+                    "alias": d.get("alias") or info.get("alias"),
+                    "online": True}
+        except Exception:
+            return {**d, "is_on": None, "online": False}
+
+    enriched = await asyncio.gather(*[_probe(d) for d in devices])
+    return {"devices": list(enriched)}
+
+
+@app.post("/api/kasa/saved")
+async def api_kasa_saved_upsert(body: dict):
+    """Add or update a saved Kasa device. We probe the device first so the
+       saved record always has accurate model/alias and `last_tested`
+       reflects a real successful contact."""
+    host = ((body or {}).get("host") or "").strip()
+    requested_alias = ((body or {}).get("alias") or "").strip()
+    if not host:
+        raise HTTPException(400, "host required")
+    try:
+        info = await kasa_client.status(host)
+    except kasa_client.KasaError as e:
+        raise HTTPException(400, str(e))
+    saved = state.kasa.upsert(
+        host=host,
+        alias=requested_alias or info.get("alias") or "",
+        model=info.get("model"),
+        type_=info.get("type"),
+        mark_tested=True,
+    )
+    return {"ok": True, "device": {**saved, "is_on": info.get("is_on")}}
+
+
+@app.delete("/api/kasa/saved/{host:path}")
+async def api_kasa_saved_delete(host: str):
+    """Delete a saved device. Doesn't touch any rule that references it —
+       those rules will start failing on next evaluation, visible in Logs."""
+    deleted = state.kasa.delete(host)
+    in_use = [r for r in state.automation.list_rules() if r.get("kasa_host") == host]
+    return {"ok": True, "deleted": deleted,
+            "rules_referencing": [r["id"] for r in in_use]}
 
 
 @app.get("/api/events")
