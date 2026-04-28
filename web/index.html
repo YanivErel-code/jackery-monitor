@@ -118,17 +118,17 @@
         </section>
       </div>
 
-      <!-- Outputs (read-only — cloud API does not expose toggles) -->
+      <!-- Outputs — click to toggle (control via cloud MQTT) -->
       <section class="card">
         <div class="card-header">
           <h2>Outputs</h2>
-          <span class="hint">Read-only</span>
+          <span class="hint">Click to toggle</span>
         </div>
         <div class="switches">
-          <div class="switch" data-port="ac"><span class="sw-label">AC</span><span class="sw-state" id="sw-ac">—</span></div>
-          <div class="switch" data-port="dc"><span class="sw-label">DC</span><span class="sw-state" id="sw-dc">—</span></div>
-          <div class="switch" data-port="usb"><span class="sw-label">USB</span><span class="sw-state" id="sw-usb">—</span></div>
-          <div class="switch" data-port="car"><span class="sw-label">Car</span><span class="sw-state" id="sw-car">—</span></div>
+          <button class="switch" data-port="ac" type="button"><span class="sw-label">AC</span><span class="sw-state" id="sw-ac">—</span></button>
+          <button class="switch" data-port="dc" type="button"><span class="sw-label">DC</span><span class="sw-state" id="sw-dc">—</span></button>
+          <button class="switch" data-port="usb" type="button"><span class="sw-label">USB</span><span class="sw-state" id="sw-usb">—</span></button>
+          <button class="switch" data-port="car" type="button"><span class="sw-label">Car</span><span class="sw-state" id="sw-car">—</span></button>
         </div>
       </section>
 

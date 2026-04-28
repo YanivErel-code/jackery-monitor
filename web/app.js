@@ -166,6 +166,51 @@ $('pause-poll')?.addEventListener('click', async () => {
 // 1-second countdown tick so the "x:yy left" label updates live
 setInterval(renderPausePill, 1000);
 
+// ============================================================
+// OUTPUT TOGGLES — click an AC/DC/USB/Car card to toggle it
+// ============================================================
+document.querySelectorAll('.switch').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const port = btn.dataset.port;
+    if (!port) return;
+    const lbl = $(`sw-${port}`);
+    const currentState = (lbl?.textContent || '').trim();
+    if (currentState !== 'ON' && currentState !== 'OFF') {
+      return;  // unknown state — don't risk a blind toggle
+    }
+    const turnOn = currentState === 'OFF';
+    // AC has highest blast radius (powering whatever's plugged in) — confirm
+    // before turning it OFF. Turning ON is fine to do without confirm.
+    if (port === 'ac' && !turnOn) {
+      if (!confirm('Turn AC output OFF? Anything plugged in will lose power.')) return;
+    }
+    btn.disabled = true;
+    btn.classList.add('pending');
+    const original = lbl.textContent;
+    lbl.textContent = '…';
+    try {
+      const r = await fetch('/api/set_output', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ port, on: turnOn }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+      }
+      // Optimistically update; the next telemetry poll will confirm/reconcile.
+      lbl.textContent = turnOn ? 'ON' : 'OFF';
+      btn.classList.toggle('on', turnOn);
+    } catch (e) {
+      lbl.textContent = original;
+      alert(`Failed to toggle ${port.toUpperCase()}: ${e.message || e}`);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('pending');
+    }
+  });
+});
+
 $('forget-creds')?.addEventListener('click', async () => {
   const btn = $('forget-creds');
   const msg = $('forget-msg');

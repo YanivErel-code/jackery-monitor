@@ -682,8 +682,28 @@ async def handle(method: str, params: dict) -> dict:
         return {"ok": True, "was_paused": was_paused}
 
     if method == "set_output":
-        # Cloud API does not expose port toggles; this build is read-only.
-        return {"ok": False, "error": "switch toggles are not supported in cloud-only mode"}
+        # Output toggles go over MQTT (emqx.jackeryapp.com). The cloud_client
+        # publishes the command and waits for the broker PUBACK; the actual
+        # property change shows up on the next /device/property poll.
+        port = (params.get("port") or "").lower()
+        on = bool(params.get("on"))
+        if port not in ("ac", "dc", "usb", "car"):
+            return {"ok": False, "error": f"unknown port: {port!r}"}
+        if not state.cloud_client:
+            return {"ok": False, "error": "cloud client not initialised — sign in first"}
+        device = state.cloud_device or {}
+        device_sn = device.get("device_sn")
+        if not device_sn:
+            return {"ok": False, "error": "no device_sn — wait for first poll"}
+        try:
+            ack = await state.cloud_client.publish_command(device_sn, port, on)
+        except Exception as e:
+            log.warning("set_output(%s, %s) failed: %s", port, on, e)
+            return {"ok": False, "error": str(e)}
+        # Force a quick re-poll so the UI reflects the new state without
+        # waiting for the next 15s poll cycle.
+        state.cloud_force_repoll.set()
+        return {"ok": True, **ack}
 
     if method == "disconnect":
         if state.cloud_client:

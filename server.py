@@ -368,6 +368,24 @@ async def api_clear_credentials():
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
+@app.post("/api/set_output")
+async def api_set_output(body: dict):
+    """Toggle one of the device's outputs (AC/DC/USB/Car) via the cloud MQTT
+       channel. Body: {port: 'ac'|'dc'|'usb'|'car', on: bool}."""
+    port = (body or {}).get("port")
+    on = bool((body or {}).get("on"))
+    if port not in ("ac", "dc", "usb", "car"):
+        raise HTTPException(400, "port must be one of: ac, dc, usb, car")
+    setter = getattr(state.client, "set_output", None)
+    if not setter:
+        raise HTTPException(501, "Backend does not support output toggles")
+    try:
+        await setter(port, on)
+    except DeviceClientError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "port": port, "on": on}
+
+
 @app.post("/api/pause_polling")
 async def api_pause_polling(body: Optional[dict] = None):
     """Pause the cloud poller so the user can use the phone app without the
