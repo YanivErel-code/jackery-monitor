@@ -378,22 +378,22 @@ function applyStatus(s) {
   if (Math.abs(netW) < IDLE_W) {
     timeLabel = 'Idle';
   } else if (netW > 0) {
-    // Charging
+    // Charging — show ETA to full so the label is never ambiguous
     if (ttFull > 0) {
-      timeLabel = `${fmt(ttFull, 1)} h to full`;
+      timeLabel = `${fmt(ttFull, 1)} h until full`;
     } else {
       const wh = ((100 - soc) / 100) * PACK_KWH * 1000;
       const eta = wh / netW;
-      timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h to full` : 'Charging…';
+      timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h until full` : 'Charging…';
     }
   } else {
-    // Discharging
+    // Discharging — show ETA to empty
     if (ttEmpty > 0) {
-      timeLabel = `${fmt(ttEmpty, 1)} h remaining`;
+      timeLabel = `${fmt(ttEmpty, 1)} h until empty`;
     } else {
       const wh = (soc / 100) * PACK_KWH * 1000;
       const eta = wh / Math.abs(netW);
-      timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h remaining` : 'Discharging…';
+      timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h until empty` : 'Discharging…';
     }
   }
   $('battery-time').textContent = timeLabel;
@@ -401,6 +401,8 @@ function applyStatus(s) {
 
   $('output-w').textContent = fmt(t.output_power_w);
   $('input-w').textContent  = fmt(t.input_power_w);
+  $('input-grid-w').textContent  = fmt(t.ac_input_w ?? 0);
+  $('input-solar-w').textContent = fmt(t.solar_input_w ?? 0);
   if (t.ac_output_v != null) $('ac-out-v').textContent  = fmt(t.ac_output_v, 0);
   if (t.ac_output_hz != null)        $('ac-out-hz').textContent = fmt(t.ac_output_hz, 0);
 

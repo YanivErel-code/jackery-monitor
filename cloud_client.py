@@ -407,12 +407,26 @@ def cloud_props_to_telemetry(p: dict[str, Any]) -> dict[str, Any]:
     acohz = f("acohz")
     # Cloud sends acov in deci-volts (e.g. 2401 -> 240.1V) but acohz already
     # in whole Hz (e.g. 60 -> 60Hz). BLE protocol uses deci-Hz; cloud differs.
+    # Per the reverse-engineered protocol (jlopez/socketry/docs/protocol.md):
+    #   it / ot  are both decihours (raw 22 → 2.2h, 999 → 99.9h sentinel)
+    #   acip     is the AC (grid) input power in watts
+    #   cip      is the car/12V input power in watts
+    #   ip       is the *total* input — solar = ip - acip - cip
+    grid_w = i("acip")
+    car_in_w = i("cip")
+    total_in_w = i("ip")
+    solar_w = max(0, total_in_w - grid_w - car_in_w)
+    # 99.9h (raw 999) is the protocol's "not applicable" sentinel; treat as 0.
+    raw_it = i("it")
+    raw_ot = i("ot")
     return {
         "battery_percent": i("rb"),
         "battery_temp_c": round(f("bt") / 10.0, 1),
-        "input_power_w": i("ip"),
+        "input_power_w": total_in_w,
         "output_power_w": i("op"),
-        "ac_input_w": i("acip"),
+        "ac_input_w": grid_w,           # grid
+        "car_input_w": car_in_w,        # 12V cigarette
+        "solar_input_w": solar_w,       # everything else on DC bus
         "ac_output_v": round(acov / 10.0, 1) if acov else 0.0,
         "ac_output_hz": round(acohz, 1) if acohz else 0.0,
         "ac_on": bool(i("oac")),
@@ -422,6 +436,6 @@ def cloud_props_to_telemetry(p: dict[str, Any]) -> dict[str, Any]:
         "ups_on": bool(i("ups", 1)),
         "super_charge_on": bool(i("sfc")),
         "error_code": i("ec"),
-        "time_to_full_h": round(f("it") / 100.0, 2) if f("it") else 0.0,
-        "time_remaining_h": round(f("ot") / 10.0, 2) if f("ot") else 0.0,
+        "time_to_full_h":   0.0 if raw_it in (0, 999) else round(raw_it / 10.0, 2),
+        "time_remaining_h": 0.0 if raw_ot in (0, 999) else round(raw_ot / 10.0, 2),
     }
