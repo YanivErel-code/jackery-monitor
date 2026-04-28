@@ -773,22 +773,117 @@ function drawAxes(ctx, w, h, padL, padR, padT, padB) {
   ctx.stroke();
 }
 
+// Build a smooth Catmull-Rom path through `pts` (array of [x,y]) and trace
+// it onto ctx. Tension 0.5 = classic Catmull-Rom, gentle curves, no
+// overshoot. Skips null entries cleanly (lifts pen + restarts).
+function _smoothPath(ctx, pts) {
+  let i = 0, started = false;
+  while (i < pts.length) {
+    if (!pts[i]) { started = false; i++; continue; }
+    const p0 = pts[i - 1] && pts[i - 1] || pts[i];
+    const p1 = pts[i];
+    const p2 = pts[i + 1] || p1;
+    const p3 = pts[i + 2] || p2;
+    if (!started) { ctx.moveTo(p1[0], p1[1]); started = true; i++; continue; }
+    const cp1x = p0[0] + (p2[0] - p0[0]) / 6;
+    const cp1y = p0[1] + (p2[1] - p0[1]) / 6;
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
+    i++;
+  }
+}
+
+// Stroke a smooth line through a series of values. `xs(i)`/`ys(v)` map
+// data-space to canvas-space; null/NaN values lift the pen.
+function drawSmoothLine(ctx, points, xs, ys, color, lineWidth = 2.5) {
+  const pts = points.map((v, i) =>
+    (v == null || Number.isNaN(v)) ? null : [xs(i), ys(v)]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  _smoothPath(ctx, pts);
+  ctx.stroke();
+}
+
+// Same shape as drawSmoothLine, but fills the area below the curve down to
+// `baseY` with a vertical gradient (color at top, transparent at bottom).
+function drawAreaFill(ctx, points, xs, ys, baseY, color, alphaTop = 0.25) {
+  const pts = points.map((v, i) =>
+    (v == null || Number.isNaN(v)) ? null : [xs(i), ys(v)]);
+  // Walk segments — we may have null gaps; fill each contiguous run
+  // separately so a gap doesn't yield a polygon spanning the whole gap.
+  let runStart = -1;
+  for (let i = 0; i <= pts.length; i++) {
+    const here = pts[i];
+    if (here && runStart < 0) runStart = i;
+    if ((!here || i === pts.length) && runStart >= 0) {
+      const run = pts.slice(runStart, i);
+      if (run.length >= 1) {
+        const minY = Math.min(...run.map((p) => p[1]));
+        const grad = ctx.createLinearGradient(0, minY, 0, baseY);
+        grad.addColorStop(0, _withAlpha(color, alphaTop));
+        grad.addColorStop(1, _withAlpha(color, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(run[0][0], baseY);
+        ctx.lineTo(run[0][0], run[0][1]);
+        _smoothPath(ctx, run);
+        ctx.lineTo(run[run.length - 1][0], baseY);
+        ctx.closePath();
+        ctx.fill();
+      }
+      runStart = -1;
+    }
+  }
+}
+
+function _withAlpha(color, a) {
+  // accept "#RRGGBB" or "#RGB"
+  if (color[0] === '#') {
+    let hex = color.slice(1);
+    if (hex.length === 3) hex = hex.split('').map((c) => c + c).join('');
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+  return color;  // best-effort passthrough
+}
+
+// Backwards-compat wrapper used by the energy chart's overlay line. Same
+// signature as the old drawSeries; just routes through the new smooth path.
 function drawSeries(ctx, points, color, padL, padR, padT, padB, w, h, minY, maxY) {
   if (!points.length) return;
   const xs = (i) => padL + (i / Math.max(1, points.length - 1)) * (w - padL - padR);
   const ys = (v) => h - padB - ((v - minY) / Math.max(1e-6, maxY - minY)) * (h - padT - padB);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  let started = false;
-  points.forEach((v, i) => {
-    if (v == null || Number.isNaN(v)) { started = false; return; }
-    const x = xs(i), y = ys(v);
-    if (!started) { ctx.moveTo(x, y); started = true; }
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  drawSmoothLine(ctx, points, xs, ys, color);
+}
+
+// Hover tooltip — created on demand, shared by all charts. Returns a setter
+// (call with {x, y, html} to position+show, or null to hide).
+let _tooltipEl = null;
+function _ensureTooltip() {
+  if (_tooltipEl) return _tooltipEl;
+  const t = document.createElement('div');
+  t.className = 'chart-tooltip';
+  t.hidden = true;
+  document.body.appendChild(t);
+  _tooltipEl = t;
+  return t;
+}
+function chartTooltip(target) {
+  const el = _ensureTooltip();
+  if (!target) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = target.html;
+  // Position relative to viewport, but offset above the cursor.
+  const left = Math.min(window.innerWidth - el.offsetWidth - 8, target.x + 12);
+  const top  = Math.max(8, target.y - el.offsetHeight - 12);
+  el.style.left = left + 'px';
+  el.style.top  = top + 'px';
 }
 
 function drawLiveChart(s) {
@@ -796,8 +891,7 @@ function drawLiveChart(s) {
   if (!canvas) return;
   const { ctx, w, h } = setCanvasSize(canvas);
   ctx.clearRect(0, 0, w, h);
-  const padL = 36, padR = 16, padT = 14, padB = 22;
-  drawAxes(ctx, w, h, padL, padR, padT, padB);
+  const padL = 44, padR = 44, padT = 14, padB = 28;
 
   const hist = (s?.history) || [];
   if (!hist.length) {
@@ -805,22 +899,26 @@ function drawLiveChart(s) {
     ctx.fillText('Waiting for data…', padL + 8, padT + 16);
     return;
   }
-  const bat = hist.map(p => p.battery_percent);
   const out = hist.map(p => p.output_power_w);
   const inp = hist.map(p => p.input_power_w);
-  const maxW = Math.max(50, Math.max(...out, ...inp));
-  // shared y-axis: scale battery 0..100 to 0..maxW visually for overlay
-  const batScaled = bat.map(v => (v == null ? null : (v / 100) * maxW));
+  const bat = hist.map(p => p.battery_percent);
+  const maxW = Math.max(50, ...out, ...inp);
 
-  // Grid lines (4 horizontal)
-  ctx.strokeStyle = '#1c2128';
+  const xs = (i) => padL + (i / Math.max(1, hist.length - 1)) * (w - padL - padR);
+  const yWatts = (v) => (h - padB) - (v / Math.max(1e-6, maxW)) * (h - padT - padB);
+  const yPct   = (v) => (h - padB) - (v / 100) * (h - padT - padB);
+  const baseY  = h - padB;
+
+  // Subtle horizontal gridlines (4)
+  ctx.strokeStyle = 'rgba(35,42,51,.7)';
   ctx.lineWidth = 1;
   for (let i = 1; i <= 4; i++) {
     const y = padT + ((h - padT - padB) * i) / 5;
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
   }
+  drawAxes(ctx, w, h, padL, padR, padT, padB);
 
-  // Y-axis labels (W)
+  // Left Y-axis labels (Watts)
   ctx.fillStyle = '#6b7280'; ctx.font = '11px Inter';
   ctx.textAlign = 'right';
   for (let i = 0; i <= 4; i++) {
@@ -828,11 +926,85 @@ function drawLiveChart(s) {
     const y = padT + ((h - padT - padB) * i) / 4;
     ctx.fillText(`${Math.round(v)}`, padL - 6, y + 3);
   }
+  // Right Y-axis labels (Battery %)
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(251,191,36,.65)';
+  for (const v of [0, 50, 100]) {
+    ctx.fillText(`${v}%`, w - padR + 4, yPct(v) + 3);
+  }
   ctx.textAlign = 'start';
 
-  drawSeries(ctx, batScaled, '#fbbf24', padL, padR, padT, padB, w, h, 0, maxW);
-  drawSeries(ctx, out,       '#4ade80', padL, padR, padT, padB, w, h, 0, maxW);
-  drawSeries(ctx, inp,       '#38bdf8', padL, padR, padT, padB, w, h, 0, maxW);
+  // X-axis time ticks — first sample timestamp ... last (clamped to "now").
+  if (hist.length >= 2) {
+    const first = hist[0].ts || 0, last = hist[hist.length - 1].ts || 0;
+    const fmtMs = (ms) => new Date(ms * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    ctx.fillStyle = '#6b7280';
+    ctx.textAlign = 'center';
+    const ticks = 5;
+    for (let i = 0; i <= ticks; i++) {
+      const ts = first + (last - first) * (i / ticks);
+      ctx.fillText(fmtMs(ts), xs((hist.length - 1) * (i / ticks)), h - 8);
+    }
+    ctx.textAlign = 'start';
+  }
+
+  // Areas (output, input) under their lines — gradient transparent toward bottom.
+  drawAreaFill(ctx, inp, xs, yWatts, baseY, '#38bdf8', .22);
+  drawAreaFill(ctx, out, xs, yWatts, baseY, '#4ade80', .25);
+  // Lines on top
+  drawSmoothLine(ctx, inp, xs, yWatts, '#38bdf8', 2.5);
+  drawSmoothLine(ctx, out, xs, yWatts, '#4ade80', 2.5);
+  // Battery on its own (right) axis — dashed so it's clearly a different scale.
+  ctx.save();
+  ctx.setLineDash([4, 4]);
+  drawSmoothLine(ctx, bat, xs, yPct, '#fbbf24', 2);
+  ctx.restore();
+
+  // Hover state stored on the canvas element
+  _attachChartHover(canvas, hist, (i, evt) => {
+    const p = hist[i];
+    const ts = p.ts ? new Date(p.ts * 1000).toLocaleTimeString() : '';
+    return `<div class="cht-ts">${ts}</div>
+            <div class="cht-row"><i style="background:#4ade80"></i> Output <b>${fmt(p.output_power_w)}</b> W</div>
+            <div class="cht-row"><i style="background:#38bdf8"></i> Input <b>${fmt(p.input_power_w)}</b> W</div>
+            <div class="cht-row"><i style="background:#fbbf24"></i> Battery <b>${fmt(p.battery_percent)}</b> %</div>`;
+  }, () => ({ xs, padL, padR, w, h, baseY: h - padB, padT, padB }));
+}
+
+// Generic chart-hover binder. Stores the per-render data + geometry +
+// tooltip-builder on the canvas element so the (one-time) listener always
+// reads the freshest closures, not stale ones from when it was bound.
+function _attachChartHover(canvas, hist, htmlFn, geomFn) {
+  // Refresh per-render state every call.
+  canvas._chartData = hist;
+  canvas._chartHtml = htmlFn;
+  canvas._chartGeom = geomFn();
+  if (canvas._hoverBound) return;
+  canvas._hoverBound = true;
+  canvas.style.cursor = 'crosshair';
+  const onMove = (e) => {
+    const data = canvas._chartData;
+    const geom = canvas._chartGeom;
+    const html = canvas._chartHtml;
+    if (!data?.length || !geom || !html) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const t = (x - geom.padL) / (geom.w - geom.padL - geom.padR);
+    const idx = Math.max(0, Math.min(data.length - 1, Math.round(t * (data.length - 1))));
+    // Redraw the chart, then overlay the crosshair.
+    if (canvas._redraw) canvas._redraw();
+    const ctx = canvas.getContext('2d');
+    const xPos = geom.xs(idx);
+    ctx.strokeStyle = 'rgba(255,255,255,.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xPos, geom.padT); ctx.lineTo(xPos, geom.baseY); ctx.stroke();
+    chartTooltip({ x: e.clientX, y: e.clientY, html: html(idx, e) });
+  };
+  const onLeave = () => chartTooltip(null);
+  canvas.addEventListener('mousemove', onMove);
+  canvas.addEventListener('mouseleave', onLeave);
+  canvas._redraw = () => drawLiveChart(lastStatus);
 }
 
 function drawEnergyChart(j) {
