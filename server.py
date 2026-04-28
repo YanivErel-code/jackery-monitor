@@ -93,6 +93,13 @@ class AppState:
     def backend(self) -> str:
         return self.client.backend_name
 
+    def reset_live_history(self) -> None:
+        """Clear the in-memory live-chart deque + flags so the poll loop
+           re-hydrates from the energy DB for whichever device is now active."""
+        self.history.clear()
+        self.last_history_ts = 0.0
+        self.history_hydrated = False
+
 
 state = AppState()
 
@@ -150,14 +157,8 @@ async def poll_loop() -> None:
                 state.device is None
                 or getattr(state.device, "device_sn", None) != getattr(new_dev, "device_sn", None)
             ):
-                # Active device changed (either via the topbar picker or the
-                # bridge auto-picking a different one). Reset the live chart
-                # so it re-hydrates from the energy DB for the new device.
-                state.history.clear()
-                state.last_history_ts = 0.0
-                state.history_hydrated = False
+                state.reset_live_history()
                 state.device = new_dev
-                # Broadcast device-change immediately so the Device tab updates fast.
                 await broadcast({"type": "status", "data": serialize_status()})
 
             if status_dict:
@@ -835,16 +836,9 @@ async def api_select_device(body: dict):
     state.device = None
     state.last_status = None
     state.last_update_ts = None
-    # Clear the in-memory live chart history. It's per-device — keeping the
-    # old device's samples mixed with the new one gives a chart that doesn't
-    # match either. Setting history_hydrated=False makes the poll loop
-    # re-hydrate from the energy DB for the new device on its next cycle.
-    state.history.clear()
-    state.last_history_ts = 0.0
-    state.history_hydrated = False
+    state.reset_live_history()
     await broadcast({"type": "status", "data": serialize_status()})
 
-    # Force a fresh poll so the UI updates immediately
     asyncio.create_task(force_poll())
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 

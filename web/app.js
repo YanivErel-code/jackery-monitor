@@ -20,27 +20,37 @@ let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
 let activeTab = 'live';
 
+// ---------- chart palette ----------
+// Single source of truth so the chart drawing code, hover tooltips, and
+// (future) legend swatches can't drift out of sync.
+const SERIES_COLORS = {
+  battery: '#fbbf24',  // amber, also matches CSS .lg-bat
+  output:  '#4ade80',  // green, also matches CSS .lg-out
+  input:   '#38bdf8',  // sky,   also matches CSS .lg-in
+};
+
 // ---------- legend / series visibility ----------
-// Per-chart toggle map. Click a legend item to flip its series's bool;
-// drawLiveChart and drawEnergyChart consult these and skip hidden series.
 const _seriesVisible = {
   live:   { battery: true, output: true, input: true },
   energy: { battery: true, output: true, input: true },
 };
 
+// Adding a new chart? Just register its redraw + cache-getter here.
+const _chartRedraw = {
+  live:   () => lastStatus && drawLiveChart(lastStatus),
+  energy: () => energyHistoryCache && drawEnergyChart(energyHistoryCache),
+};
+
 document.addEventListener('click', (e) => {
   const item = e.target.closest('.legend-item');
   if (!item) return;
-  const legend = item.closest('.legend');
-  const chart  = legend?.dataset.chart;
+  const chart  = item.closest('.legend')?.dataset.chart;
   const series = item.dataset.series;
   if (!chart || !series || !_seriesVisible[chart]) return;
   e.preventDefault();
   _seriesVisible[chart][series] = !_seriesVisible[chart][series];
   item.classList.toggle('off', !_seriesVisible[chart][series]);
-  // Re-render whichever chart was toggled.
-  if (chart === 'live'   && lastStatus) drawLiveChart(lastStatus);
-  if (chart === 'energy' && energyHistoryCache) drawEnergyChart(energyHistoryCache);
+  _chartRedraw[chart]?.();
 });
 
 // ---------- service worker ----------
@@ -1475,22 +1485,19 @@ function drawLiveChart(s) {
     ctx.textAlign = 'start';
   }
 
-  // Areas (output, input) under their lines — gradient transparent toward bottom.
-  // Each series respects its visibility toggle from the legend (see
-  // legend click handler at the bottom of this file).
   if (_seriesVisible.live.input) {
-    drawAreaFill(ctx, inp, xs, yWatts, baseY, '#38bdf8', .22);
-    drawSmoothLine(ctx, inp, xs, yWatts, '#38bdf8', 2.5);
+    drawAreaFill(ctx, inp, xs, yWatts, baseY, SERIES_COLORS.input, .22);
+    drawSmoothLine(ctx, inp, xs, yWatts, SERIES_COLORS.input, 2.5);
   }
   if (_seriesVisible.live.output) {
-    drawAreaFill(ctx, out, xs, yWatts, baseY, '#4ade80', .25);
-    drawSmoothLine(ctx, out, xs, yWatts, '#4ade80', 2.5);
+    drawAreaFill(ctx, out, xs, yWatts, baseY, SERIES_COLORS.output, .25);
+    drawSmoothLine(ctx, out, xs, yWatts, SERIES_COLORS.output, 2.5);
   }
-  // Battery on its own (right) axis — dashed so it's clearly a different scale.
+  // Battery on its own right axis, dashed to make the different scale obvious.
   if (_seriesVisible.live.battery) {
     ctx.save();
     ctx.setLineDash([4, 4]);
-    drawSmoothLine(ctx, bat, xs, yPct, '#fbbf24', 2);
+    drawSmoothLine(ctx, bat, xs, yPct, SERIES_COLORS.battery, 2);
     ctx.restore();
   }
 
@@ -1499,9 +1506,9 @@ function drawLiveChart(s) {
     const p = hist[i];
     const ts = p.ts ? new Date(p.ts * 1000).toLocaleTimeString() : '';
     return `<div class="cht-ts">${ts}</div>
-            <div class="cht-row"><i style="background:#4ade80"></i> Output <b>${fmt(p.output_power_w)}</b> W</div>
-            <div class="cht-row"><i style="background:#38bdf8"></i> Input <b>${fmt(p.input_power_w)}</b> W</div>
-            <div class="cht-row"><i style="background:#fbbf24"></i> Battery <b>${fmt(p.battery_percent)}</b> %</div>`;
+            <div class="cht-row"><i style="background:${SERIES_COLORS.output}"></i> Output <b>${fmt(p.output_power_w)}</b> W</div>
+            <div class="cht-row"><i style="background:${SERIES_COLORS.input}"></i> Input <b>${fmt(p.input_power_w)}</b> W</div>
+            <div class="cht-row"><i style="background:${SERIES_COLORS.battery}"></i> Battery <b>${fmt(p.battery_percent)}</b> %</div>`;
   }, () => ({ xs, padL, padR, w, h, baseY: h - padB, padT, padB }));
 }
 
@@ -1591,8 +1598,7 @@ function drawEnergyChart(j) {
     }
   }
 
-  // Bars: output (green = consumed) and input (sky = charged), interleaved.
-  // Each respects its legend toggle.
+  // Bars: consumed (left of slot) + charged (right of slot), interleaved.
   const n = hist.length;
   const totalW = w - padL - padR;
   const slot = totalW / n;
@@ -1602,19 +1608,18 @@ function drawEnergyChart(j) {
     const yBase = h - padB;
     if (_seriesVisible.energy.output) {
       const yOut = yBase - (out[i] / maxWh) * (h - padT - padB);
-      ctx.fillStyle = '#4ade80';
+      ctx.fillStyle = SERIES_COLORS.output;
       ctx.fillRect(xCenter - barW - 1, yOut, barW, yBase - yOut);
     }
     if (_seriesVisible.energy.input) {
       const yIn = yBase - (inp[i] / maxWh) * (h - padT - padB);
-      ctx.fillStyle = '#38bdf8';
+      ctx.fillStyle = SERIES_COLORS.input;
       ctx.fillRect(xCenter + 1, yIn, barW, yBase - yIn);
     }
   }
 
-  // Battery % overlay (right axis 0..100)
   if (_seriesVisible.energy.battery && bat.some(v => v != null)) {
-    ctx.strokeStyle = '#fbbf24';
+    ctx.strokeStyle = SERIES_COLORS.battery;
     ctx.lineWidth = 2;
     ctx.beginPath();
     let started = false;
