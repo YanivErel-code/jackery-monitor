@@ -43,9 +43,15 @@ log = logging.getLogger("jackery-monitor")
 
 # ---------- config ----------
 WEB_DIR = Path(__file__).parent / "web"
-HISTORY_LIMIT = 720          # ~6 hours at 30s polling
 POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", "10"))
 LOW_BATTERY_THRESHOLD = int(os.environ.get("LOW_BATTERY_THRESHOLD", "20"))
+# Live chart shows the last N hours by appending one in-memory sample per
+# LIVE_CHART_INTERVAL_S (independent of how often we poll the bridge — the
+# poll cadence is for the energy aggregator and live KPIs). The deque is
+# sized for exactly that span; the chart label and storage agree.
+LIVE_CHART_HOURS = 6
+LIVE_CHART_INTERVAL_S = 60
+HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
 
 
 # ---------- app state ----------
@@ -57,6 +63,12 @@ class AppState:
         self.last_status: Optional[dict[str, Any]] = None
         self.last_update_ts: Optional[float] = None
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
+        # Last append timestamp so we sample the live chart exactly every
+        # LIVE_CHART_INTERVAL_S regardless of how fast we poll the bridge.
+        self.last_history_ts: float = 0.0
+        # Set the first time we hydrate the deque from the energy DB after
+        # startup so a container restart doesn't blank the chart.
+        self.history_hydrated: bool = False
         self.connection_status = "disconnected"   # disconnected | scanning | connecting | connected | error
         self.connection_error: Optional[str] = None
         self.low_battery_alerted = False
@@ -139,12 +151,7 @@ async def poll_loop() -> None:
                 state.last_cloud_meta = cloud_meta
                 state.last_status = status_dict
                 state.last_update_ts = ts
-                state.history.append({
-                    "ts": ts,
-                    "battery_percent": status_dict["battery_percent"],
-                    "input_power_w": status_dict["input_power_w"],
-                    "output_power_w": status_dict["output_power_w"],
-                })
+
                 # Energy aggregation: integrate W over time per device
                 dev = state.device
                 dev_sn = dev.device_sn if dev and dev.device_sn else None
@@ -161,6 +168,41 @@ async def poll_loop() -> None:
                         float(status_dict.get("output_power_w") or 0),
                         int(status_dict.get("battery_percent") or 0),
                     )
+
+                    # Hydrate the live chart from the energy DB on the first
+                    # successful poll after startup, so the chart shows the
+                    # last LIVE_CHART_HOURS even immediately after a restart.
+                    if not state.history_hydrated:
+                        try:
+                            past = state.energy.history(
+                                dev_sn,
+                                hours=LIVE_CHART_HOURS,
+                                bucket_s=LIVE_CHART_INTERVAL_S,
+                            )
+                            for p in past:
+                                state.history.append({
+                                    "ts": p["ts"],
+                                    "battery_percent": p["battery_pct"] or 0,
+                                    "input_power_w": p["input_w"] or 0,
+                                    "output_power_w": p["output_w"] or 0,
+                                })
+                            log.info("Live chart hydrated with %d historical points (last %dh)",
+                                     len(past), LIVE_CHART_HOURS)
+                        except Exception as e:
+                            log.warning("history hydrate failed: %s", e)
+                        state.history_hydrated = True
+
+                # Append a live sample once per LIVE_CHART_INTERVAL_S so the
+                # chart's x-axis spacing is stable (the bridge poll cadence
+                # is independent and faster).
+                if ts - state.last_history_ts >= LIVE_CHART_INTERVAL_S:
+                    state.history.append({
+                        "ts": ts,
+                        "battery_percent": status_dict["battery_percent"],
+                        "input_power_w": status_dict["input_power_w"],
+                        "output_power_w": status_dict["output_power_w"],
+                    })
+                    state.last_history_ts = ts
                 await broadcast({"type": "telemetry", "data": serialize_status()})
 
                 bp = status_dict["battery_percent"]
