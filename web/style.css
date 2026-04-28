@@ -277,9 +277,13 @@ main {
   border-radius: var(--radius-sm);
   color: var(--text);
   text-align: left;
-  transition: border-color .15s;
+  transition: border-color .15s, background .15s;
+  font-family: inherit;
+  cursor: pointer;
 }
-.switch:hover { border-color: #2f3744; }
+.switch:hover { border-color: #2f3744; background: var(--bg-elev-3, rgba(255,255,255,.02)); }
+.switch:disabled { cursor: wait; opacity: .7; }
+.switch.pending { border-color: var(--accent); }
 .switch .sw-label { font-size: 11px; text-transform: uppercase; color: var(--text-dim); letter-spacing: .06em; }
 .switch .sw-state {
   font-family: var(--font-mono);
