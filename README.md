@@ -11,8 +11,8 @@ It connects through the **Jackery cloud account** (the same one the official app
 | Mode | When to use | Command |
 |---|---|---|
 | **Synology / Linux** | NAS or Linux box. Dashboard + bridge both run as containers. | `./deploy-synology.sh` |
-| **Docker on macOS (bridge)** | Mac with the bridge as a host-native process (uses Keychain). | `./run-bridge.sh` + `docker compose --profile mac up` |
-| **Mock (no hardware)** | UI development / demo. | `docker compose --profile mock up` |
+| **Docker on macOS (bridge)** | Mac with the bridge as a host-native process (uses Keychain). | `./run-bridge.sh` + `docker compose -f docker-compose.dev.yml --profile mac up` |
+| **Mock (no hardware)** | UI development / demo. | `docker compose -f docker-compose.dev.yml --profile mock up` |
 
 > **Why a bridge?** Cloud credentials stay on the host (macOS Keychain or a `.env` file you control) instead of being baked into the container image. The bridge (`bridge.py`) owns the cloud session and exposes it over a local TCP socket; the dashboard container talks only to the bridge. On Synology both run as containers in the same docker network; on Mac the bridge runs as a launchd agent.
 
@@ -30,7 +30,7 @@ Terminal 1 — host cloud bridge (stays on the Mac):
 Terminal 2 — containerized web app:
 
 ```bash
-docker compose --profile mac up
+docker compose -f docker-compose.dev.yml --profile mac up
 # open http://localhost:8000
 ```
 
@@ -51,7 +51,7 @@ tail -f /tmp/jackery-bridge.out /tmp/jackery-bridge.err
 ## Quick start — Mock (no hardware)
 
 ```bash
-docker compose --profile mock up
+docker compose -f docker-compose.dev.yml --profile mock up
 ```
 
 Synthetic telemetry, the dashboard works end-to-end without a real device.
@@ -120,7 +120,8 @@ jackery-monitor/
 ├── cloud_client.py           Jackery cloud API client
 ├── energy_db.py              SQLite energy integrator
 ├── Dockerfile
-├── docker-compose.yml        profiles: mac / mock
+├── docker-compose.yml        Synology / Linux production (no profiles)
+├── docker-compose.dev.yml    macOS dev + mock profiles
 ├── .dockerignore
 ├── requirements.txt
 └── web/                      vanilla HTML/CSS/JS dashboard
@@ -168,8 +169,10 @@ If you don't want to use SSH, deploy via the DSM **Container Manager** UI:
 2. In File Station, copy `.env.example` → `.env` and edit it (enable "Show hidden files" first; install the **Text Editor** package from Package Center if needed). Fill in `JACKERY_EMAIL` and `JACKERY_PASSWORD`.
 3. Open **Container Manager** → **Project** → **Create**.
 4. Project name: `jackery-monitor`. Path: `/docker/jackery-monitor`.
-5. **Source**: "Use existing docker-compose.yml" — but **point it at `docker-compose.synology.yml`** (the profile-free version). The default `docker-compose.yml` uses compose profiles which Container Manager's UI does not expose, and you'll get a `no service selected` error.
+5. **Source**: "Use existing docker-compose.yml". Container Manager will pick up the project's `docker-compose.yml` automatically — it's profile-free and runs both services. (The Mac/mock variants live in `docker-compose.dev.yml` and are ignored here.)
 6. Click **Next** → **Done**. The build takes 2–3 minutes. Two containers (`jackery-bridge` + `jackery-monitor`) will start.
+
+> If an earlier project run failed with `no service selected`, that was caused by the previous compose file using profiles. Delete the old project (Container Manager → Project → the project → **Action → Delete**, leave **"Also remove volumes" UNCHECKED** to preserve your DB), pull the latest code, and recreate the project.
 7. Dashboard at `http://<your-nas-ip>:8000`.
 
 ### Updating to the latest code

@@ -1,68 +1,21 @@
-# Three deployment profiles — pick one with `docker compose --profile <name> up`.
+# Default deployment — Synology / generic Linux. Two always-on services, no
+# compose profiles (Container Manager's UI doesn't expose --profile).
 #
-#   mac        -> dashboard in container, bridge on macOS host (host BLE/Keychain)
-#   mock       -> no hardware/cloud, synthetic telemetry (UI development)
-#   synology   -> dashboard + bridge BOTH in containers (Linux/NAS, self-contained)
+# Synology Container Manager:
+#   Project > Create
+#     Project name: jackery-monitor
+#     Path:         /docker/jackery-monitor
+#     Source:       Use existing docker-compose.yml   (this file is picked up automatically)
 #
-# Examples:
-#   docker compose --profile mac up -d         # then run ./run-bridge.sh on the host
-#   docker compose --profile mock up -d
-#   docker compose --profile synology up -d --build
+# Any Linux box from the CLI:
+#   docker compose up -d --build
+#
+# For macOS development (host bridge) or mock telemetry, see docker-compose.dev.yml.
 
 services:
-  # ===== macOS profile: bridge runs on host =====
-  jackery:
-    profiles: ["mac"]
-    build: .
-    image: jackery-monitor:latest
-    container_name: jackery-monitor
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      BACKEND: bridge
-      BRIDGE_URL: host.docker.internal:8766
-      POLL_INTERVAL_S: "10"
-      JACKERY_DB: /data/energy.db
-    volumes:
-      - jackery-data:/data       # persistent energy history
-      # Bind-mount UI + server so file edits show up on container restart (no rebuild).
-      - ./web:/app/web
-      - ./server.py:/app/server.py
-      - ./device_client.py:/app/device_client.py
-      - ./energy_db.py:/app/energy_db.py
-      - ./cloud_client.py:/app/cloud_client.py
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  # ===== mock telemetry: no hardware required =====
-  jackery-mock:
-    profiles: ["mock"]
-    build: .
-    image: jackery-monitor:latest
-    container_name: jackery-monitor
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      BACKEND: mock
-      POLL_INTERVAL_S: "5"
-      JACKERY_DB: /data/energy.db
-    volumes:
-      - jackery-data:/data
-      - ./web:/app/web
-      - ./server.py:/app/server.py
-      - ./device_client.py:/app/device_client.py
-      - ./energy_db.py:/app/energy_db.py
-      - ./cloud_client.py:/app/cloud_client.py
-
-  # ===== Synology / Linux profile: bridge as a sidecar container =====
-  #
-  # Dashboard (jackery-monitor) talks to the bridge container over the internal
-  # docker network at host=jackery-bridge:8766. Credentials are loaded from
-  # environment variables in your .env file (NEVER committed to git).
+  # Cloud bridge — holds Jackery credentials, polls the Jackery cloud,
+  # exposes JSON-RPC on TCP 8766 (internal docker network only, NOT to the LAN).
   jackery-bridge:
-    profiles: ["synology"]
     build: .
     image: jackery-monitor:latest
     container_name: jackery-bridge
@@ -72,25 +25,25 @@ services:
       BRIDGE_HOST: 0.0.0.0
       BRIDGE_PORT: "8766"
       CLOUD_POLL_INTERVAL_S: "15"
-      # Read from the .env file next to docker-compose.yml on the host.
-      # If unset, the bridge starts idle and you can sign in via the dashboard.
+      # These come from the .env file next to this compose file.
       JACKERY_EMAIL: "${JACKERY_EMAIL:-}"
       JACKERY_PASSWORD: "${JACKERY_PASSWORD:-}"
       JACKERY_REGION: "${JACKERY_REGION:-US}"
       JACKERY_CREDS_FILE: /data/jackery-creds.json
     expose:
-      - "8766"   # internal only — not published to the LAN
+      - "8766"
     volumes:
       - jackery-data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8766)); s.close()"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8766)); s.close()"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 5s
 
-  jackery-syn:
-    profiles: ["synology"]
+  # FastAPI dashboard — talks to the bridge over the internal docker network.
+  # Published on the LAN at http://<nas-ip>:${JACKERY_HTTP_PORT}.
+  jackery-monitor:
     build: .
     image: jackery-monitor:latest
     container_name: jackery-monitor

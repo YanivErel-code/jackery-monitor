@@ -5,7 +5,7 @@
 #   1. git pull (if this is already a clone)
 #   2. ensure .env exists  (copies from .env.example on first run, then aborts
 #      so you can fill in your credentials)
-#   3. docker compose --profile synology up -d --build
+#   3. docker compose up -d --build      (uses docker-compose.yml, the Synology-friendly one)
 #
 # Usage on the NAS (after SSH'ing in):
 #   cd /volume1/docker/jackery-monitor   # or wherever you cloned it
@@ -69,12 +69,12 @@ else
 fi
 
 # ----- 4. build + (re)start -----
-echo "==> ${DC[*]} -f docker-compose.synology.yml up -d --build"
-"${DC[@]}" -f docker-compose.synology.yml up -d --build
+echo "==> ${DC[*]} up -d --build"
+"${DC[@]}" up -d --build
 
 echo
 echo "==> Containers:"
-"${DC[@]}" -f docker-compose.synology.yml ps
+"${DC[@]}" ps
 
 NAS_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<your-nas-ip>')"
 PORT="$(grep -E '^JACKERY_HTTP_PORT=' .env | cut -d= -f2 | tr -d '[:space:]')"
