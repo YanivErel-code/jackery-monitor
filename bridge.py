@@ -22,14 +22,27 @@ Methods exposed:
   disconnect()                    -> tear down cloud session
   set_output(port, on)            -> NOT SUPPORTED (cloud-only build)
 
-Cloud credentials are loaded from macOS Keychain (service "jackery-monitor",
-accounts "cloud-email", "cloud-password", "cloud-region"). Without them the
-bridge runs but the cloud poller is idle until set_credentials is called.
+Cloud credentials are loaded from (in priority order):
+  1. Environment variables  JACKERY_EMAIL / JACKERY_PASSWORD / JACKERY_REGION
+     (used in container deployments — e.g. Synology, Linux servers)
+  2. JSON file at $JACKERY_CREDS_FILE  (or /data/jackery-creds.json)
+     {"email": "...", "password": "...", "region": "US"}
+     This is what set_credentials writes to when there's no Keychain, so the
+     web UI "sign in" flow keeps working on Synology/Linux.
+  3. macOS Keychain (service "jackery-monitor", accounts "cloud-email",
+     "cloud-password", "cloud-region") — the original macOS path.
+
+Without any of those the bridge runs but the cloud poller is idle until
+set_credentials is called.
 
 Env:
   BRIDGE_HOST            (default 127.0.0.1)
   BRIDGE_PORT            (default 8766)
   CLOUD_POLL_INTERVAL_S  (default 15)
+  JACKERY_EMAIL          (optional — sets cloud account email)
+  JACKERY_PASSWORD       (optional — sets cloud account password)
+  JACKERY_REGION         (optional — default US)
+  JACKERY_CREDS_FILE     (optional — default /data/jackery-creds.json)
 """
 
 from __future__ import annotations
@@ -55,9 +68,22 @@ PORT = int(os.environ.get("BRIDGE_PORT", "8766"))
 CLOUD_POLL = int(os.environ.get("CLOUD_POLL_INTERVAL_S", "15"))
 
 
-# ---- macOS Keychain ----
+# ---- credential storage (multi-backend) ----
+#
+# Priority on read: env vars > creds file > macOS keychain.
+# On write (from set_credentials): writes to whichever backend is available,
+# preferring keychain on macOS, falling back to a JSON file otherwise.
+# Env-var creds are read-only — we never overwrite them.
+
+CREDS_FILE_DEFAULT = "/data/jackery-creds.json"
+
+
+def _creds_file_path() -> str:
+    return os.environ.get("JACKERY_CREDS_FILE", CREDS_FILE_DEFAULT)
+
+
 def keychain_get(service: str, account: str) -> Optional[str]:
-    """Read a password from macOS keychain. Returns None if missing."""
+    """Read a password from macOS keychain. Returns None if missing or non-mac."""
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
@@ -71,7 +97,7 @@ def keychain_get(service: str, account: str) -> Optional[str]:
 
 
 def keychain_set(service: str, account: str, password: str) -> bool:
-    """Upsert a password in macOS keychain. Returns True on success."""
+    """Upsert a password in macOS keychain. Returns True on success, False on non-mac."""
     try:
         out = subprocess.run(
             ["security", "add-generic-password",
@@ -83,16 +109,93 @@ def keychain_set(service: str, account: str, password: str) -> bool:
         return False
 
 
+def _load_creds_file() -> Optional[dict]:
+    path = _creds_file_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("email") and data.get("password"):
+            return {
+                "email": str(data["email"]),
+                "password": str(data["password"]),
+                "region": str(data.get("region") or "US").upper(),
+            }
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        log.warning("creds file %s unreadable: %s", path, e)
+    return None
+
+
+def _save_creds_file(email: str, password: str, region: str) -> bool:
+    path = _creds_file_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        # Write to a temp file first, then rename, so a crash mid-write
+        # can't leave a half-written creds file behind.
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"email": email, "password": password, "region": region}, f)
+        try:
+            os.chmod(tmp, 0o600)  # rw for owner only
+        except Exception:
+            pass
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        log.error("failed to write creds file %s: %s", path, e)
+        return False
+
+
 def load_cloud_credentials() -> Optional[dict]:
-    """Return {email, password, region} from keychain, or None if missing."""
+    """Return {email, password, region} from env / file / keychain, or None."""
+    # 1. Environment variables (Synology / generic Linux deployment)
+    env_email = os.environ.get("JACKERY_EMAIL")
+    env_pw = os.environ.get("JACKERY_PASSWORD")
+    if env_email and env_pw:
+        log.info("Loaded cloud credentials from environment variables")
+        return {
+            "email": env_email.strip(),
+            "password": env_pw,
+            "region": (os.environ.get("JACKERY_REGION") or "US").strip().upper(),
+        }
+
+    # 2. JSON creds file (set_credentials persists here on non-mac hosts)
+    file_creds = _load_creds_file()
+    if file_creds:
+        log.info("Loaded cloud credentials from %s", _creds_file_path())
+        return file_creds
+
+    # 3. macOS Keychain (original behaviour)
     email = keychain_get("jackery-monitor", "cloud-email")
     password = keychain_get("jackery-monitor", "cloud-password")
     region = keychain_get("jackery-monitor", "cloud-region") or "US"
-    if not email or not password:
-        log.info("No cloud credentials in keychain — cloud poller idle. "
-                 "Sign in via the web UI or run ./set-credentials.sh.")
-        return None
-    return {"email": email, "password": password, "region": region}
+    if email and password:
+        log.info("Loaded cloud credentials from macOS keychain")
+        return {"email": email, "password": password, "region": region}
+
+    log.info("No cloud credentials found (env / file / keychain all empty) — "
+             "cloud poller idle. Sign in via the web UI or set JACKERY_EMAIL / "
+             "JACKERY_PASSWORD env vars.")
+    return None
+
+
+def save_cloud_credentials(email: str, password: str, region: str) -> tuple[bool, str]:
+    """Persist creds. Returns (ok, where) describing where they were stored.
+       Won't try to overwrite env-var-supplied creds (those are managed by the
+       operator, not the web UI)."""
+    if os.environ.get("JACKERY_EMAIL") and os.environ.get("JACKERY_PASSWORD"):
+        return False, ("credentials are pinned via JACKERY_EMAIL/JACKERY_PASSWORD "
+                       "environment variables — unset them or edit your .env to change")
+    # Try macOS keychain first (preserves original behaviour on Mac)
+    if keychain_set("jackery-monitor", "cloud-email", email) \
+       and keychain_set("jackery-monitor", "cloud-password", password) \
+       and keychain_set("jackery-monitor", "cloud-region", region):
+        return True, "macOS keychain"
+    # Fall back to JSON file (Synology, Linux, Docker)
+    if _save_creds_file(email, password, region):
+        return True, _creds_file_path()
+    return False, "no writable credential store available"
 
 
 # ---- shared state ----
@@ -275,12 +378,11 @@ async def handle(method: str, params: dict) -> dict:
         except Exception:
             pass
 
-        # 2) persist to keychain
-        ok1 = keychain_set("jackery-monitor", "cloud-email", email)
-        ok2 = keychain_set("jackery-monitor", "cloud-password", password)
-        ok3 = keychain_set("jackery-monitor", "cloud-region", region)
-        if not (ok1 and ok2 and ok3):
-            return {"ok": False, "error": "failed to write keychain (run on macOS host?)"}
+        # 2) persist (keychain on macOS, JSON file otherwise)
+        ok, where = save_cloud_credentials(email, password, region)
+        if not ok:
+            return {"ok": False, "error": f"failed to persist credentials: {where}"}
+        log.info("persisted cloud credentials to %s", where)
 
         # 3) (re)start cloud_loop with fresh credentials
         state.cloud_creds = {"email": email, "password": password, "region": region}

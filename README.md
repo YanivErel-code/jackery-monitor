@@ -10,10 +10,11 @@ It connects through the **Jackery cloud account** (the same one the official app
 
 | Mode | When to use | Command |
 |---|---|---|
-| **Docker on macOS (bridge)** | Recommended. Container runs the web app, host bridge handles cloud auth. | `./run-bridge.sh` + `docker compose --profile mac up` |
+| **Synology / Linux** | NAS or Linux box. Dashboard + bridge both run as containers. | `./deploy-synology.sh` |
+| **Docker on macOS (bridge)** | Mac with the bridge as a host-native process (uses Keychain). | `./run-bridge.sh` + `docker compose --profile mac up` |
 | **Mock (no hardware)** | UI development / demo. | `docker compose --profile mock up` |
 
-> **Why a bridge?** Cloud credentials stay on the host (in macOS Keychain) instead of being baked into the container. The bridge is a tiny host-native process (`bridge.py`) that owns the cloud session and exposes it to the container over a local TCP socket.
+> **Why a bridge?** Cloud credentials stay on the host (macOS Keychain or a `.env` file you control) instead of being baked into the container image. The bridge (`bridge.py`) owns the cloud session and exposes it over a local TCP socket; the dashboard container talks only to the bridge. On Synology both run as containers in the same docker network; on Mac the bridge runs as a launchd agent.
 
 ---
 
@@ -130,3 +131,64 @@ jackery-monitor/
 - Cloud-API teardown: [Hsky16's Qiita writeup](https://qiita.com/Hsky16/items/c163137265a87186ac39)
 
 This app is unaffiliated with Jackery Inc.
+
+---
+
+## Quick start — Synology / Linux NAS
+
+Tested on Synology DSM 7.2+ (Container Manager) on x86_64 hardware (RS822+, DS+ models). Should work on any Linux box with Docker + Compose v2.
+
+### One-time setup
+
+1. Install **Container Manager** on the Synology (Package Center → Container Manager). DSM 7.2+ ships with Compose v2.
+2. Enable SSH (Control Panel → Terminal & SNMP → Enable SSH). SSH in as your admin user.
+3. Pick a project folder on a real volume (not `/root`). The convention is `/volume1/docker/jackery-monitor`:
+
+   ```bash
+   sudo mkdir -p /volume1/docker
+   cd /volume1/docker
+   sudo git clone https://github.com/YanivErel-code/jackery-monitor.git
+   sudo chown -R "$USER":users jackery-monitor
+   cd jackery-monitor
+   ```
+4. Run the deploy script. The first run creates `.env` from the template and exits so you can fill it in:
+
+   ```bash
+   ./deploy-synology.sh
+   nano .env          # set JACKERY_EMAIL, JACKERY_PASSWORD, optionally JACKERY_REGION
+   ./deploy-synology.sh
+   ```
+5. Open the dashboard at **`http://<your-nas-ip>:8000`**. If port 8000 is taken, set `JACKERY_HTTP_PORT=8123` (or any free port) in `.env` and re-run.
+
+### Updating to the latest code
+
+```bash
+cd /volume1/docker/jackery-monitor
+./deploy-synology.sh
+```
+
+Same script — it does `git pull` then rebuilds and restarts. The energy database in the `jackery-data` volume is preserved across rebuilds.
+
+### How credentials are stored on the NAS
+
+Two options, in priority order:
+
+1. **`.env` file** (recommended). Lives only on the NAS, mode `0600`, never committed to git. The bridge reads `JACKERY_EMAIL` / `JACKERY_PASSWORD` / `JACKERY_REGION` from environment at startup.
+2. **Sign in via the dashboard**. If `.env` is empty, the bridge starts idle and the dashboard shows a sign-in form. Submitting it persists the credentials to `/data/jackery-creds.json` inside the `jackery-data` volume (mode `0600`). Same place the energy database lives. Survives container restarts.
+
+The `set_credentials` web endpoint refuses to write when `.env` has pinned credentials — that prevents the dashboard from overriding what the operator configured.
+
+### Networking notes
+
+- The bridge container **does not publish** port 8766 to the LAN. Only the dashboard (`jackery-monitor`) on port 8000 is reachable from your network. The two containers talk over the internal docker bridge network using DNS name `jackery-bridge:8766`.
+- If you want the dashboard reachable over HTTPS / from outside your LAN, use Synology's reverse-proxy (Control Panel → Login Portal → Advanced → Reverse Proxy) to point a `https://jackery.your-domain` host to `http://localhost:8000`.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `./deploy-synology.sh: Permission denied` | `chmod +x deploy-synology.sh` |
+| `docker compose` not found | Install Container Manager from Package Center; on older DSM use `docker-compose` (script handles both). |
+| Dashboard says "bridge unreachable" | `docker compose logs jackery-bridge` — usually a credentials issue, check `.env`. |
+| Login fails with 401 | Confirm the email/password work in the actual Jackery mobile app first. |
+| Port 8000 already in use | Set `JACKERY_HTTP_PORT=8123` in `.env`, re-run `./deploy-synology.sh`. |

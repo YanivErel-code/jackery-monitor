@@ -1,10 +1,15 @@
 # Jackery Monitor — container image (cloud-only build).
 #
-# Two backends:
-#   - bridge mode  (BACKEND=bridge, talks to host bridge.py over TCP)
-#   - mock mode    (BACKEND=mock, synthetic telemetry)
+# Same image runs either the web server or the cloud bridge — the compose
+# file picks which entrypoint to use per service.
 #
-# Run via docker-compose for the recommended setups.
+#   - server.py  : FastAPI dashboard + WebSocket fan-out (port 8000)
+#   - bridge.py  : Cloud poller, JSON-RPC over TCP (port 8766)
+#
+# Compose profiles:
+#   mac        - dashboard only; bridge runs on the macOS host
+#   mock       - no hardware/cloud, synthetic telemetry (UI dev)
+#   synology   - dashboard + bridge, both in containers (Linux/NAS)
 
 FROM python:3.11-slim
 
@@ -19,12 +24,16 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-COPY server.py device_client.py energy_db.py cloud_client.py ./
+# Copy everything the server AND the bridge need.
+COPY server.py bridge.py device_client.py energy_db.py cloud_client.py ./
 COPY web ./web
 
-EXPOSE 8000
+# Persistent data lives here (energy.db, jackery-creds.json on Linux hosts).
+RUN mkdir -p /data
+VOLUME ["/data"]
 
-# Default: bridge mode. docker-compose can override.
-ENV BACKEND=bridge
+EXPOSE 8000 8766
 
+# Default command runs the dashboard. The bridge service in compose
+# overrides this with `command: ["python", "bridge.py"]`.
 CMD ["python", "server.py"]
