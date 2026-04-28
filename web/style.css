@@ -170,7 +170,11 @@ a { color: var(--accent-2); }
 
 /* ============== Main + Tabs ============== */
 main {
-  max-width: 1200px;
+  /* Adapt to the screen. On a 1200-1600px laptop the content fills almost
+     edge-to-edge; on a 2K/ultrawide display we cap at 1800px so reading
+     line-length stays comfortable while the chart gets the most width.
+     Phones / narrow tablets keep their dedicated breakpoints below. */
+  max-width: min(95vw, 1800px);
   margin: 0 auto;
   padding: 22px;
 }
