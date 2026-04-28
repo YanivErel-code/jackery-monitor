@@ -1,5 +1,10 @@
 # Jackery Monitor
 
+[![CI](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml)
+[![Docker image](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml)
+[![License](https://img.shields.io/github/license/YanivErel-code/jackery-monitor)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+
 Self-hosted dashboard for Jackery power stations. Live battery + power, 6-hour
 history chart, output control over MQTT, energy aggregation in SQLite, and
 SOC-driven automations that flip Kasa smart plugs.
@@ -273,6 +278,39 @@ Persistent state on the NAS (Docker volume `jackery-data`, mounted at
 | Energy DB lost data after a project recreate | Container Manager's "Delete project" can wipe the volume if you don't uncheck "Delete volumes". Always uncheck. |
 
 ---
+
+## Privacy
+
+What stays on your NAS:
+
+- All Jackery telemetry history (`/data/energy.db`, SQLite)
+- All automation rules and saved Kasa devices (`/data/automation.json`,
+  `/data/kasa_devices.json`)
+- All saved settings (`/data/settings.json`)
+- All credentials, encrypted at rest with AES-256-GCM:
+  - Jackery cloud account → `/data/jackery-creds.json`
+  - Kasa cloud account → `/data/kasa-creds.json`
+  - Dashboard login → `/data/auth.json`
+- The single AES key for all of the above → `/data/.jackery-creds.key`
+  (mode 0600)
+
+What leaves the NAS:
+
+- Calls to **`iot.jackeryapp.com`** (Jackery cloud) for telemetry + login.
+- Calls to **`emqx.jackeryapp.com`** (Jackery cloud MQTT broker) for
+  output control + real-time push.
+- Calls to **Kasa smart plugs on your LAN** (direct IP) for automation
+  actions; for newer Kasa SMART devices, this includes their cloud-account
+  credentials in the local KLAP handshake.
+
+What is **never** sent off-device by this app:
+
+- No analytics, telemetry, or usage data to the project author.
+- No error reporting to a third party.
+- No phone-home of any kind. The container speaks to Jackery's cloud
+  (because it has to to read your battery state) and to Kasa devices
+  on your LAN (because that's the point of the automation feature).
+  That's it.
 
 ## Limitations
 
