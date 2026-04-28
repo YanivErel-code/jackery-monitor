@@ -20,6 +20,17 @@ let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
 let activeTab = 'live';
 
+// ---------- service worker ----------
+// Register on next idle so it doesn't compete with first-paint. The SW
+// caches the static shell so the dashboard loads fast (and works briefly
+// offline) once it's installed via "Add to Home Screen".
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .catch((e) => console.warn('SW register failed:', e));
+  });
+}
+
 // ---------- helpers ----------
 function fmt(n, digits = 0) {
   if (n === null || n === undefined || Number.isNaN(n)) return '—';

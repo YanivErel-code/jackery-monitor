@@ -38,6 +38,12 @@ html, body {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   min-height: 100vh;
+  /* When installed as a home-screen PWA on iOS the page renders edge-to-edge,
+     so respect the notch / dynamic island / home indicator. */
+  padding-top:    env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left:   env(safe-area-inset-left);
+  padding-right:  env(safe-area-inset-right);
 }
 
 /* Subtle ambient gradient — a hint of green-blue glow at the top, fading

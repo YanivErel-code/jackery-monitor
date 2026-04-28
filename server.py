@@ -563,6 +563,22 @@ def index():
     return FileResponse(WEB_DIR / "index.html")
 
 
+# PWA manifest + service worker MUST live at the site root for the browser
+# to honor them as PWA assets — `/static/sw.js` would have a scope limited
+# to `/static/`, breaking the install + offline-shell flow.
+@app.get("/manifest.webmanifest")
+def manifest():
+    return FileResponse(WEB_DIR / "manifest.webmanifest",
+                        media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse(WEB_DIR / "sw.js",
+                        media_type="application/javascript",
+                        headers={"Service-Worker-Allowed": "/"})
+
+
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
