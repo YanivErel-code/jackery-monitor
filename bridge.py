@@ -70,6 +70,10 @@ log = logging.getLogger("bridge")
 HOST = os.environ.get("BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BRIDGE_PORT", "8766"))
 CLOUD_POLL = int(os.environ.get("CLOUD_POLL_INTERVAL_S", "15"))
+# When the cloud kicks our session (because the iOS app just logged in),
+# back off for this long before trying to reclaim it. Keeps the bridge from
+# fighting the phone app for the single allowed session per account.
+SESSION_CONTESTED_COOLDOWN_S = int(os.environ.get("SESSION_CONTESTED_COOLDOWN_S", "60"))
 
 
 # ---- credential storage (multi-backend) ----
@@ -362,6 +366,14 @@ class State:
         self.cloud_force_repoll: asyncio.Event = asyncio.Event()
         # background task handle for cloud_loop so we can cancel/restart it
         self.cloud_task: Optional[asyncio.Task] = None
+        # User-initiated polling pause (epoch seconds, 0 = not paused).
+        # Set via pause_polling RPC; the cloud poller skips iterations until
+        # `time.time() >= pause_until`.
+        self.pause_until: float = 0.0
+        # Auto-cooldown after a contested-session error. Same shape as above
+        # but populated by the cloud_loop itself when it catches a 401-style
+        # response from the cloud.
+        self.contested_until: float = 0.0
 
 state = State()
 
@@ -372,7 +384,11 @@ async def cloud_loop() -> None:
         return
     # lazy import so users without httpx/pycryptodome aren't blocked at boot
     try:
-        from cloud_client import JackeryCloudClient, cloud_props_to_telemetry
+        from cloud_client import (
+            JackeryCloudClient,
+            SessionContestedError,
+            cloud_props_to_telemetry,
+        )
     except Exception as e:
         log.warning("Cloud client unavailable: %s", e)
         state.cloud_state = "error"
@@ -387,6 +403,19 @@ async def cloud_loop() -> None:
     state.cloud_client = c
     backoff = 10
     while True:
+        # Honor user-initiated pause and contested-session cooldown.
+        # We tick every few seconds rather than sleeping the full window so a
+        # resume_polling RPC takes effect quickly.
+        now = time.time()
+        wait_until = max(state.pause_until, state.contested_until)
+        if wait_until > now:
+            if state.pause_until > now:
+                state.cloud_state = "paused"
+            elif state.contested_until > now:
+                state.cloud_state = "contested"
+            await asyncio.sleep(min(5.0, wait_until - now))
+            continue
+
         try:
             if not c.token:
                 state.cloud_state = "logging-in"
@@ -430,6 +459,17 @@ async def cloud_loop() -> None:
                 state.cloud_state = "connected"
                 state.cloud_error = None
             backoff = 10
+        except SessionContestedError as e:
+            # The phone app (or another client) just logged in and bumped us.
+            # Don't fight back — cool down and let them keep the session.
+            state.contested_until = time.time() + SESSION_CONTESTED_COOLDOWN_S
+            state.cloud_state = "contested"
+            state.cloud_error = str(e)
+            if state.cloud_client:
+                state.cloud_client.token = None
+            log.info("Session contested by another client; cooling down %ds",
+                     SESSION_CONTESTED_COOLDOWN_S)
+            continue
         except Exception as e:
             state.cloud_state = "error"
             state.cloud_error = str(e)
@@ -457,6 +497,8 @@ def merged_poll() -> dict:
     tele = state.cloud_telemetry
     device = state.cloud_device
 
+    pause_remaining = max(0.0, state.pause_until - now) if state.pause_until else 0.0
+    contested_remaining = max(0.0, state.contested_until - now) if state.contested_until else 0.0
     return {
         "telemetry": tele,
         "source": src,
@@ -469,6 +511,10 @@ def merged_poll() -> dict:
             "device": state.cloud_device,
             "devices": list(state.cloud_devices),
             "selected_device_id": state.cloud_device_id,
+            "pause_until": state.pause_until or None,
+            "pause_remaining_s": round(pause_remaining, 1) if pause_remaining else None,
+            "contested_until": state.contested_until or None,
+            "contested_remaining_s": round(contested_remaining, 1) if contested_remaining else None,
         },
     }
 
@@ -607,6 +653,33 @@ async def handle(method: str, params: dict) -> dict:
         state.cloud_telemetry = None
         state.cloud_ts = None
         return {"ok": True, "cleared": where}
+
+    if method == "pause_polling":
+        # Pause the cloud poller so the user can use the phone app without
+        # the bridge stealing the session back. seconds defaults to 10 min;
+        # clamped to [1, 3600] so a typo doesn't pause for a year.
+        try:
+            seconds = int(params.get("seconds") or 600)
+        except (TypeError, ValueError):
+            seconds = 600
+        seconds = max(1, min(seconds, 3600))
+        state.pause_until = time.time() + seconds
+        state.cloud_state = "paused"
+        log.info("Polling paused by user for %ds", seconds)
+        return {"ok": True, "pause_until": state.pause_until, "seconds": seconds}
+
+    if method == "resume_polling":
+        was_paused = state.pause_until > time.time()
+        state.pause_until = 0.0
+        # Also clear an active auto-cooldown — the user is explicitly asking
+        # to take the session back now.
+        state.contested_until = 0.0
+        if state.cloud_state in ("paused", "contested"):
+            state.cloud_state = "logging-in"
+        # Nudge the loop awake so we re-poll right away.
+        state.cloud_force_repoll.set()
+        log.info("Polling resumed by user (was_paused=%s)", was_paused)
+        return {"ok": True, "was_paused": was_paused}
 
     if method == "set_output":
         # Cloud API does not expose port toggles; this build is read-only.

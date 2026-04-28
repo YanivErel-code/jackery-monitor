@@ -93,6 +93,73 @@ $('login-form')?.addEventListener('submit', async (e) => {
 // ============================================================
 // FORGET CREDENTIALS (Device tab > Account)
 // ============================================================
+// ============================================================
+// PAUSE / RESUME polling — hand the cloud session to the phone app
+// ============================================================
+let _lastCloudMeta = null;        // last s.cloud snapshot for the countdown tick
+
+function fmtSecsMMSS(secs) {
+  if (!isFinite(secs) || secs <= 0) return '0:00';
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return m + ':' + (s < 10 ? '0' + s : s);
+}
+
+function renderPausePill() {
+  const btn = $('pause-poll');
+  const status = $('pause-status');
+  if (!btn || !status) return;
+  const meta = _lastCloudMeta;
+  if (!meta) return;
+  // Recompute remaining from absolute timestamps so we don't drift if the
+  // server's payload is stale by a few seconds.
+  const now = Date.now() / 1000;
+  const pauseLeft = meta.pause_until ? Math.max(0, meta.pause_until - now) : 0;
+  const contestedLeft = meta.contested_until ? Math.max(0, meta.contested_until - now) : 0;
+
+  if (pauseLeft > 0) {
+    btn.textContent = 'Resume polling';
+    status.hidden = false;
+    status.textContent = `paused — ${fmtSecsMMSS(pauseLeft)} left`;
+  } else if (contestedLeft > 0) {
+    btn.textContent = 'Pause polling for 10 min';
+    status.hidden = false;
+    status.textContent = `session contested — auto-reclaiming in ${fmtSecsMMSS(contestedLeft)}`;
+  } else {
+    btn.textContent = 'Pause polling for 10 min';
+    status.hidden = true;
+    status.textContent = '';
+  }
+}
+
+$('pause-poll')?.addEventListener('click', async () => {
+  const btn = $('pause-poll');
+  const meta = _lastCloudMeta || {};
+  const now = Date.now() / 1000;
+  const isPaused = meta.pause_until && meta.pause_until > now;
+  btn.disabled = true;
+  try {
+    const url = isPaused ? '/api/resume_polling' : '/api/pause_polling';
+    const opts = { method: 'POST', headers: { 'content-type': 'application/json' } };
+    if (!isPaused) opts.body = JSON.stringify({ seconds: 600 });
+    await fetch(url, opts);
+    // Optimistic update; the WS broadcast / next /api/status poll will reconcile.
+    if (isPaused) {
+      _lastCloudMeta = { ..._lastCloudMeta, pause_until: null, contested_until: null };
+    } else {
+      _lastCloudMeta = { ..._lastCloudMeta, pause_until: now + 600, contested_until: null };
+    }
+    renderPausePill();
+  } catch (e) {
+    console.error('pause toggle failed', e);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 1-second countdown tick so the "x:yy left" label updates live
+setInterval(renderPausePill, 1000);
+
 $('forget-creds')?.addEventListener('click', async () => {
   const btn = $('forget-creds');
   const msg = $('forget-msg');
@@ -309,6 +376,8 @@ function applyStatus(s) {
   $('dev-model').textContent = dev.model_code != null ? `model ${dev.model_code}` : '—';
   $('dev-sn').textContent    = dev.device_sn || '—';
   $('src-cloud').textContent = describeSrc(s.cloud);
+  _lastCloudMeta = s.cloud || null;
+  renderPausePill();
   $('dev-updated').textContent = s.last_update_ts ? new Date(s.last_update_ts * 1000).toLocaleString() : '—';
   const upsParts = [t.ups_on && 'UPS', t.super_charge_on && 'Super charge'].filter(Boolean);
   $('dev-ups').textContent = upsParts.length ? upsParts.join(' + ')
