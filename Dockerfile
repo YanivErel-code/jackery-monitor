@@ -24,8 +24,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-# Copy everything the server AND the bridge need.
-COPY server.py bridge.py device_client.py energy_db.py cloud_client.py settings.py ./
+# Copy every Python module + the web assets. We use a glob (*.py) instead of
+# enumerating files so adding a new module doesn't silently fail to land in
+# the image (we got bitten once by forgetting to add settings.py here).
+COPY *.py ./
 COPY web ./web
 
 # Persistent data lives here (energy.db, jackery-creds.json on Linux hosts).
