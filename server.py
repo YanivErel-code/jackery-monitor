@@ -34,6 +34,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import settings as user_settings
 from device_client import DeviceClient, DeviceInfo, DeviceClientError, make_client
 from energy_db import EnergyDB
 
@@ -43,8 +44,6 @@ log = logging.getLogger("jackery-monitor")
 
 # ---------- config ----------
 WEB_DIR = Path(__file__).parent / "web"
-POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", "10"))
-LOW_BATTERY_THRESHOLD = int(os.environ.get("LOW_BATTERY_THRESHOLD", "20"))
 # Live chart shows the last N hours by appending one in-memory sample per
 # LIVE_CHART_INTERVAL_S (independent of how often we poll the bridge — the
 # poll cadence is for the energy aggregator and live KPIs). The deque is
@@ -126,7 +125,7 @@ async def poll_loop() -> None:
                 log.info("poll_loop: client not connected, attempting reconnect...")
                 ok = await connect_device()
                 if not ok:
-                    await asyncio.sleep(POLL_INTERVAL_S)
+                    await asyncio.sleep(user_settings.get("poll_interval_s"))
                     continue
 
             status_dict = await state.client.poll()
@@ -205,20 +204,23 @@ async def poll_loop() -> None:
                     state.last_history_ts = ts
                 await broadcast({"type": "telemetry", "data": serialize_status()})
 
+                threshold = user_settings.get("low_battery_threshold")
                 bp = status_dict["battery_percent"]
-                if bp <= LOW_BATTERY_THRESHOLD and not state.low_battery_alerted:
+                if bp <= threshold and not state.low_battery_alerted:
                     state.low_battery_alerted = True
                     await broadcast({
                         "type": "alert",
                         "data": {"level": "warning",
                                  "message": f"Battery low: {bp}%"},
                     })
-                elif bp > LOW_BATTERY_THRESHOLD + 5:
+                elif bp > threshold + 5:
                     state.low_battery_alerted = False
         except Exception as e:
             log.exception("Poll loop error: %s", e)
 
-        await asyncio.sleep(POLL_INTERVAL_S)
+        # Re-read each iteration so a settings change applies on the next
+        # cycle (instead of at restart).
+        await asyncio.sleep(user_settings.get("poll_interval_s"))
 
 
 # ---------- WebSocket fan-out ----------
@@ -253,7 +255,7 @@ def serialize_status() -> dict[str, Any]:
         "history": list(state.history),
         "mock_mode": state.backend == "mock",
         "backend": state.backend,
-        "low_battery_threshold": LOW_BATTERY_THRESHOLD,
+        "low_battery_threshold": user_settings.get("low_battery_threshold"),
         "source": state.last_source,
         "cloud": state.last_cloud_meta,
         "energy": energy,

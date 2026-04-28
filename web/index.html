@@ -104,16 +104,20 @@
         <section class="card kpi-card">
           <div class="card-eyebrow"><span>Input now</span></div>
           <div class="kpi-value"><span id="input-w">—</span><small>W</small></div>
-          <div class="kpi-sub" id="input-source-line">grid / solar</div>
+          <div class="kpi-sub" id="input-source-line">
+            <span class="lbl">Grid</span> <span id="input-grid-w">—</span><small>W</small>
+            <span class="dot-sep">·</span>
+            <span class="lbl">Solar</span> <span id="input-solar-w">—</span><small>W</small>
+          </div>
         </section>
 
         <section class="card kpi-card">
           <div class="card-eyebrow"><span>Today</span></div>
           <div class="kpi-value">
-            <span id="today-out-kwh">—</span><small>kWh out</small>
+            <span id="today-out-kwh">—</span><small>kWh consumed</small>
           </div>
           <div class="kpi-sub">
-            <span id="today-in-kwh">—</span><small>kWh in</small>
+            <span id="today-in-kwh">—</span><small>kWh charged</small>
           </div>
         </section>
       </div>
