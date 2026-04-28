@@ -60,7 +60,7 @@ services:
       jackery-bridge:
         condition: service_healthy
     ports:
-      - "${JACKERY_HTTP_PORT:-8000}:8000"
+      - "${JACKERY_HTTP_PORT:-8123}:8000"
     environment:
       BACKEND: bridge
       BRIDGE_URL: jackery-bridge:8766
