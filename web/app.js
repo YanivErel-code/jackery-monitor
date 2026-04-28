@@ -303,7 +303,74 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'settings') { loadSettings(); }
+  if (name === 'logs')     { loadLogs(); }
 }
+
+// ============================================================
+// LOGS TAB
+// ============================================================
+let _logsTimer = null;
+
+async function loadLogs() {
+  const list = $('logs-list');
+  if (!list) return;
+  try {
+    const r = await fetch('/api/events?limit=200');
+    const j = await r.json();
+    renderLogs(j.events || []);
+  } catch (e) {
+    list.innerHTML = `<div class="logs-empty">Failed to load: ${e.message || e}</div>`;
+  }
+  // Restart auto-refresh timer based on the checkbox state
+  if (_logsTimer) { clearInterval(_logsTimer); _logsTimer = null; }
+  if ($('logs-auto')?.checked && activeTab === 'logs') {
+    _logsTimer = setInterval(() => {
+      if (activeTab !== 'logs') { clearInterval(_logsTimer); _logsTimer = null; return; }
+      loadLogs();
+    }, 5000);
+  }
+}
+
+function renderLogs(events) {
+  const list = $('logs-list');
+  const filterValue = $('logs-filter')?.value || 'all';
+  // Filter: 'all', a level (error/warn/info), or a category (auth/poll/mqtt/session)
+  const levelOrder = { error: 0, warn: 1, info: 2 };
+  const filtered = events.filter((e) => {
+    if (filterValue === 'all') return true;
+    if (filterValue in levelOrder) {
+      // "warn" means warn+error, "info" means everything
+      return levelOrder[e.level] <= levelOrder[filterValue];
+    }
+    return e.category === filterValue;
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="logs-empty">No events yet.</div>';
+    return;
+  }
+  // Newest first.
+  filtered.sort((a, b) => b.ts - a.ts);
+  list.innerHTML = filtered.map((e) => {
+    const ts = new Date(e.ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
+    const extras = e.extra ? ' · ' + Object.entries(e.extra).map(([k, v]) =>
+      `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' ') : '';
+    const safe = (s) => String(s).replace(/[<>&]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    return `<div class="logs-row lvl-${e.level}">
+      <span class="lr-ts">${ts}</span>
+      <span class="lr-level">${e.level}</span>
+      <span class="lr-cat">${safe(e.category)}</span>
+      <span class="lr-msg">${safe(e.message)}${safe(extras)}</span>
+    </div>`;
+  }).join('');
+}
+
+$('logs-refresh')?.addEventListener('click', loadLogs);
+$('logs-filter')?.addEventListener('change', () => {
+  // Re-render with the same data — we kept the last result on the DOM but
+  // it's cheaper to just re-fetch since the buffer is small.
+  loadLogs();
+});
+$('logs-auto')?.addEventListener('change', loadLogs);
 
 // ============================================================
 // SETTINGS TAB

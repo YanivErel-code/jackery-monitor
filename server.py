@@ -412,6 +412,22 @@ async def api_clear_credentials():
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
+@app.get("/api/events")
+async def api_events(limit: int = 100, since: float = 0.0):
+    """Return the bridge's recent event log (auth, poll, mqtt, session, etc.)
+       for the dashboard's Logs tab. `since` is unix-seconds; older events
+       are filtered out so the UI can do incremental polling cheaply."""
+    fetcher = getattr(state.client, "get_events", None)
+    if not fetcher:
+        # Mock backend has no event log — return empty so the tab still loads.
+        return {"events": []}
+    try:
+        events = await fetcher(limit=limit, since=since)
+    except DeviceClientError as e:
+        raise HTTPException(400, str(e))
+    return {"events": events}
+
+
 @app.get("/api/settings")
 def api_settings_get():
     """Return the schema (label/hint/min/max/value for each setting) so the

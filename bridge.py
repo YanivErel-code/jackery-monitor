@@ -349,6 +349,48 @@ def save_cloud_credentials(email: str, password: str, region: str) -> tuple[bool
     return False, "no writable credential store available"
 
 
+# ---- event ring buffer ----
+# Compact in-memory log of notable events surfaced to the dashboard's Logs
+# tab. We deliberately don't capture every poll line (would be noisy) — only
+# state transitions, errors, MQTT publishes, and other "what just happened"
+# moments. Capped to EVENTS_MAX entries; oldest evicted on overflow.
+EVENTS_MAX = 200
+_events: list[dict] = []
+
+
+def event(level: str, category: str, message: str, **extra) -> None:
+    """Push one event to the ring buffer. Also routes to the regular logger
+       at the matching level so SSH/Container Manager logs still see it."""
+    e = {
+        "ts": time.time(),
+        "level": level,            # "info" | "warn" | "error"
+        "category": category,      # "auth" | "poll" | "mqtt" | "session" | "settings" | "device"
+        "message": message,
+    }
+    if extra:
+        e["extra"] = extra
+    _events.append(e)
+    if len(_events) > EVENTS_MAX:
+        del _events[: len(_events) - EVENTS_MAX]
+    # Mirror to standard logging so the host-side container log keeps capturing.
+    if level == "error":
+        log.error("%s: %s%s", category, message, f" {extra}" if extra else "")
+    elif level == "warn":
+        log.warning("%s: %s%s", category, message, f" {extra}" if extra else "")
+    else:
+        log.info("%s: %s%s", category, message, f" {extra}" if extra else "")
+
+
+def get_events(limit: int = 100, since: float = 0.0) -> list[dict]:
+    """Return the most recent events, optionally filtered to ts > since."""
+    out = _events
+    if since:
+        out = [e for e in out if e["ts"] > since]
+    if limit and len(out) > limit:
+        out = out[-limit:]
+    return out
+
+
 # ---- shared state ----
 class State:
     def __init__(self) -> None:
@@ -356,6 +398,11 @@ class State:
         self.cloud_state: str = "needs-credentials"  # needs-credentials | logging-in | connected | error
         self.cloud_device: Optional[dict] = None
         self.cloud_telemetry: Optional[dict] = None
+        # Raw property dict accumulated from BOTH HTTP polls (full snapshot)
+        # and MQTT pushes (incremental deltas). Telemetry is rebuilt from
+        # this on every update so the UI sees real-time MQTT pushes blended
+        # seamlessly with HTTP poll backstops.
+        self.cloud_props_raw: dict = {}
         self.cloud_ts: Optional[float] = None
         self.cloud_error: Optional[str] = None
         self.cloud_client = None               # JackeryCloudClient | None
@@ -402,6 +449,24 @@ async def cloud_loop() -> None:
     )
     state.cloud_client = c
     backoff = 10
+
+    # Realtime push handler — called from the asyncio loop whenever MQTT
+    # pushes a property delta. Blends into cloud_props_raw + cloud_telemetry
+    # so the UI gets ~500ms-fresh updates without our HTTP polling speeding up.
+    async def _on_property_push(body: dict):
+        if not isinstance(body, dict) or not body:
+            return
+        state.cloud_props_raw.update(body)
+        state.cloud_telemetry = cloud_props_to_telemetry(state.cloud_props_raw)
+        state.cloud_ts = time.time()
+        if state.cloud_state not in ("paused", "contested"):
+            state.cloud_state = "connected"
+        # Compact log line; sample of changed keys goes to extras for the
+        # Logs tab so it's visible what's actually pushing.
+        event("info", "mqtt", f"Realtime update ({len(body)} keys)",
+              keys=sorted(body.keys())[:8])
+
+    realtime_subscribed = False
     while True:
         # Honor user-initiated pause and contested-session cooldown.
         # We tick every few seconds rather than sleeping the full window so a
@@ -420,6 +485,7 @@ async def cloud_loop() -> None:
             if not c.token:
                 state.cloud_state = "logging-in"
                 await c.login()
+                event("info", "auth", "Cloud login OK", user_id=c.user_id)
             # Refresh device list on first iteration AND whenever no device
             # is selected. Keeps the dropdown current.
             if not state.cloud_devices or not state.cloud_device_id:
@@ -454,10 +520,25 @@ async def cloud_loop() -> None:
 
             props = await c.fetch_properties(state.cloud_device_id)
             if props:
-                state.cloud_telemetry = cloud_props_to_telemetry(props)
+                # Merge into accumulated raw state (vs replace) so a sparse
+                # MQTT push between this poll and the next doesn't get its
+                # keys overwritten by stale-but-fuller HTTP data.
+                state.cloud_props_raw.update(props)
+                state.cloud_telemetry = cloud_props_to_telemetry(state.cloud_props_raw)
                 state.cloud_ts = time.time()
                 state.cloud_state = "connected"
                 state.cloud_error = None
+            # Subscribe to MQTT pushes once per cloud_loop lifetime, after
+            # the first successful HTTP poll (so user_id is set + device
+            # selected). paho-mqtt handles reconnect re-subscription via
+            # on_connect.
+            if not realtime_subscribed:
+                try:
+                    await c.subscribe_realtime(_on_property_push)
+                    realtime_subscribed = True
+                    event("info", "mqtt", "Subscribed to realtime device topic")
+                except Exception as e:
+                    event("warn", "mqtt", f"Realtime subscribe failed: {e}")
             backoff = 10
         except SessionContestedError as e:
             # The phone app (or another client) just logged in and bumped us.
@@ -468,15 +549,16 @@ async def cloud_loop() -> None:
             state.cloud_error = str(e)
             if state.cloud_client:
                 state.cloud_client.token = None
-            log.info("Session contested by another client; cooling down %ds",
-                     cooldown)
+            event("warn", "session",
+                  f"Session contested by another client; cooling down {cooldown}s",
+                  cooldown_s=cooldown)
             continue
         except Exception as e:
             state.cloud_state = "error"
             state.cloud_error = str(e)
-            log.warning("Cloud poll error: %s", e)
             if state.cloud_client:
                 state.cloud_client.token = None
+            event("error", "poll", f"Cloud poll error: {e}", backoff_s=min(backoff, 300))
             await asyncio.sleep(min(backoff, 300))
             backoff = min(backoff * 2, 300)
             continue
@@ -587,6 +669,7 @@ async def handle(method: str, params: dict) -> dict:
         state.cloud_devices = []
         state.cloud_device_id = None
         state.cloud_telemetry = None
+        state.cloud_props_raw = {}
         state.cloud_ts = None
         if state.cloud_client:
             try:
@@ -623,6 +706,7 @@ async def handle(method: str, params: dict) -> dict:
             }
             # Drop stale telemetry so the UI doesn't briefly show old data
             state.cloud_telemetry = None
+            state.cloud_props_raw = {}
             state.cloud_ts = None
             state.cloud_force_repoll.set()
         return {"ok": True, "device_id": device_id, "name": match["name"]}
@@ -653,6 +737,7 @@ async def handle(method: str, params: dict) -> dict:
         state.cloud_devices = []
         state.cloud_device_id = None
         state.cloud_telemetry = None
+        state.cloud_props_raw = {}
         state.cloud_ts = None
         return {"ok": True, "cleared": where}
 
@@ -667,7 +752,8 @@ async def handle(method: str, params: dict) -> dict:
         seconds = max(1, min(seconds, 3600))
         state.pause_until = time.time() + seconds
         state.cloud_state = "paused"
-        log.info("Polling paused by user for %ds", seconds)
+        event("info", "session", f"Polling paused by user for {seconds}s",
+              seconds=seconds)
         return {"ok": True, "pause_until": state.pause_until, "seconds": seconds}
 
     if method == "resume_polling":
@@ -680,8 +766,16 @@ async def handle(method: str, params: dict) -> dict:
             state.cloud_state = "logging-in"
         # Nudge the loop awake so we re-poll right away.
         state.cloud_force_repoll.set()
-        log.info("Polling resumed by user (was_paused=%s)", was_paused)
+        event("info", "session", "Polling resumed by user", was_paused=was_paused)
         return {"ok": True, "was_paused": was_paused}
+
+    if method == "get_events":
+        try:
+            limit = int(params.get("limit") or 100)
+            since = float(params.get("since") or 0.0)
+        except (TypeError, ValueError):
+            limit, since = 100, 0.0
+        return {"ok": True, "events": get_events(limit=limit, since=since)}
 
     if method == "set_output":
         # Output toggles go over MQTT (emqx.jackeryapp.com). The cloud_client
@@ -700,8 +794,11 @@ async def handle(method: str, params: dict) -> dict:
         try:
             ack = await state.cloud_client.publish_command(device_sn, port, on)
         except Exception as e:
-            log.warning("set_output(%s, %s) failed: %s", port, on, e)
+            event("error", "mqtt", f"set_output({port}, {on}) failed: {e}",
+                  port=port, on=on)
             return {"ok": False, "error": str(e)}
+        event("info", "mqtt", f"Output {port.upper()} -> {'ON' if on else 'OFF'}",
+              port=port, on=on, action_id=ack.get("action_id"))
         # Force a quick re-poll so the UI reflects the new state without
         # waiting for the next 15s poll cycle.
         state.cloud_force_repoll.set()

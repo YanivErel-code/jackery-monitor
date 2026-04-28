@@ -67,6 +67,7 @@
       <button class="tab on" data-tab="live">Live</button>
       <button class="tab" data-tab="energy">Energy</button>
       <button class="tab" data-tab="device">Device</button>
+      <button class="tab" data-tab="logs">Logs</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
 
@@ -262,6 +263,35 @@
         </p>
         <button id="forget-creds" class="btn btn-ghost" type="button">Sign out / Forget credentials</button>
         <p id="forget-msg" class="login-error" hidden style="margin-top:10px"></p>
+      </section>
+    </section>
+
+    <!-- ============== LOGS TAB ============== -->
+    <section id="tab-logs" class="tab-panel" hidden>
+      <section class="card">
+        <div class="card-header">
+          <h2>Bridge events</h2>
+          <div class="logs-controls">
+            <select id="logs-filter" class="device-select">
+              <option value="all" selected>All</option>
+              <option value="error">Errors</option>
+              <option value="warn">Warnings+</option>
+              <option value="info">Info+</option>
+              <option value="auth">Auth</option>
+              <option value="poll">Poll</option>
+              <option value="mqtt">MQTT</option>
+              <option value="session">Session</option>
+            </select>
+            <label class="logs-auto">
+              <input type="checkbox" id="logs-auto" checked /> auto-refresh
+            </label>
+            <button id="logs-refresh" class="btn btn-ghost" type="button">Refresh</button>
+          </div>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Recent activity from the bridge — login, polling, MQTT publishes, session contests. Most recent at the top.
+        </p>
+        <div id="logs-list" class="logs-list"></div>
       </section>
     </section>
 

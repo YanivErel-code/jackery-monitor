@@ -363,6 +363,55 @@ class JackeryCloudClient:
         log.info("MQTT connected to %s:%d as %s", self.BROKER_HOST, self.BROKER_PORT, client_id)
         return client
 
+    async def subscribe_realtime(self, on_property_change) -> None:
+        """Subscribe to MQTT property-change pushes from the device.
+
+        `on_property_change(body)` is an async callable; we schedule it on
+        the running event loop whenever the device pushes a delta. This is
+        how the iOS app gets ~500ms-fresh updates without HTTP polling.
+        """
+        if not self.user_id:
+            raise CloudAuthError("subscribe_realtime: user_id missing — login first")
+        client = await self._ensure_mqtt()
+        loop = asyncio.get_running_loop()
+        topic_prefix = f"hb/app/{self.user_id}"
+
+        def _on_message(_client, _userdata, msg):
+            try:
+                payload = json.loads(msg.payload.decode())
+            except Exception as e:
+                log.warning("MQTT parse error on %s: %s", msg.topic, e)
+                return
+            mt = payload.get("messageType")
+            if mt != "DevicePropertyChange":
+                return  # ignore notices/alerts/online-changes — telemetry only
+            body = payload.get("body")
+            if not isinstance(body, dict):
+                return
+            # paho callbacks fire on a network thread; bounce onto asyncio.
+            try:
+                asyncio.run_coroutine_threadsafe(on_property_change(body), loop)
+            except RuntimeError:
+                pass  # loop shutting down
+
+        # Re-subscribe on every reconnect — paho fires on_connect on initial
+        # connect AND after auto-reconnect. Without this, the realtime stream
+        # silently dies after the first network hiccup.
+        device_topic = f"{topic_prefix}/device"
+        def _on_connect(_client, _userdata, _flags, _rc, _props=None):
+            try:
+                _client.subscribe(device_topic, qos=1)
+                log.info("MQTT (re)subscribed to %s", device_topic)
+            except Exception as e:
+                log.warning("MQTT subscribe failed: %s", e)
+
+        client.on_message = _on_message
+        client.on_connect = _on_connect
+        # Already connected? Subscribe now too.
+        if client.is_connected():
+            client.subscribe(device_topic, qos=1)
+            log.info("MQTT subscribed to %s", device_topic)
+
     async def publish_command(self, device_sn: str, port: str, on: bool,
                               timeout_s: float = 5.0) -> dict:
         """Send an output toggle command. Returns broker ack info."""
