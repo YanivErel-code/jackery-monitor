@@ -7,10 +7,16 @@
  * strategy for everything else (live API calls always go to the bridge).
  */
 
-const CACHE = 'jackery-shell-v1';
+// Bump this whenever the static-shell semantics change (or whenever a
+// stuck cache is suspected). The activate handler drops every cache that
+// isn't the current name, so installed clients get fresh files on the
+// next navigation. Don't include CSS in the shell — the browser's
+// standard cache + FastAPI's Last-Modified header handle revalidation
+// fine, and a stale CSS in the SW cache once cost us a "phantom Confirm
+// password field on the login page" debugging spiral.
+const CACHE = 'jackery-shell-v3';
 const SHELL = [
   '/',
-  '/static/style.css',
   '/static/app.js',
   '/static/icon.svg',
   '/manifest.webmanifest',
