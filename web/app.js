@@ -517,6 +517,11 @@ document.getElementById('kasa-form')?.addEventListener('submit', async (e) => {
   }
 });
 
+// Filter mode: 'active' = only rules for the currently-selected Jackery
+// device (driven by the top-right Device picker). 'all' = show everything.
+let _ruleFilterMode = 'active';
+let _allRules = [];
+
 async function loadRules() {
   const list = $('auto-rules');
   if (!list) return;
@@ -524,11 +529,42 @@ async function loadRules() {
   try {
     const r = await fetch('/api/automation/rules');
     const j = await r.json();
-    renderAutomationRules(j.rules || []);
+    _allRules = j.rules || [];
+    renderRulesWithFilter();
   } catch (e) {
     list.innerHTML = `<div class="auto-empty">Failed to load: ${e.message || e}</div>`;
   }
 }
+
+function activeJackeryDevice() {
+  if (!lastStatus || !lastStatus.cloud) return null;
+  const sel = lastStatus.cloud.selected_device_id;
+  return (lastStatus.cloud.devices || []).find((d) => d.device_id === sel) || null;
+}
+
+function renderRulesWithFilter() {
+  const filterName = $('auto-rules-filter-name');
+  const toggle = $('auto-rules-filter-toggle');
+  const active = activeJackeryDevice();
+  let displayed = _allRules;
+
+  if (_ruleFilterMode === 'active' && active) {
+    if (filterName) filterName.textContent = active.name || active.device_sn;
+    if (toggle) toggle.textContent = 'Show all';
+    displayed = _allRules.filter((r) =>
+      r.jackery_device_sn === active.device_sn || !r.jackery_device_sn);
+  } else {
+    if (filterName) filterName.textContent = 'All devices';
+    if (toggle) toggle.textContent = active ? `Filter to "${active.name || active.device_sn}"` : 'Filter';
+  }
+
+  renderAutomationRules(displayed);
+}
+
+$('auto-rules-filter-toggle')?.addEventListener('click', () => {
+  _ruleFilterMode = (_ruleFilterMode === 'active') ? 'all' : 'active';
+  renderRulesWithFilter();
+});
 
 function renderAutomationRules(rules) {
   const list = $('auto-rules');
@@ -640,7 +676,12 @@ function openAutomationEditor(rule) {
   $('auto-operator').value = rule?.operator || '<';
   $('auto-value').value    = rule?.value ?? 20;
   $('auto-kasa-pick').value = rule?.kasa_host || '';
-  $('auto-jackery').value   = rule?.jackery_device_sn || '';
+  // Pre-fill the Jackery picker: if editing an existing rule keep its sn,
+  // otherwise default to whatever device the topbar dropdown is on so
+  // creating a rule from "5000 Plus" view targets the 5000 Plus.
+  const activeJackery = activeJackeryDevice();
+  $('auto-jackery').value = rule?.jackery_device_sn
+    || (activeJackery?.device_sn || '');
   $('auto-enabled').checked = rule ? !!rule.enabled : true;
   // Action radios
   const action = rule?.action || 'off';
@@ -976,7 +1017,14 @@ function connectWs() {
 // ============================================================
 function applyStatus(s) {
   if (!s) return;
+  const prevDeviceSn = activeJackeryDevice()?.device_sn;
   lastStatus = s;
+  // If the active Jackery device changed and we're on the Automation tab,
+  // re-render the rules list so the "Showing rules for: X" filter follows.
+  const newDeviceSn = activeJackeryDevice()?.device_sn;
+  if (activeTab === 'automation' && _allRules.length && prevDeviceSn !== newDeviceSn) {
+    renderRulesWithFilter();
+  }
 
   // Connection pill
   const pill = $('conn-pill');
