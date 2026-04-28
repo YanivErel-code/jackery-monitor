@@ -1695,7 +1695,7 @@ async function fetchForecast() {
     setText('forecast-avg-load', j.overall_load_w);
     const sub = $('forecast-coeff-sub');
     if (sub) {
-      const minFit = 4;
+      const minFit = 2;
       if (j.solar_coefficient === 0) {
         sub.textContent = 'no solar production detected on this device';
       } else if (j.fit_samples >= minFit) {
