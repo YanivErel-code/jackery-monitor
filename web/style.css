@@ -744,7 +744,25 @@ main {
   font-size: 12px;
   color: var(--text-dim);
 }
-.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  /* Override <button> defaults so the legend pills look the same as the
+     old <span> version. Click toggles series visibility on the chart. */
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  margin: 0;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background .15s, opacity .15s;
+}
+.legend-item:hover { background: rgba(255,255,255,.05); }
+.legend-item.off { opacity: 0.35; }
+.legend-item.off i { background: var(--text-mute) !important; }
+.legend-item.off:hover { opacity: 0.55; }
 .legend i {
   display: inline-block; width: 10px; height: 10px; border-radius: 2px;
 }

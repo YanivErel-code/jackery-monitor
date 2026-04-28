@@ -20,6 +20,29 @@ let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
 let activeTab = 'live';
 
+// ---------- legend / series visibility ----------
+// Per-chart toggle map. Click a legend item to flip its series's bool;
+// drawLiveChart and drawEnergyChart consult these and skip hidden series.
+const _seriesVisible = {
+  live:   { battery: true, output: true, input: true },
+  energy: { battery: true, output: true, input: true },
+};
+
+document.addEventListener('click', (e) => {
+  const item = e.target.closest('.legend-item');
+  if (!item) return;
+  const legend = item.closest('.legend');
+  const chart  = legend?.dataset.chart;
+  const series = item.dataset.series;
+  if (!chart || !series || !_seriesVisible[chart]) return;
+  e.preventDefault();
+  _seriesVisible[chart][series] = !_seriesVisible[chart][series];
+  item.classList.toggle('off', !_seriesVisible[chart][series]);
+  // Re-render whichever chart was toggled.
+  if (chart === 'live'   && lastStatus) drawLiveChart(lastStatus);
+  if (chart === 'energy' && energyHistoryCache) drawEnergyChart(energyHistoryCache);
+});
+
 // ---------- service worker ----------
 // Register on next idle so it doesn't compete with first-paint. The SW
 // caches the static shell so the dashboard loads fast (and works briefly
@@ -1453,16 +1476,23 @@ function drawLiveChart(s) {
   }
 
   // Areas (output, input) under their lines — gradient transparent toward bottom.
-  drawAreaFill(ctx, inp, xs, yWatts, baseY, '#38bdf8', .22);
-  drawAreaFill(ctx, out, xs, yWatts, baseY, '#4ade80', .25);
-  // Lines on top
-  drawSmoothLine(ctx, inp, xs, yWatts, '#38bdf8', 2.5);
-  drawSmoothLine(ctx, out, xs, yWatts, '#4ade80', 2.5);
+  // Each series respects its visibility toggle from the legend (see
+  // legend click handler at the bottom of this file).
+  if (_seriesVisible.live.input) {
+    drawAreaFill(ctx, inp, xs, yWatts, baseY, '#38bdf8', .22);
+    drawSmoothLine(ctx, inp, xs, yWatts, '#38bdf8', 2.5);
+  }
+  if (_seriesVisible.live.output) {
+    drawAreaFill(ctx, out, xs, yWatts, baseY, '#4ade80', .25);
+    drawSmoothLine(ctx, out, xs, yWatts, '#4ade80', 2.5);
+  }
   // Battery on its own (right) axis — dashed so it's clearly a different scale.
-  ctx.save();
-  ctx.setLineDash([4, 4]);
-  drawSmoothLine(ctx, bat, xs, yPct, '#fbbf24', 2);
-  ctx.restore();
+  if (_seriesVisible.live.battery) {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    drawSmoothLine(ctx, bat, xs, yPct, '#fbbf24', 2);
+    ctx.restore();
+  }
 
   // Hover state stored on the canvas element
   _attachChartHover(canvas, hist, (i, evt) => {
@@ -1561,7 +1591,8 @@ function drawEnergyChart(j) {
     }
   }
 
-  // Bars: output (green) and input (sky), interleaved
+  // Bars: output (green = consumed) and input (sky = charged), interleaved.
+  // Each respects its legend toggle.
   const n = hist.length;
   const totalW = w - padL - padR;
   const slot = totalW / n;
@@ -1569,16 +1600,20 @@ function drawEnergyChart(j) {
   for (let i = 0; i < n; i++) {
     const xCenter = padL + slot * (i + 0.5);
     const yBase = h - padB;
-    const yOut = yBase - (out[i] / maxWh) * (h - padT - padB);
-    const yIn  = yBase - (inp[i] / maxWh) * (h - padT - padB);
-    ctx.fillStyle = '#4ade80';
-    ctx.fillRect(xCenter - barW - 1, yOut, barW, yBase - yOut);
-    ctx.fillStyle = '#38bdf8';
-    ctx.fillRect(xCenter + 1, yIn, barW, yBase - yIn);
+    if (_seriesVisible.energy.output) {
+      const yOut = yBase - (out[i] / maxWh) * (h - padT - padB);
+      ctx.fillStyle = '#4ade80';
+      ctx.fillRect(xCenter - barW - 1, yOut, barW, yBase - yOut);
+    }
+    if (_seriesVisible.energy.input) {
+      const yIn = yBase - (inp[i] / maxWh) * (h - padT - padB);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(xCenter + 1, yIn, barW, yBase - yIn);
+    }
   }
 
   // Battery % overlay (right axis 0..100)
-  if (bat.some(v => v != null)) {
+  if (_seriesVisible.energy.battery && bat.some(v => v != null)) {
     ctx.strokeStyle = '#fbbf24';
     ctx.lineWidth = 2;
     ctx.beginPath();

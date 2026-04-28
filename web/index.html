@@ -157,10 +157,10 @@
       <section class="card">
         <div class="card-header">
           <h2>Power last 6 hours</h2>
-          <div class="legend">
-            <span class="legend-item"><i class="lg-bat"></i> Battery %</span>
-            <span class="legend-item"><i class="lg-out"></i> Output W</span>
-            <span class="legend-item"><i class="lg-in"></i> Input W</span>
+          <div class="legend" data-chart="live">
+            <button type="button" class="legend-item" data-series="battery"><i class="lg-bat"></i> Battery %</button>
+            <button type="button" class="legend-item" data-series="output"><i class="lg-out"></i> Output W</button>
+            <button type="button" class="legend-item" data-series="input"><i class="lg-in"></i> Input W</button>
           </div>
         </div>
         <canvas id="chart-live" class="chart"></canvas>
@@ -211,10 +211,10 @@
           </div>
         </div>
         <canvas id="chart-energy" class="chart chart-tall"></canvas>
-        <div class="legend energy-legend">
-          <span class="legend-item"><i class="lg-out"></i> Consumed (Wh per bucket)</span>
-          <span class="legend-item"><i class="lg-in"></i> Charged (Wh per bucket)</span>
-          <span class="legend-item"><i class="lg-bat"></i> Battery %</span>
+        <div class="legend energy-legend" data-chart="energy">
+          <button type="button" class="legend-item" data-series="output"><i class="lg-out"></i> Consumed (Wh per bucket)</button>
+          <button type="button" class="legend-item" data-series="input"><i class="lg-in"></i> Charged (Wh per bucket)</button>
+          <button type="button" class="legend-item" data-series="battery"><i class="lg-bat"></i> Battery %</button>
         </div>
       </section>
 
