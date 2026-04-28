@@ -236,7 +236,14 @@
           The Jackery cloud only allows one active session per account. While the bridge is polling, the phone app can't stay signed in. Pause polling to hand the session over to your phone.
         </p>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-          <button id="pause-poll" class="btn btn-ghost" type="button">Pause polling for 10 min</button>
+          <select id="pause-duration" class="device-select">
+            <option value="60">1 min</option>
+            <option value="300">5 min</option>
+            <option value="600" selected>10 min</option>
+            <option value="1800">30 min</option>
+            <option value="3600">1 hour</option>
+          </select>
+          <button id="pause-poll" class="btn btn-ghost" type="button">Pause polling</button>
           <span id="pause-status" class="hint" hidden></span>
         </div>
       </section>
