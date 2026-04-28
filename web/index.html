@@ -67,6 +67,7 @@
       <button class="tab on" data-tab="live">Live</button>
       <button class="tab" data-tab="energy">Energy</button>
       <button class="tab" data-tab="device">Device</button>
+      <button class="tab" data-tab="settings">Settings</button>
     </nav>
 
     <!-- ============== LIVE TAB ============== -->
@@ -261,6 +262,26 @@
         </p>
         <button id="forget-creds" class="btn btn-ghost" type="button">Sign out / Forget credentials</button>
         <p id="forget-msg" class="login-error" hidden style="margin-top:10px"></p>
+      </section>
+    </section>
+
+    <!-- ============== SETTINGS TAB ============== -->
+    <section id="tab-settings" class="tab-panel" hidden>
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>Runtime settings</h2>
+          <span id="settings-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 16px">
+          Changes persist to <code>/data/settings.json</code> and apply on the next poll cycle (no restart needed). Env vars in your <code>.env</code> are used as defaults until you save a value here.
+        </p>
+        <form id="settings-form">
+          <div id="settings-fields" class="settings-fields"></div>
+          <div style="margin-top:16px; display:flex; gap:8px; align-items:center">
+            <button class="btn btn-primary" type="submit">Save</button>
+            <button id="settings-reload" class="btn btn-ghost" type="button">Reload</button>
+          </div>
+        </form>
       </section>
     </section>
 

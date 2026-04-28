@@ -412,6 +412,24 @@ async def api_clear_credentials():
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
+@app.get("/api/settings")
+def api_settings_get():
+    """Return the schema (label/hint/min/max/value for each setting) so the
+       UI can render the form without hardcoding it."""
+    return {"settings": user_settings.schema()}
+
+
+@app.post("/api/settings")
+def api_settings_post(body: dict):
+    """Persist setting overrides to /data/settings.json. Out-of-range values
+       are clamped to the schema bounds. Changes take effect on next poll
+       cycle of the server / bridge — no restart needed."""
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be a JSON object")
+    new_values = user_settings.update(body)
+    return {"ok": True, "settings": new_values}
+
+
 @app.post("/api/set_output")
 async def api_set_output(body: dict):
     """Toggle one of the device's outputs (AC/DC/USB/Car) via the cloud MQTT
