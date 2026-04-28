@@ -170,11 +170,12 @@ a { color: var(--accent-2); }
 
 /* ============== Main + Tabs ============== */
 main {
-  /* Adapt to the screen. On a 1200-1600px laptop the content fills almost
-     edge-to-edge; on a 2K/ultrawide display we cap at 1800px so reading
-     line-length stays comfortable while the chart gets the most width.
+  /* Adapt to the screen. The content (KPI cards + chart) was designed for
+     ~1200px and stretches awkwardly past 1500px. Cap at 1500 — that's
+     comfortably bigger than the old 1200 cap on standard laptops, still
+     dense enough on wide displays that cards don't look like empty boxes.
      Phones / narrow tablets keep their dedicated breakpoints below. */
-  max-width: min(95vw, 1800px);
+  max-width: min(95vw, 1500px);
   margin: 0 auto;
   padding: 22px;
 }
@@ -687,10 +688,10 @@ main {
 /* ============== Charts ============== */
 .chart {
   width: 100%;
-  height: 240px;
+  height: 320px;
   display: block;
 }
-.chart-tall { height: 320px; }
+.chart-tall { height: 420px; }
 
 /* Hover tooltip for both Live and Energy charts */
 .chart-tooltip {
