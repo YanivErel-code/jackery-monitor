@@ -29,6 +29,11 @@
 
 * { box-sizing: border-box; }
 
+/* The browser-default [hidden] rule (display: none) loses to any author
+   stylesheet rule that sets display, e.g. `.field { display: flex }`. Make
+   sure `hidden` works everywhere we use it without per-class fixups. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   background: var(--bg);
