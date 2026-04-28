@@ -30,6 +30,20 @@ def test_solar_fit_recovers_known_coefficient():
     assert abs(k - 0.5) < 0.05
 
 
+def test_solar_fit_zero_when_device_has_no_panels():
+    # A device that's never produced solar — coefficient must be 0, not
+    # the default. Otherwise we'd predict phantom solar generation for a
+    # battery that has no panels connected.
+    base = 1_700_000_000
+    weather = [{"ts": base + i * 3600, "ghi_w_m2": 800, "cloud_cover_pct": 0}
+               for i in range(20)]
+    energy = [{"ts": w["ts"], "solar_w": 0, "output_w": 100, "battery_pct": 60}
+              for w in weather]
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    assert k == 0.0
+    assert n == 0
+
+
 def test_solar_fit_falls_back_when_too_few_pairs():
     # Only 3 daylight pairs — well under MIN_FIT_SAMPLES (8).
     base = 1_700_000_000

@@ -567,12 +567,40 @@ async def api_forecast(device_sn: str | None = None):
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
     )
+    # Persist this snapshot for later accuracy tracking. The PK is
+    # (device_sn, made_at_hour, target_hour) so multiple calls in the same
+    # hour collapse to one row per (device, target).
+    state.energy.record_forecast(device_sn, time.time(), result["forecast"])
     return {
         "device_sn": device_sn,
         "low_battery_threshold": user_settings.get("low_battery_threshold"),
         **result,
         "configured": True,
     }
+
+
+@app.get("/api/forecast/accuracy")
+def api_forecast_accuracy(device_sn: str | None = None):
+    """Predicted vs actual SOC for past forecasts. Joins each saved
+    prediction to the average actual battery_pct in the ±30 min window
+    around its target. Useful for evaluating how the model improves
+    as more data accumulates."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "samples": [], "summary": {}}
+    samples = state.energy.prediction_accuracy(device_sn)
+    summary: dict[str, dict[str, float]] = {}
+    for s in samples:
+        h = s["lead_time_h"]
+        bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
+        b = summary.setdefault(bucket, {"n": 0, "sum_err": 0.0})
+        b["n"] += 1
+        b["sum_err"] += s["error"]
+    for b in summary.values():
+        b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
+        del b["sum_err"]
+    return {"device_sn": device_sn, "samples": samples, "summary": summary}
 
 
 @app.get("/api/location")
