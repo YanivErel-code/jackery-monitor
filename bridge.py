@@ -510,6 +510,10 @@ async def cloud_loop() -> None:
                 state.cloud_state = "logging-in"
                 await c.login()
                 event("info", "auth", "Cloud login OK", user_id=c.user_id)
+                # Login dropped the MQTT client (fresh creds incoming) — force
+                # the realtime subscribe block below to run again so we don't
+                # lose pushes after a contested-cooldown re-login.
+                realtime_subscribed = False
             # Refresh device list on first iteration AND whenever no device
             # is selected. Keeps the dropdown current.
             if not state.cloud_devices or not state.cloud_device_id:

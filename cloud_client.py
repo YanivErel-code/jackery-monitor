@@ -148,7 +148,25 @@ class JackeryCloudClient:
         return self._http
 
     # ---- public API ----
+    def _drop_mqtt(self) -> None:
+        """Tear down the MQTT client so the next publish/subscribe builds a
+           fresh one with whatever mqtt_password we have now. Called on
+           re-login because the broker may have invalidated our session OR
+           the login response may have given us a new mqtt_password key."""
+        if self._mqtt is None:
+            return
+        try:
+            self._mqtt.loop_stop()
+            self._mqtt.disconnect()
+        except Exception:
+            pass
+        self._mqtt = None
+
     async def login(self) -> str:
+        # If we had an MQTT client from a previous login (e.g. before a
+        # contested-session cooldown), close it before re-authenticating.
+        # The new login response will give us fresh mqtt credentials.
+        self._drop_mqtt()
         login_bean = {
             "account": self.email,
             "loginType": 2,             # password
