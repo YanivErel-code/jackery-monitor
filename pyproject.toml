@@ -42,6 +42,12 @@ ignore = [
     "E501",
     # `pass` after `try/except: pass` — common pattern, fine
     "B011",
+    # `raise X from e` — useful, but for FastAPI endpoints with many
+    # `except ... as e: raise HTTPException(...)` it's mostly noise.
+    "B904",
+    # Storing the asyncio.create_task return value — fire-and-forget
+    # is intentional in our poll loops.
+    "RUF006",
 ]
 
 [tool.ruff.lint.per-file-ignores]

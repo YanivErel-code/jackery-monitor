@@ -25,7 +25,6 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("energy_db")
 
@@ -99,9 +98,9 @@ class EnergyDB:
             c.executescript(SCHEMA)
 
     # ---------- ingestion ----------
-    def upsert_device(self, device_sn: str, name: Optional[str],
-                      model_code: Optional[int],
-                      model_name: Optional[str]) -> None:
+    def upsert_device(self, device_sn: str, name: str | None,
+                      model_code: int | None,
+                      model_name: str | None) -> None:
         if not device_sn:
             return
         now = int(time.time())
@@ -121,7 +120,7 @@ class EnergyDB:
 
     def record(self, device_sn: str, ts: float,
                input_w: float, output_w: float,
-               battery_pct: Optional[int] = None) -> None:
+               battery_pct: int | None = None) -> None:
         """Integrate (input_w, output_w) since last reading for this device."""
         if not device_sn:
             return
@@ -133,7 +132,7 @@ class EnergyDB:
         dt = ts - prev_ts
         if dt <= 0 or dt > MAX_GAP_S:
             return
-        # Trapezoidal: avg power × dt, in seconds
+        # Trapezoidal: avg power times dt, in seconds
         in_wh = ((prev_in + input_w) / 2.0) * (dt / 3600.0)
         out_wh = ((prev_out + output_w) / 2.0) * (dt / 3600.0)
         bucket = int(ts // BUCKET_S) * BUCKET_S
@@ -210,7 +209,7 @@ class EnergyDB:
         bucket_s = max(BUCKET_S, int(bucket_s))
         with self._conn() as c:
             rows = c.execute(
-                f"""SELECT (bucket / ?) * ? AS b,
+                """SELECT (bucket / ?) * ? AS b,
                            SUM(input_wh) AS in_wh,
                            SUM(output_wh) AS out_wh,
                            AVG(last_input_w) AS in_w,

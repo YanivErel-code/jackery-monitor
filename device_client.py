@@ -19,7 +19,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger("device_client")
 
@@ -29,8 +29,8 @@ class DeviceInfo:
     name: str
     address: str
     rssi: int
-    model_code: Optional[int]
-    device_sn: Optional[str]
+    model_code: int | None
+    device_sn: str | None
     device_type: str
 
     def to_dict(self) -> dict:
@@ -52,11 +52,11 @@ class DeviceClientError(RuntimeError):
 class DeviceClient:
     backend_name = "abstract"
 
-    async def connect(self) -> tuple[bool, Optional[DeviceInfo], Optional[str]]:
+    async def connect(self) -> tuple[bool, DeviceInfo | None, str | None]:
         """Return (ok, device_info, error)."""
         raise NotImplementedError
 
-    async def poll(self) -> Optional[dict[str, Any]]:
+    async def poll(self) -> dict[str, Any] | None:
         raise NotImplementedError
 
     async def set_output(self, port: str, on: bool) -> None:
@@ -140,9 +140,9 @@ class BridgeDeviceClient(DeviceClient):
         self.host = host
         self.port = port
         self._connected = False
-        self._device: Optional[DeviceInfo] = None
+        self._device: DeviceInfo | None = None
         self._lock = asyncio.Lock()
-        self._last_status: Optional[dict] = None
+        self._last_status: dict | None = None
 
     async def _rpc(self, method: str, **params) -> dict:
         """One-shot JSON-RPC call: open socket, send line, read line, close."""
@@ -151,7 +151,7 @@ class BridgeDeviceClient(DeviceClient):
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port), timeout=5.0,
                 )
-            except (OSError, asyncio.TimeoutError) as e:
+            except (TimeoutError, OSError) as e:
                 raise DeviceClientError(
                     f"Cannot reach BLE bridge at {self.host}:{self.port}. "
                     f"Is bridge.py running on the host? ({e})"
@@ -170,7 +170,7 @@ class BridgeDeviceClient(DeviceClient):
                     await writer.wait_closed()
                 except Exception:
                     pass
-        if "error" in resp and resp["error"]:
+        if resp.get("error"):
             raise DeviceClientError(resp["error"])
         return resp.get("result", {})
 

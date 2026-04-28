@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
 
 import crypto_util
 
@@ -30,7 +29,7 @@ def has_credentials() -> bool:
         return False
 
 
-def load() -> Optional[dict]:
+def load() -> dict | None:
     """Return {email, password} or None if no creds saved / unreadable."""
     try:
         with open(PATH) as f:

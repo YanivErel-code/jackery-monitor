@@ -28,7 +28,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -39,9 +39,9 @@ import kasa_client
 import kasa_creds
 import settings as user_settings
 from automation import AutomationEngine, AutomationError
-from kasa_devices import KasaRegistry
-from device_client import DeviceClient, DeviceInfo, DeviceClientError, make_client
+from device_client import DeviceClient, DeviceClientError, DeviceInfo, make_client
 from energy_db import EnergyDB
+from kasa_devices import KasaRegistry
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -62,10 +62,10 @@ HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
 class AppState:
     def __init__(self) -> None:
         self.client: DeviceClient = make_client()
-        self.device: Optional[DeviceInfo] = None
+        self.device: DeviceInfo | None = None
         self.energy = EnergyDB()
-        self.last_status: Optional[dict[str, Any]] = None
-        self.last_update_ts: Optional[float] = None
+        self.last_status: dict[str, Any] | None = None
+        self.last_update_ts: float | None = None
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
         # Last append timestamp so we sample the live chart exactly every
         # LIVE_CHART_INTERVAL_S regardless of how fast we poll the bridge.
@@ -74,12 +74,12 @@ class AppState:
         # startup so a container restart doesn't blank the chart.
         self.history_hydrated: bool = False
         self.connection_status = "disconnected"   # disconnected | scanning | connecting | connected | error
-        self.connection_error: Optional[str] = None
+        self.connection_error: str | None = None
         self.low_battery_alerted = False
-        self.poll_task: Optional[asyncio.Task] = None
+        self.poll_task: asyncio.Task | None = None
         self.ws_clients: set[WebSocket] = set()
-        self.last_source: Optional[str] = None
-        self.last_cloud_meta: Optional[dict] = None
+        self.last_source: str | None = None
+        self.last_cloud_meta: dict | None = None
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
@@ -483,7 +483,7 @@ def api_devices():
 
 
 @app.get("/api/energy/totals")
-def api_energy_totals(device_sn: Optional[str] = None):
+def api_energy_totals(device_sn: str | None = None):
     """Lifetime + today + 7d + 30d totals.
        If device_sn omitted, returns totals for the currently-active device."""
     if not device_sn:
@@ -494,7 +494,7 @@ def api_energy_totals(device_sn: Optional[str] = None):
 
 
 @app.get("/api/energy/history")
-def api_energy_history(hours: int = 24, device_sn: Optional[str] = None):
+def api_energy_history(hours: int = 24, device_sn: str | None = None):
     """Time-series energy history for a device.
        hours: 6, 24, 168 (=7d), 720 (=30d). Bucket size auto-scales."""
     if not device_sn:
@@ -561,7 +561,7 @@ async def api_set_credentials(body: dict):
     try:
         result = await setter(email, password, region)
     except DeviceClientError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     # Kick a fresh connect so connection state updates fast
     asyncio.create_task(connect_device())
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
@@ -578,7 +578,7 @@ async def api_clear_credentials():
         result = await clearer()
     except DeviceClientError as e:
         # most common: env vars are pinning the creds
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     # Clear cached telemetry so the UI immediately reflects logged-out state
     state.device = None
     state.last_status = None
@@ -597,7 +597,7 @@ def api_automation_upsert(body: dict):
     try:
         rule = state.automation.upsert(body or {})
     except AutomationError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return {"ok": True, "rule": rule}
 
 
@@ -646,7 +646,7 @@ async def api_kasa_devices():
     try:
         return {"devices": await kasa_client.discover()}
     except kasa_client.KasaError as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e
 
 
 @app.post("/api/kasa/test")
@@ -660,7 +660,7 @@ async def api_kasa_test(body: dict):
     try:
         result = await kasa_client.set_state(str(host), on)
     except kasa_client.KasaError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return {"ok": True, **result}
 
 
@@ -670,7 +670,7 @@ async def api_kasa_status(host: str):
     try:
         return {"ok": True, **(await kasa_client.status(host))}
     except kasa_client.KasaError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
 
 
 # ---- saved Kasa device registry (separate from rules) ----
@@ -708,7 +708,7 @@ async def api_kasa_saved_upsert(body: dict):
     try:
         info = await kasa_client.status(host)
     except kasa_client.KasaError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     saved = state.kasa.upsert(
         host=host,
         alias=requested_alias or info.get("alias") or "",
@@ -741,7 +741,7 @@ async def api_events(limit: int = 100, since: float = 0.0):
     try:
         events = await fetcher(limit=limit, since=since)
     except DeviceClientError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return {"events": events}
 
 
@@ -777,12 +777,12 @@ async def api_set_output(body: dict):
     try:
         await setter(port, on)
     except DeviceClientError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return {"ok": True, "port": port, "on": on}
 
 
 @app.post("/api/pause_polling")
-async def api_pause_polling(body: Optional[dict] = None):
+async def api_pause_polling(body: dict | None = None):
     """Pause the cloud poller so the user can use the phone app without the
        bridge stealing the session back. Body: {seconds: int} (default 600)."""
     seconds = int((body or {}).get("seconds") or 600)
@@ -792,7 +792,7 @@ async def api_pause_polling(body: Optional[dict] = None):
     try:
         result = await pauser(seconds)
     except DeviceClientError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     await broadcast({"type": "status", "data": serialize_status()})
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
@@ -806,7 +806,7 @@ async def api_resume_polling():
     try:
         result = await resumer()
     except DeviceClientError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     await broadcast({"type": "status", "data": serialize_status()})
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
@@ -822,7 +822,7 @@ async def api_select_device(body: dict):
     try:
         result = await select(str(device_id))
     except DeviceClientError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     # Clear cached device + telemetry IMMEDIATELY so the UI stops showing the
     # old device while the next poll is in flight. The Device tab will go to
     # "—" for ~1-2s, then refill with the new device's name/SN.

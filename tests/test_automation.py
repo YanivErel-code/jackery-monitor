@@ -15,7 +15,9 @@ import pytest
 def engine_with_fake_kasa(isolated_data, monkeypatch):
     """Reload the automation module against the isolated /data and
        patch kasa_client.set_state so we can introspect what would be called."""
-    import crypto_util, kasa_client, automation
+    import automation
+    import crypto_util
+    import kasa_client
     importlib.reload(crypto_util)
     importlib.reload(kasa_client)
     importlib.reload(automation)
@@ -48,7 +50,7 @@ def test_matches_lte():
 
 
 def test_matches_eq_with_tolerance():
-    from automation import _matches, EQUALS_TOLERANCE
+    from automation import EQUALS_TOLERANCE, _matches
     assert _matches({"operator": "=", "value": 50}, 50.0) is True
     assert _matches({"operator": "=", "value": 50}, 50.0 + EQUALS_TOLERANCE) is True
     assert _matches({"operator": "=", "value": 50}, 50.0 + EQUALS_TOLERANCE + 0.01) is False
@@ -204,7 +206,7 @@ async def test_evaluate_routes_to_correct_device(engine_with_fake_kasa):
 @pytest.mark.asyncio
 async def test_evaluate_skips_disabled_rules(engine_with_fake_kasa):
     eng, calls, _ = engine_with_fake_kasa
-    rule = eng.upsert({
+    eng.upsert({
         "name": "test",
         "operator": "<", "value": 20, "action": "off",
         "kasa_host": "1.2.3.4",

@@ -31,7 +31,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, ClassVar
 
 import httpx
 from Cryptodome.Cipher import AES, PKCS1_v1_5
@@ -97,14 +97,14 @@ class JackeryCloudClient:
         self.password = password
         self.region = region
         self.android_id = android_id
-        self.token: Optional[str] = None
+        self.token: str | None = None
         # Captured from the login response — needed for MQTT control commands.
         # mqtt_password is the base64-encoded 32-byte AES-256 key the cloud
         # gives us to derive the MQTT broker password from.
-        self.user_id: Optional[str] = None
-        self.mqtt_password: Optional[str] = None
+        self.user_id: str | None = None
+        self.mqtt_password: str | None = None
         self.devices: list[CloudDevice] = []
-        self._http: Optional[httpx.AsyncClient] = None
+        self._http: httpx.AsyncClient | None = None
         self._lock = asyncio.Lock()
         self._mac_id = self._generate_mac_id()
         # Lazy-initialised MQTT publisher (paho-mqtt). Connects on first
@@ -240,7 +240,7 @@ class JackeryCloudClient:
         msg = (data.get("msg") or "").lower()
         return "token" in msg and ("expir" in msg or "invalid" in msg or "auth" in msg)
 
-    async def _authed_get(self, path: str, params: Optional[dict] = None) -> dict:
+    async def _authed_get(self, path: str, params: dict | None = None) -> dict:
         if not self.token:
             await self.login()
         client = await self._client()
@@ -322,7 +322,7 @@ class JackeryCloudClient:
     # Reverse-engineered protocol doc: github.com/jlopez/socketry/docs/protocol.md
     BROKER_HOST = "emqx.jackeryapp.com"
     BROKER_PORT = 8883
-    PORT_TO_ACTION: dict[str, tuple[int, str]] = {
+    PORT_TO_ACTION: ClassVar[dict[str, tuple[int, str]]] = {
         "ac":  (4, "oac"),
         "dc":  (1, "odc"),
         "usb": (2, "odcu"),
