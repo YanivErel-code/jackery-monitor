@@ -69,11 +69,11 @@ log = logging.getLogger("bridge")
 
 HOST = os.environ.get("BRIDGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BRIDGE_PORT", "8766"))
-CLOUD_POLL = int(os.environ.get("CLOUD_POLL_INTERVAL_S", "15"))
-# When the cloud kicks our session (because the iOS app just logged in),
-# back off for this long before trying to reclaim it. Keeps the bridge from
-# fighting the phone app for the single allowed session per account.
-SESSION_CONTESTED_COOLDOWN_S = int(os.environ.get("SESSION_CONTESTED_COOLDOWN_S", "60"))
+# CLOUD_POLL and SESSION_CONTESTED_COOLDOWN_S are now user-tunable through
+# /data/settings.json; the env vars are still consulted as fallback defaults
+# inside the settings module. We read them per-loop-iteration so a settings
+# change applies on the next cycle without a bridge restart.
+import settings as user_settings  # noqa: E402  -- after env reads above
 
 
 # ---- credential storage (multi-backend) ----
@@ -462,13 +462,14 @@ async def cloud_loop() -> None:
         except SessionContestedError as e:
             # The phone app (or another client) just logged in and bumped us.
             # Don't fight back — cool down and let them keep the session.
-            state.contested_until = time.time() + SESSION_CONTESTED_COOLDOWN_S
+            cooldown = user_settings.get("session_contested_cooldown_s")
+            state.contested_until = time.time() + cooldown
             state.cloud_state = "contested"
             state.cloud_error = str(e)
             if state.cloud_client:
                 state.cloud_client.token = None
             log.info("Session contested by another client; cooling down %ds",
-                     SESSION_CONTESTED_COOLDOWN_S)
+                     cooldown)
             continue
         except Exception as e:
             state.cloud_state = "error"
@@ -481,7 +482,8 @@ async def cloud_loop() -> None:
             continue
         # Sleep until next poll OR a device-switch nudges us awake
         try:
-            await asyncio.wait_for(state.cloud_force_repoll.wait(), timeout=CLOUD_POLL)
+            await asyncio.wait_for(state.cloud_force_repoll.wait(),
+                                   timeout=user_settings.get("cloud_poll_interval_s"))
             state.cloud_force_repoll.clear()
         except asyncio.TimeoutError:
             pass

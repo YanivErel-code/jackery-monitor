@@ -250,9 +250,89 @@ function switchTab(name) {
   activeTab = name;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.toggleAttribute('hidden', p.id !== `tab-${name}`));
-  if (name === 'live')   { drawLiveChart(lastStatus); }
-  if (name === 'energy') { fetchEnergyHistory(); fetchEnergyAllDevices(); }
+  if (name === 'live')     { drawLiveChart(lastStatus); }
+  if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
+  if (name === 'settings') { loadSettings(); }
 }
+
+// ============================================================
+// SETTINGS TAB
+// ============================================================
+async function loadSettings() {
+  const fields = $('settings-fields');
+  const status = $('settings-status');
+  if (!fields) return;
+  status.hidden = true;
+  fields.innerHTML = 'Loading…';
+  try {
+    const r = await fetch('/api/settings');
+    const j = await r.json();
+    renderSettingsFields(j.settings || []);
+  } catch (e) {
+    fields.innerHTML = `<div class="login-error">Failed to load: ${e.message || e}</div>`;
+  }
+}
+
+function renderSettingsFields(specs) {
+  const fields = $('settings-fields');
+  fields.innerHTML = '';
+  for (const s of specs) {
+    const row = document.createElement('div');
+    row.className = 'settings-row';
+    row.innerHTML = `
+      <label class="settings-label" for="set-${s.key}">
+        <span class="settings-label-text">${s.label}</span>
+        <span class="settings-hint">${s.hint}</span>
+      </label>
+      <div class="settings-control">
+        <input id="set-${s.key}" name="${s.key}" type="number"
+               min="${s.min}" max="${s.max}" step="1"
+               value="${s.value}" required />
+        <span class="settings-range">${s.min}–${s.max}</span>
+      </div>
+    `;
+    fields.appendChild(row);
+  }
+}
+
+$('settings-reload')?.addEventListener('click', loadSettings);
+
+document.getElementById('settings-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('settings-status');
+  const inputs = document.querySelectorAll('#settings-fields input');
+  const body = {};
+  for (const inp of inputs) {
+    body[inp.name] = parseInt(inp.value, 10);
+  }
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    }
+    const j = await r.json();
+    status.textContent = 'Saved.';
+    // Re-render with the values the server actually accepted (clamped).
+    if (j.settings) {
+      const inputsByName = Object.fromEntries(
+        [...inputs].map(i => [i.name, i])
+      );
+      for (const [k, v] of Object.entries(j.settings)) {
+        if (inputsByName[k]) inputsByName[k].value = v;
+      }
+    }
+    setTimeout(() => { status.hidden = true; }, 2500);
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message || err}`;
+  }
+});
 
 // ============================================================
 // DEVICE PICKER

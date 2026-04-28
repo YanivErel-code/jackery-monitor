@@ -284,6 +284,43 @@ main {
 .switch:hover { border-color: #2f3744; background: var(--bg-elev-3, rgba(255,255,255,.02)); }
 .switch:disabled { cursor: wait; opacity: .7; }
 .switch.pending { border-color: var(--accent); }
+
+/* ============== Settings tab ============== */
+.settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.settings-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  align-items: center;
+}
+.settings-label { display: flex; flex-direction: column; gap: 2px; }
+.settings-label-text { font-weight: 500; color: var(--text); font-size: 14px; }
+.settings-hint { font-size: 12px; color: var(--text-dim); }
+.settings-control { display: flex; align-items: center; gap: 8px; }
+.settings-control input[type="number"] {
+  width: 90px; padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  text-align: right;
+}
+.settings-control input[type="number"]:focus { outline: 1px solid var(--accent); }
+.settings-range { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+@media (max-width: 600px) {
+  .settings-row { grid-template-columns: 1fr; }
+  .settings-control { justify-content: flex-start; }
+}
 .switch .sw-label { font-size: 11px; text-transform: uppercase; color: var(--text-dim); letter-spacing: .06em; }
 .switch .sw-state {
   font-family: var(--font-mono);
