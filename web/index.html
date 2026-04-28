@@ -260,10 +260,10 @@
           </div>
         </div>
         <canvas id="chart-forecast" class="chart chart-tall"></canvas>
-        <div class="legend forecast-legend">
-          <span><i class="lg-bat"></i> Predicted SOC</span>
-          <span><i class="lg-out"></i> Expected load</span>
-          <span><i class="lg-in"></i> Expected solar</span>
+        <div class="legend forecast-legend" data-chart="forecast">
+          <button type="button" class="legend-item" data-series="soc"><i class="lg-bat"></i> Predicted SOC</button>
+          <button type="button" class="legend-item" data-series="load"><i class="lg-out"></i> Expected load</button>
+          <button type="button" class="legend-item" data-series="solar"><i class="lg-in"></i> Expected solar</button>
         </div>
       </section>
 

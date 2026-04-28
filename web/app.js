@@ -32,8 +32,9 @@ const SERIES_COLORS = {
 
 // ---------- legend / series visibility ----------
 const _seriesVisible = {
-  live:   { battery: true, output: true, input: true },
-  energy: { battery: true, output: true, input: true },
+  live:     { battery: true, output: true, input: true },
+  energy:   { battery: true, output: true, input: true },
+  forecast: { soc: true, load: true, solar: true },
 };
 
 // Adding a new chart? Just register its redraw + cache-getter here.
@@ -1830,6 +1831,16 @@ async function fetchEodForecast() {
       el.hidden = true;
       return;
     }
+    // Predictions at the SOC clamp boundaries (0% or 100%) are simulator
+    // artifacts — the load model is too pessimistic / optimistic with
+    // limited history. Same story before the solar regression has had
+    // ≥8 daylight samples to fit. Hide the pill rather than mislead.
+    const fitConverged = (j.fit_samples ?? 0) >= 8;
+    const atClamp = best.predicted_soc <= 0 || best.predicted_soc >= 100;
+    if (!fitConverged || atClamp) {
+      el.hidden = true;
+      return;
+    }
     const pct = $('eod-pct');
     const trend = $('eod-trend');
     pct.textContent = Math.round(best.predicted_soc);
@@ -1886,10 +1897,15 @@ function drawForecastChart(j) {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Right-axis grid: power scale (use the higher of solar/load peak)
-  const maxPower = Math.max(1, ...fc.map(p => Math.max(p.solar_w || 0, p.load_w || 0)));
-  // Round to a nice number for the right-hand axis label.
-  const niceMax = Math.ceil(maxPower / 100) * 100;
+  const vis = _seriesVisible.forecast;
+  // Right-axis grid: power scale based on whichever power series are
+  // currently visible. If both are hidden, fall back to 1 so the SOC-only
+  // view still draws cleanly.
+  const powerSamples = [1];
+  if (vis.solar) powerSamples.push(...fc.map(p => p.solar_w || 0));
+  if (vis.load)  powerSamples.push(...fc.map(p => p.load_w || 0));
+  const maxPower = Math.max(...powerSamples);
+  const niceMax = Math.max(100, Math.ceil(maxPower / 100) * 100);
 
   // Left-axis: SOC % grid + labels
   ctx.strokeStyle = '#1c2128'; ctx.lineWidth = 1;
@@ -1917,40 +1933,44 @@ function drawForecastChart(j) {
     ctx.fillText(fmtTs(fc[idx].ts), xAt(idx) - 18, h - 8);
   }
 
-  // Solar line (sky)
-  ctx.strokeStyle = SERIES_COLORS.input;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  fc.forEach((p, i) => {
-    const x = xAt(i);
-    const y = padT + innerH * (1 - (p.solar_w || 0) / niceMax);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  if (vis.solar) {
+    ctx.strokeStyle = SERIES_COLORS.input;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    fc.forEach((p, i) => {
+      const x = xAt(i);
+      const y = padT + innerH * (1 - (p.solar_w || 0) / niceMax);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
 
-  // Load line (green, dashed so it visually reads as "demand" not "production")
-  ctx.strokeStyle = SERIES_COLORS.output;
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([3, 3]);
-  ctx.beginPath();
-  fc.forEach((p, i) => {
-    const x = xAt(i);
-    const y = padT + innerH * (1 - (p.load_w || 0) / niceMax);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  ctx.setLineDash([]);
+  if (vis.load) {
+    // Load is dashed so it visually reads as "demand" not "production".
+    ctx.strokeStyle = SERIES_COLORS.output;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    fc.forEach((p, i) => {
+      const x = xAt(i);
+      const y = padT + innerH * (1 - (p.load_w || 0) / niceMax);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
-  // SOC line (amber, thicker — the headline metric)
-  ctx.strokeStyle = SERIES_COLORS.battery;
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  fc.forEach((p, i) => {
-    const x = xAt(i);
-    const y = padT + innerH * (1 - (p.predicted_soc || 0) / 100);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
+  if (vis.soc) {
+    ctx.strokeStyle = SERIES_COLORS.battery;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    fc.forEach((p, i) => {
+      const x = xAt(i);
+      const y = padT + innerH * (1 - (p.predicted_soc || 0) / 100);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
 }
 
 // ============================================================

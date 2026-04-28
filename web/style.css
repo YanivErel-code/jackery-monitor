@@ -341,10 +341,12 @@ main {
 }
 
 /* EOD-forecast pill: small panel top-right of battery card showing the
-   predicted SOC at midnight tonight. Refit by the forecaster hourly. */
+   predicted SOC at midnight tonight. Refit by the forecaster hourly.
+   top is set to clear the eyebrow (CLOUD pill) by a comfortable margin
+   so the two badges don't visually collide. */
 .eod-forecast {
   position: absolute;
-  top: 44px;
+  top: 72px;
   right: 18px;
   z-index: 2;
   display: flex; flex-direction: column; align-items: flex-end;
@@ -384,7 +386,7 @@ main {
 }
 .eod-forecast.low .eod-row { color: #ef4444; }
 @media (max-width: 600px) {
-  .eod-forecast { top: 40px; right: 12px; min-width: 84px; padding: 6px 10px; }
+  .eod-forecast { top: 60px; right: 12px; min-width: 84px; padding: 6px 10px; }
   .eod-row { font-size: 18px; }
 }
 .battery-meta {
