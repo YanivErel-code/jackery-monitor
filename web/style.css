@@ -37,7 +37,22 @@ html, body {
   font-size: 14px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
 }
+
+/* Subtle ambient gradient — a hint of green-blue glow at the top, fading
+   into the dark background. Gives the page depth without being noisy. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 1200px 600px at 20% -10%, rgba(74,222,128,.08), transparent 60%),
+    radial-gradient(ellipse 800px 500px at 90% 0%,  rgba(56,189,248,.06), transparent 60%);
+  z-index: 0;
+}
+.topbar, main { position: relative; z-index: 1; }
 
 h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 h1 { font-size: 17px; }
@@ -170,8 +185,25 @@ main {
   border-bottom-color: var(--accent);
 }
 
-.tab-panel { display: flex; flex-direction: column; gap: 18px; }
+.tab-panel {
+  display: flex; flex-direction: column; gap: 18px;
+  animation: tabFadeIn .25s ease-out;
+}
 .tab-panel[hidden] { display: none; }
+@keyframes tabFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Card hover — subtle lift, slightly brighter border. Doesn't apply on the
+   battery card (already has a glow) or on touch devices (no hover state). */
+@media (hover: hover) {
+  .kpi-card.has-accent:hover {
+    border-color: var(--card-accent, var(--accent));
+    transform: translateY(-1px);
+    transition: transform .15s, border-color .15s;
+  }
+}
 
 /* ============== Cards / grid ============== */
 .grid { display: grid; gap: 16px; }
@@ -189,12 +221,36 @@ main {
 }
 
 .card {
-  background: var(--bg-elev);
+  background: linear-gradient(180deg, var(--bg-elev) 0%, #11161c 100%);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 18px;
   box-shadow: var(--shadow-card);
+  position: relative;
+  overflow: hidden;
 }
+/* Accent stripe along the top edge — colored per metric so cards become
+   identifiable at a glance instead of all looking the same. */
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.04), transparent);
+  pointer-events: none;
+}
+.card.has-accent::before {
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--card-accent, var(--accent)) 18%,
+    var(--card-accent, var(--accent)) 82%,
+    transparent 100%);
+  opacity: .7;
+}
+.battery-card.has-accent { --card-accent: var(--accent-3); }
+.kpi-card.output  { --card-accent: var(--accent);   }
+.kpi-card.input   { --card-accent: var(--accent-2); }
+.kpi-card.today   { --card-accent: var(--accent-3); }
 .card-eyebrow {
   display: flex; justify-content: space-between; align-items: center;
   font-size: 11px;
@@ -210,28 +266,61 @@ main {
 .card-header .hint { font-size: 12px; color: var(--text-mute); }
 
 /* ============== Battery card ============== */
-.battery-card { display: flex; flex-direction: column; gap: 12px; }
+.battery-card {
+  display: flex; flex-direction: column; gap: 14px;
+  position: relative;
+}
+/* Soft radial glow behind the percentage — subtle but the card no longer
+   feels flat. Color shifts based on charging/idle/discharging state. */
+.battery-card::after {
+  content: "";
+  position: absolute;
+  top: 30px; left: 14px;
+  width: 220px; height: 120px;
+  background: radial-gradient(ellipse at center, var(--bat-glow, rgba(251,191,36,.18)), transparent 70%);
+  pointer-events: none;
+  filter: blur(6px);
+  opacity: .9;
+  transition: background .4s, opacity .4s;
+  z-index: 0;
+}
+.battery-card.charging::after    { --bat-glow: rgba(74,222,128,.20); }
+.battery-card.discharging::after { --bat-glow: rgba(56,189,248,.16); }
+.battery-card.low::after         { --bat-glow: rgba(239,68,68,.22); }
+.battery-card > * { position: relative; z-index: 1; }
+
 .battery-pct {
   font-family: var(--font-mono);
-  font-size: 56px;
+  font-size: 64px;
   line-height: 1;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text);
   display: flex; align-items: baseline;
+  letter-spacing: -0.02em;
+  text-shadow: 0 0 24px rgba(255,255,255,.04);
 }
-.battery-pct small { font-size: 18px; color: var(--text-dim); margin-left: 6px; }
+.battery-pct small { font-size: 20px; color: var(--text-dim); margin-left: 6px; font-weight: 500; }
 .battery-bar {
-  height: 8px;
+  height: 10px;
   background: var(--bg-elev-2);
   border-radius: 999px;
   overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.4);
 }
 .battery-bar-fill {
   height: 100%;
   width: 0%;
   background: linear-gradient(90deg, var(--accent-3), var(--accent));
   border-radius: 999px;
-  transition: width .4s ease;
+  transition: width .6s cubic-bezier(.22,.61,.36,1), background .4s;
+  box-shadow: 0 0 12px rgba(74,222,128,.4);
+}
+.battery-card.charging .battery-bar-fill {
+  background: linear-gradient(90deg, var(--accent), #6ee69a);
+}
+.battery-card.low .battery-bar-fill {
+  background: linear-gradient(90deg, #ef4444, var(--accent-3));
+  box-shadow: 0 0 12px rgba(239,68,68,.5);
 }
 .battery-meta {
   display: flex; gap: 8px;
@@ -244,15 +333,27 @@ main {
 .kpi-card { display: flex; flex-direction: column; gap: 6px; }
 .kpi-value {
   font-family: var(--font-mono);
-  font-size: 32px;
-  font-weight: 600;
+  font-size: 34px;
+  font-weight: 700;
   color: var(--text);
   line-height: 1.1;
   display: flex; align-items: baseline;
+  letter-spacing: -0.02em;
+  transition: color .25s;
 }
-.kpi-value small { font-size: 13px; color: var(--text-dim); margin-left: 6px; font-family: var(--font-sans); }
+.kpi-value small { font-size: 13px; color: var(--text-dim); margin-left: 6px; font-family: var(--font-sans); font-weight: 400; }
 .kpi-value.alt { color: var(--accent-2); }
+
+/* Brief amber pulse whenever a KPI value changes — adds the "live" feel
+   without being noisy. JS toggles .changed for ~600ms. */
+.kpi-value.changed > span:first-child { animation: valuePulse .6s ease-out; }
+@keyframes valuePulse {
+  0%   { color: var(--accent-3); text-shadow: 0 0 16px rgba(251,191,36,.5); }
+  100% { color: inherit; text-shadow: none; }
+}
+
 .kpi-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.kpi-sub .lbl { color: var(--text-mute); margin-right: 2px; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
 
 .kpi-row {
   display: grid;
