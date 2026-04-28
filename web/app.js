@@ -108,6 +108,7 @@ function fmtSecsMMSS(secs) {
 function renderPausePill() {
   const btn = $('pause-poll');
   const status = $('pause-status');
+  const sel = $('pause-duration');
   if (!btn || !status) return;
   const meta = _lastCloudMeta;
   if (!meta) return;
@@ -121,33 +122,38 @@ function renderPausePill() {
     btn.textContent = 'Resume polling';
     status.hidden = false;
     status.textContent = `paused — ${fmtSecsMMSS(pauseLeft)} left`;
+    if (sel) sel.hidden = true;
   } else if (contestedLeft > 0) {
-    btn.textContent = 'Pause polling for 10 min';
+    btn.textContent = 'Pause polling';
     status.hidden = false;
     status.textContent = `session contested — auto-reclaiming in ${fmtSecsMMSS(contestedLeft)}`;
+    if (sel) sel.hidden = false;
   } else {
-    btn.textContent = 'Pause polling for 10 min';
+    btn.textContent = 'Pause polling';
     status.hidden = true;
     status.textContent = '';
+    if (sel) sel.hidden = false;
   }
 }
 
 $('pause-poll')?.addEventListener('click', async () => {
   const btn = $('pause-poll');
+  const sel = $('pause-duration');
   const meta = _lastCloudMeta || {};
   const now = Date.now() / 1000;
   const isPaused = meta.pause_until && meta.pause_until > now;
+  const seconds = sel ? parseInt(sel.value, 10) || 600 : 600;
   btn.disabled = true;
   try {
     const url = isPaused ? '/api/resume_polling' : '/api/pause_polling';
     const opts = { method: 'POST', headers: { 'content-type': 'application/json' } };
-    if (!isPaused) opts.body = JSON.stringify({ seconds: 600 });
+    if (!isPaused) opts.body = JSON.stringify({ seconds });
     await fetch(url, opts);
     // Optimistic update; the WS broadcast / next /api/status poll will reconcile.
     if (isPaused) {
       _lastCloudMeta = { ..._lastCloudMeta, pause_until: null, contested_until: null };
     } else {
-      _lastCloudMeta = { ..._lastCloudMeta, pause_until: now + 600, contested_until: null };
+      _lastCloudMeta = { ..._lastCloudMeta, pause_until: now + seconds, contested_until: null };
     }
     renderPausePill();
   } catch (e) {
