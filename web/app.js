@@ -315,7 +315,205 @@ function switchTab(name) {
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'settings') { loadSettings(); }
   if (name === 'logs')     { loadLogs(); }
+  if (name === 'automation') { loadAutomation(); }
 }
+
+// ============================================================
+// AUTOMATION TAB
+// ============================================================
+async function loadAutomation() {
+  const list = $('auto-rules');
+  if (!list) return;
+  list.innerHTML = 'Loading…';
+  try {
+    const r = await fetch('/api/automation/rules');
+    const j = await r.json();
+    renderAutomationRules(j.rules || []);
+  } catch (e) {
+    list.innerHTML = `<div class="auto-empty">Failed to load: ${e.message || e}</div>`;
+  }
+}
+
+function renderAutomationRules(rules) {
+  const list = $('auto-rules');
+  if (!rules.length) {
+    list.innerHTML = '<div class="auto-empty">No rules yet. Click "+ New rule" to add one.</div>';
+    return;
+  }
+  const safe = (s) => String(s).replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  const opLabel = { '<':'&lt;', '<=':'&le;', '=':'=', '>=':'&ge;', '>':'&gt;' };
+  list.innerHTML = rules.map((r) => {
+    const fired = r.last_fired
+      ? 'last fired ' + new Date(r.last_fired * 1000).toLocaleString()
+      : 'never fired';
+    const errLine = r.last_error
+      ? `<div class="ar-meta err">last error: ${safe(r.last_error)}</div>`
+      : '';
+    return `<div class="auto-rule ${r.enabled ? '' : 'disabled'}" data-id="${r.id}">
+      <div>
+        <div class="ar-title">${safe(r.name)}</div>
+        <div class="ar-cond">
+          when battery <span class="op">${opLabel[r.operator] || r.operator}</span>
+          <span class="val">${r.value}%</span>,
+          turn <span class="action ${r.action}">${r.action.toUpperCase()}</span>
+          → <span class="device">${safe(r.kasa_alias || r.kasa_host)}</span>
+        </div>
+        <div class="ar-meta">${fired}</div>
+        ${errLine}
+      </div>
+      <div class="auto-rule-actions">
+        <label class="auto-toggle">
+          <input type="checkbox" data-toggle="${r.id}" ${r.enabled ? 'checked' : ''} />
+          ${r.enabled ? 'enabled' : 'paused'}
+        </label>
+        <button class="btn btn-ghost" data-edit="${r.id}" type="button">Edit</button>
+        <button class="btn btn-ghost" data-del="${r.id}" type="button">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Wire per-row controls
+  list.querySelectorAll('[data-edit]').forEach((b) => {
+    b.addEventListener('click', () => openAutomationEditor(rules.find((r) => r.id === b.dataset.edit)));
+  });
+  list.querySelectorAll('[data-del]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const r = rules.find((rr) => rr.id === b.dataset.del);
+      if (!r) return;
+      if (!confirm(`Delete "${r.name}"?`)) return;
+      await fetch('/api/automation/rules/' + encodeURIComponent(r.id), { method: 'DELETE' });
+      loadAutomation();
+    });
+  });
+  list.querySelectorAll('[data-toggle]').forEach((b) => {
+    b.addEventListener('change', async () => {
+      const r = rules.find((rr) => rr.id === b.dataset.toggle);
+      if (!r) return;
+      r.enabled = b.checked;
+      await fetch('/api/automation/rules', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(r),
+      });
+      loadAutomation();
+    });
+  });
+}
+
+function openAutomationEditor(rule) {
+  const ed = $('auto-editor');
+  if (!ed) return;
+  ed.hidden = false;
+  $('auto-editor-title').textContent = rule ? 'Edit rule' : 'New rule';
+  $('auto-id').value         = rule?.id || '';
+  $('auto-name').value       = rule?.name || '';
+  $('auto-operator').value   = rule?.operator || '<';
+  $('auto-value').value      = rule?.value ?? 20;
+  $('auto-kasa-host').value  = rule?.kasa_host || '';
+  $('auto-kasa-alias').value = rule?.kasa_alias || '';
+  $('auto-enabled').checked  = rule ? !!rule.enabled : true;
+  // Action radios
+  const action = rule?.action || 'off';
+  document.querySelectorAll('input[name="auto-action"]').forEach((el) => {
+    el.checked = (el.value === action);
+  });
+  $('auto-kasa-test-result').hidden = true;
+  ed.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeAutomationEditor() {
+  const ed = $('auto-editor');
+  if (ed) ed.hidden = true;
+}
+
+$('auto-add')?.addEventListener('click', () => openAutomationEditor(null));
+$('auto-cancel')?.addEventListener('click', closeAutomationEditor);
+$('auto-editor-close')?.addEventListener('click', closeAutomationEditor);
+
+document.getElementById('auto-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const action = document.querySelector('input[name="auto-action"]:checked')?.value || 'off';
+  const body = {
+    id: $('auto-id').value || undefined,
+    name: $('auto-name').value.trim(),
+    operator: $('auto-operator').value,
+    value: Number($('auto-value').value),
+    action,
+    kasa_host: $('auto-kasa-host').value.trim(),
+    kasa_alias: $('auto-kasa-alias').value.trim(),
+    enabled: $('auto-enabled').checked,
+    trigger: 'battery_percent',
+  };
+  const status = $('auto-status');
+  status.hidden = false; status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/automation/rules', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    status.textContent = 'Saved.';
+    setTimeout(() => { status.hidden = true; }, 2000);
+    closeAutomationEditor();
+    loadAutomation();
+  } catch (err) {
+    status.textContent = 'Save failed: ' + (err.message || err);
+  }
+});
+
+$('auto-kasa-test')?.addEventListener('click', async () => {
+  const host = $('auto-kasa-host').value.trim();
+  const result = $('auto-kasa-test-result');
+  result.hidden = false; result.textContent = 'Connecting…';
+  if (!host) { result.textContent = 'Enter an IP first.'; return; }
+  // Toggle ON briefly to verify reachability — we don't change state long-term.
+  try {
+    const r = await fetch('/api/kasa/status?host=' + encodeURIComponent(host));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    result.textContent = `OK · ${j.alias} (${j.model || 'unknown'}) currently ${j.is_on ? 'ON' : 'OFF'}`;
+    if (j.alias && !$('auto-kasa-alias').value) $('auto-kasa-alias').value = j.alias;
+  } catch (e) {
+    result.textContent = 'Failed: ' + (e.message || e);
+  }
+});
+
+$('kasa-discover')?.addEventListener('click', async () => {
+  const wrap = $('auto-discovered');
+  const status = $('auto-status');
+  status.hidden = false; status.textContent = 'Discovering…';
+  wrap.hidden = false; wrap.innerHTML = 'Searching the LAN…';
+  try {
+    const r = await fetch('/api/kasa/devices');
+    const j = await r.json();
+    const devs = j.devices || [];
+    if (!devs.length) {
+      wrap.innerHTML = `<div>No Kasa devices found via discovery. UDP broadcast often doesn't reach Docker bridge networks. Enter the device IP manually below.</div>`;
+    } else {
+      wrap.innerHTML = devs.map((d) => `
+        <div class="auto-disc-row">
+          <span class="alias">${d.alias}</span>
+          <span class="host">${d.host}</span>
+          <span class="hint">${d.model || ''} · ${d.is_on ? 'on' : 'off'}</span>
+          <button class="btn btn-ghost" data-use-host="${d.host}" data-use-alias="${d.alias}" type="button">Use</button>
+        </div>`).join('');
+      wrap.querySelectorAll('[data-use-host]').forEach((b) => {
+        b.addEventListener('click', () => {
+          openAutomationEditor(null);
+          $('auto-kasa-host').value = b.dataset.useHost;
+          $('auto-kasa-alias').value = b.dataset.useAlias;
+        });
+      });
+    }
+    status.hidden = true;
+  } catch (e) {
+    wrap.innerHTML = `<div>Discovery failed: ${e.message || e}</div>`;
+    status.hidden = true;
+  }
+});
 
 // ============================================================
 // LOGS TAB

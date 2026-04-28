@@ -80,6 +80,7 @@
       <button class="tab on" data-tab="live">Live</button>
       <button class="tab" data-tab="energy">Energy</button>
       <button class="tab" data-tab="device">Device</button>
+      <button class="tab" data-tab="automation">Automation</button>
       <button class="tab" data-tab="logs">Logs</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
@@ -276,6 +277,90 @@
         </p>
         <button id="forget-creds" class="btn btn-ghost" type="button">Sign out / Forget credentials</button>
         <p id="forget-msg" class="login-error" hidden style="margin-top:10px"></p>
+      </section>
+    </section>
+
+    <!-- ============== AUTOMATION TAB ============== -->
+    <section id="tab-automation" class="tab-panel" hidden>
+      <section class="card">
+        <div class="card-header">
+          <h2>Battery-driven automations</h2>
+          <span class="hint">Edge-triggered · fires once per crossing</span>
+        </div>
+        <p class="hint" style="margin:6px 0 14px">
+          Turn Kasa smart plugs on or off when the battery state of charge crosses a threshold. Each rule fires once when its condition becomes true (won't fire again until the battery moves out of range and back).
+        </p>
+
+        <div class="auto-toolbar">
+          <button id="auto-add" class="btn btn-primary" type="button">+ New rule</button>
+          <button id="kasa-discover" class="btn btn-ghost" type="button">Discover Kasa devices</button>
+          <span id="auto-status" class="hint" hidden></span>
+        </div>
+
+        <div id="auto-discovered" class="auto-discovered" hidden></div>
+
+        <div id="auto-rules" class="auto-rules"></div>
+      </section>
+
+      <!-- Rule editor: shown inline when adding/editing. Lives outside the
+           list so it doesn't wrestle with the list rerender. -->
+      <section id="auto-editor" class="card" hidden>
+        <div class="card-header">
+          <h2 id="auto-editor-title">New rule</h2>
+          <button id="auto-editor-close" class="btn btn-ghost" type="button">Cancel</button>
+        </div>
+        <form id="auto-form">
+          <div class="auto-form-grid">
+            <label class="auto-field">
+              <span class="auto-label">Name</span>
+              <input id="auto-name" type="text" required placeholder="e.g. Turn off heater when low" />
+            </label>
+
+            <fieldset class="auto-field">
+              <legend class="auto-label">When battery is</legend>
+              <div class="auto-condition">
+                <select id="auto-operator" required>
+                  <option value="<">&lt; less than</option>
+                  <option value="<=">&le; less or equal</option>
+                  <option value="=">= equal to</option>
+                  <option value=">=">&ge; greater or equal</option>
+                  <option value=">">&gt; greater than</option>
+                </select>
+                <input id="auto-value" type="number" min="0" max="100" step="1" required placeholder="20" />
+                <span class="auto-pct">%</span>
+              </div>
+            </fieldset>
+
+            <fieldset class="auto-field">
+              <legend class="auto-label">Then turn the device</legend>
+              <div class="auto-action-row">
+                <label><input type="radio" name="auto-action" value="on" /> On</label>
+                <label><input type="radio" name="auto-action" value="off" checked /> Off</label>
+              </div>
+            </fieldset>
+
+            <label class="auto-field">
+              <span class="auto-label">Kasa device</span>
+              <div class="auto-kasa-row">
+                <input id="auto-kasa-host" type="text" required placeholder="192.168.1.50" />
+                <input id="auto-kasa-alias" type="text" placeholder="Alias (optional)" />
+                <button id="auto-kasa-test" class="btn btn-ghost" type="button">Test</button>
+              </div>
+              <span id="auto-kasa-test-result" class="hint" hidden></span>
+            </label>
+
+            <label class="auto-enabled">
+              <input id="auto-enabled" type="checkbox" checked /> Rule enabled
+            </label>
+          </div>
+
+          <input type="hidden" id="auto-id" />
+
+          <div style="margin-top:14px; display:flex; gap:8px">
+            <button class="btn btn-primary" type="submit">Save rule</button>
+            <button id="auto-cancel" class="btn btn-ghost" type="button">Cancel</button>
+          </div>
+        </form>
       </section>
     </section>
 

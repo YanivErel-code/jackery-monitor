@@ -34,7 +34,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import kasa_client
 import settings as user_settings
+from automation import AutomationEngine, AutomationError
 from device_client import DeviceClient, DeviceInfo, DeviceClientError, make_client
 from energy_db import EnergyDB
 
@@ -75,6 +77,10 @@ class AppState:
         self.ws_clients: set[WebSocket] = set()
         self.last_source: Optional[str] = None
         self.last_cloud_meta: Optional[dict] = None
+        # Battery-SOC automation engine — rules persisted to /data/automation.json,
+        # evaluated each poll cycle, edge-triggered so a rule fires once per
+        # threshold crossing instead of every single poll.
+        self.automation: AutomationEngine = AutomationEngine()
 
     @property
     def backend(self) -> str:
@@ -215,6 +221,25 @@ async def poll_loop() -> None:
                     })
                 elif bp > threshold + 5:
                     state.low_battery_alerted = False
+
+                # Run automation rules against the latest SOC. Engine is
+                # edge-triggered, so this is cheap on cycles where nothing
+                # crosses a threshold.
+                if bp is not None:
+                    try:
+                        fired = await state.automation.evaluate(float(bp))
+                        for rule in fired:
+                            await broadcast({
+                                "type": "automation_fired",
+                                "data": {
+                                    "name": rule.get("name"),
+                                    "action": rule.get("action"),
+                                    "kasa_alias": rule.get("kasa_alias"),
+                                    "soc": bp,
+                                },
+                            })
+                    except Exception as e:
+                        log.warning("automation evaluate failed: %s", e)
         except Exception as e:
             log.exception("Poll loop error: %s", e)
 
@@ -410,6 +435,61 @@ async def api_clear_credentials():
     state.last_update_ts = None
     await broadcast({"type": "status", "data": serialize_status()})
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
+
+
+@app.get("/api/automation/rules")
+def api_automation_list():
+    return {"rules": state.automation.list_rules()}
+
+
+@app.post("/api/automation/rules")
+def api_automation_upsert(body: dict):
+    try:
+        rule = state.automation.upsert(body or {})
+    except AutomationError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "rule": rule}
+
+
+@app.delete("/api/automation/rules/{rule_id}")
+def api_automation_delete(rule_id: str):
+    deleted = state.automation.delete(rule_id)
+    return {"ok": True, "deleted": deleted}
+
+
+@app.get("/api/kasa/devices")
+async def api_kasa_devices():
+    """Discover Kasa devices on the LAN. May return [] if Docker bridge
+       networking blocks UDP broadcasts — caller should still allow manual
+       IP entry as a fallback."""
+    try:
+        return {"devices": await kasa_client.discover()}
+    except kasa_client.KasaError as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/kasa/test")
+async def api_kasa_test(body: dict):
+    """Toggle a specific Kasa device by IP — used on the rule-editor "Test"
+       button so the user can confirm the IP works before saving the rule."""
+    host = (body or {}).get("host")
+    on = bool((body or {}).get("on"))
+    if not host:
+        raise HTTPException(400, "host required")
+    try:
+        result = await kasa_client.set_state(str(host), on)
+    except kasa_client.KasaError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, **result}
+
+
+@app.get("/api/kasa/status")
+async def api_kasa_status(host: str):
+    """Read the current on/off state of a single Kasa device."""
+    try:
+        return {"ok": True, **(await kasa_client.status(host))}
+    except kasa_client.KasaError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/events")
