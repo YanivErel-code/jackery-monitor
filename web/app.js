@@ -283,7 +283,7 @@ function applyStatus(s) {
 
   $('output-w').textContent = fmt(t.output_power_w);
   $('input-w').textContent  = fmt(t.input_power_w);
-  if (t.ac_output_voltage_v != null) $('ac-out-v').textContent  = fmt(t.ac_output_voltage_v, 0);
+  if (t.ac_output_v != null) $('ac-out-v').textContent  = fmt(t.ac_output_v, 0);
   if (t.ac_output_hz != null)        $('ac-out-hz').textContent = fmt(t.ac_output_hz, 0);
 
   // Today KPIs from energy aggregator
@@ -310,7 +310,9 @@ function applyStatus(s) {
   $('dev-sn').textContent    = dev.device_sn || '—';
   $('src-cloud').textContent = describeSrc(s.cloud);
   $('dev-updated').textContent = s.last_update_ts ? new Date(s.last_update_ts * 1000).toLocaleString() : '—';
-  $('dev-ups').textContent     = t.ups_mode != null ? String(t.ups_mode) : '—';
+  const upsParts = [t.ups_on && 'UPS', t.super_charge_on && 'Super charge'].filter(Boolean);
+  $('dev-ups').textContent = upsParts.length ? upsParts.join(' + ')
+    : (t.ups_on === false || t.super_charge_on === false) ? 'Off' : '—';
   $('dev-err').textContent     = t.error_code != null ? String(t.error_code) : '—';
 
   // Energy KPIs (cards on Energy tab)
