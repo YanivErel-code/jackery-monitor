@@ -100,27 +100,52 @@ async def set_state(host: str, on: bool) -> dict:
     return _describe(host, dev)
 
 
+_logged_kasa_version = False
+
+def _log_kasa_version_once():
+    global _logged_kasa_version
+    if _logged_kasa_version:
+        return
+    _logged_kasa_version = True
+    try:
+        import kasa  # type: ignore
+        log.info("python-kasa version: %s", getattr(kasa, "__version__", "unknown"))
+    except Exception:
+        pass
+
+
 async def _connect(host: str):
     try:
-        from kasa import Discover  # type: ignore
+        from kasa import Discover, Device  # type: ignore
     except ImportError as e:
         raise KasaError(f"python-kasa not installed: {e}")
+    _log_kasa_version_once()
     creds = _credentials()
-    try:
-        dev = await Discover.discover_single(host, credentials=creds)
-        await dev.update()
-        return dev
-    except Exception as e:
-        # Surface the auth-mode hint plainly — newer Kasa firmware needs
-        # the cloud-account credentials, which are saved separately via
-        # /api/kasa/credentials.
-        msg = str(e)
-        if "challenge" in msg.lower() or "credentials" in msg.lower() or "auth" in msg.lower():
-            if creds is None:
-                msg += " — this device needs Kasa cloud credentials. Add them in the Automation tab."
+
+    # Two connect strategies — python-kasa's protocol auto-detection has
+    # been flaky for SMART devices. Try the modern Device.connect (which
+    # picks SMART/IOT/KLAP based on the device's discovery handshake)
+    # first; fall back to Discover.discover_single (older API path).
+    errors: list[str] = []
+    for strategy in ("Device.connect", "Discover.discover_single"):
+        try:
+            if strategy == "Device.connect" and hasattr(Device, "connect"):
+                dev = await Device.connect(host=host, credentials=creds)
             else:
-                msg += " — saved Kasa cloud credentials were rejected; re-enter them."
-        raise KasaError(f"could not reach Kasa device at {host}: {msg}")
+                dev = await Discover.discover_single(host, credentials=creds)
+            await dev.update()
+            return dev
+        except Exception as e:
+            errors.append(f"{strategy}: {type(e).__name__}: {e}")
+            log.info("Kasa connect via %s failed: %s", strategy, e)
+
+    msg = " | ".join(errors)
+    if any("challenge" in e.lower() or "credentials" in e.lower() or "auth" in e.lower() for e in errors):
+        if creds is None:
+            msg += " — this device needs Kasa cloud credentials. Add them in the Automation tab."
+        else:
+            msg += " — saved Kasa cloud credentials were rejected. Try lowercasing the email; if you registered the device under a different Kasa account, use that account's credentials."
+    raise KasaError(f"could not reach Kasa device at {host}: {msg}")
 
 
 def _describe(host: str, dev: Any) -> dict:
