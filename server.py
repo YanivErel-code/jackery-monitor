@@ -228,12 +228,26 @@ async def poll_loop() -> None:
                 elif bp > threshold + 5:
                     state.low_battery_alerted = False
 
-                # Run automation rules against the latest SOC. Engine is
-                # edge-triggered, so this is cheap on cycles where nothing
-                # crosses a threshold.
-                if bp is not None:
+                # Run automation rules. The bridge polls every Jackery device
+                # so rules can target any of them, not just the active one;
+                # we build a {device_sn: soc} dict from cloud_meta and let
+                # the engine pick each rule's target.
+                cloud = cloud_meta or {}
+                devs_telemetry = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
+                soc_by_sn: dict[str, float] = {}
+                for sn, entry in devs_telemetry.items():
+                    t = (entry or {}).get("telemetry") or {}
+                    bp_dev = t.get("battery_percent")
+                    if bp_dev is not None:
+                        soc_by_sn[sn] = float(bp_dev)
+                # Always include the active device too (for legacy rules
+                # without an explicit jackery_device_sn).
+                active_sn = state.device.device_sn if state.device else None
+                if active_sn and bp is not None and active_sn not in soc_by_sn:
+                    soc_by_sn[active_sn] = float(bp)
+                if soc_by_sn:
                     try:
-                        fired = await state.automation.evaluate(float(bp))
+                        fired = await state.automation.evaluate(soc_by_sn, active_sn=active_sn)
                         for rule in fired:
                             await broadcast({
                                 "type": "automation_fired",
@@ -241,7 +255,8 @@ async def poll_loop() -> None:
                                     "name": rule.get("name"),
                                     "action": rule.get("action"),
                                     "kasa_alias": rule.get("kasa_alias"),
-                                    "soc": bp,
+                                    "jackery_device_sn": rule.get("jackery_device_sn"),
+                                    "jackery_device_name": rule.get("jackery_device_name"),
                                 },
                             })
                     except Exception as e:

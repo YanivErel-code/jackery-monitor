@@ -12,18 +12,20 @@ the dashboard uses, so the UI form and the JSON file are 1:1.
 
 Rule schema:
 {
-  "id":         "8-char hex",
-  "name":       "Turn off heater when low",
-  "enabled":    true,
-  "trigger":    "battery_percent",
-  "operator":   "<" | "<=" | "=" | ">=" | ">",
-  "value":      20,
-  "action":     "off" | "on",
-  "kasa_host":  "192.168.1.50",
-  "kasa_alias": "Heater",
-  "last_fired": <unix-ts | null>,
-  "last_state": <bool | null>,
-  "last_error": <str | null>,
+  "id":            "8-char hex",
+  "name":          "Turn off heater when low",
+  "enabled":       true,
+  "trigger":       "battery_percent",
+  "operator":      "<" | "<=" | "=" | ">=" | ">",
+  "value":         20,
+  "action":        "off" | "on",
+  "kasa_host":     "192.168.1.50",
+  "kasa_alias":    "Heater",
+  "jackery_device_sn": "ABC123",   # which Jackery device to watch; null = any
+  "jackery_device_name": "Explorer 5000 Plus",  # for display only
+  "last_fired":    <unix-ts | null>,
+  "last_state":    <bool | null>,
+  "last_error":    <str | null>,
 }
 """
 
@@ -97,6 +99,10 @@ def _validate(rule: dict) -> dict:
         "action":     action,
         "kasa_host":  host,
         "kasa_alias": (rule.get("kasa_alias") or "").strip() or host,
+        # null means "any/active device" — preserves behavior of pre-multi-
+        # device rules. New rules from the UI always set a specific sn.
+        "jackery_device_sn":   (rule.get("jackery_device_sn") or None),
+        "jackery_device_name": (rule.get("jackery_device_name") or "").strip() or None,
         "last_fired": rule.get("last_fired"),
         "last_state": rule.get("last_state"),
         "last_error": rule.get("last_error"),
@@ -160,11 +166,17 @@ class AutomationEngine:
         return changed
 
     # ---- evaluation ----
-    async def evaluate(self, soc: float) -> list[dict]:
-        """Walk all enabled rules. Fire (and return) the ones whose condition
-           just transitioned from false to true. State is mutated in place
-           and persisted on any change."""
-        if soc is None:
+    async def evaluate(self, soc_by_sn: dict, active_sn: Optional[str] = None) -> list[dict]:
+        """Walk all enabled rules. `soc_by_sn` is a dict mapping each Jackery
+           device's serial number to its current battery_percent (None for
+           devices we don't have data for yet). Each rule is evaluated
+           against ITS target device's SOC; rules with no target sn fall
+           back to the active device (legacy behavior).
+
+           Edge-triggered: fire (and return) the ones whose condition just
+           transitioned from false to true. State is mutated in place and
+           persisted on any change."""
+        if not soc_by_sn:
             return []
         fired: list[dict] = []
         dirty = False
@@ -173,9 +185,15 @@ class AutomationEngine:
                 if not rule.get("enabled", True):
                     rule["last_state"] = None  # reset edge state when disabled
                     continue
+                target_sn = rule.get("jackery_device_sn") or active_sn
+                soc = soc_by_sn.get(target_sn) if target_sn else None
+                if soc is None:
+                    # No data for this rule's target device; skip without
+                    # changing edge state so we don't spuriously fire when
+                    # it comes back online.
+                    continue
                 matches_now = _matches(rule, float(soc))
                 last = rule.get("last_state")
-                rule["last_state"] = matches_now
                 if matches_now and not last:
                     # Edge: transition from false -> true (or unknown -> true)
                     try:
@@ -185,15 +203,24 @@ class AutomationEngine:
                         )
                         rule["last_fired"] = time.time()
                         rule["last_error"] = None
+                        rule["last_state"] = True   # consume the edge ONLY on success
                         fired.append(rule)
-                        log.info("Automation fired: %s -> %s %s",
-                                 rule["name"], rule["action"], rule["kasa_alias"])
+                        log.info("Automation fired: %s [%s SOC=%s] -> %s %s",
+                                 rule["name"], target_sn, soc,
+                                 rule["action"], rule["kasa_alias"])
                     except Exception as e:
                         rule["last_error"] = str(e)
-                        log.warning("Automation %s failed: %s", rule["name"], e)
+                        # Leave last_state unchanged so we retry on the next
+                        # poll. Avoids the "stuck failed rule" footgun where
+                        # one transient error means the rule never fires
+                        # again until the battery exits and re-enters range.
+                        log.warning("Automation %s failed (will retry): %s",
+                                    rule["name"], e)
                     dirty = True
-                elif last is not None and last != matches_now:
-                    dirty = True  # state changed but didn't fire — still persist
+                else:
+                    if last != matches_now:
+                        dirty = True  # state changed but didn't fire
+                    rule["last_state"] = matches_now
             if dirty:
                 self._save()
         return fired
