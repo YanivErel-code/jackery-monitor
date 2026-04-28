@@ -1,0 +1,58 @@
+# Two deployment profiles — pick one with `docker compose --profile <name> up`.
+#
+#   mac    -> container runs the web app, cloud login happens on host bridge
+#   mock   -> no hardware/cloud, synthetic telemetry (great for UI development)
+#
+# Examples:
+#   docker compose --profile mac up        # then run ./run-bridge.sh on the host
+#   docker compose --profile mock up
+
+services:
+  # macOS / Linux host: container talks to host bridge.py over host.docker.internal
+  jackery:
+    profiles: ["mac"]
+    build: .
+    image: jackery-monitor:latest
+    container_name: jackery-monitor
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      BACKEND: bridge
+      BRIDGE_URL: host.docker.internal:8766
+      POLL_INTERVAL_S: "10"
+      JACKERY_DB: /data/energy.db
+    volumes:
+      - jackery-data:/data       # persistent energy history
+      # Bind-mount UI + server so file edits show up on container restart (no rebuild).
+      - ./web:/app/web
+      - ./server.py:/app/server.py
+      - ./device_client.py:/app/device_client.py
+      - ./energy_db.py:/app/energy_db.py
+      - ./cloud_client.py:/app/cloud_client.py
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Mock telemetry — no hardware required
+  jackery-mock:
+    profiles: ["mock"]
+    build: .
+    image: jackery-monitor:latest
+    container_name: jackery-monitor
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      BACKEND: mock
+      POLL_INTERVAL_S: "5"
+      JACKERY_DB: /data/energy.db
+    volumes:
+      - jackery-data:/data
+      - ./web:/app/web
+      - ./server.py:/app/server.py
+      - ./device_client.py:/app/device_client.py
+      - ./energy_db.py:/app/energy_db.py
+      - ./cloud_client.py:/app/cloud_client.py
+
+volumes:
+  jackery-data:

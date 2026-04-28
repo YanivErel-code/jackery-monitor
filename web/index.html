@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jackery Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- =============== LOGIN MODAL =============== -->
+  <div id="login-overlay" class="login-overlay" hidden>
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="login-brand">
+        <span class="logo-dot"></span>
+        <h1>Jackery Monitor</h1>
+      </div>
+      <p class="login-sub">Sign in with your Jackery account to pull device data from the cloud. Credentials are stored locally in macOS Keychain — never sent anywhere except Jackery.</p>
+
+      <label class="field">
+        <span class="field-label">Email</span>
+        <input id="login-email" type="email" name="email" autocomplete="username" required placeholder="you@example.com" />
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input id="login-password" type="password" name="password" autocomplete="current-password" required placeholder="" />
+      </label>
+      <label class="field">
+        <span class="field-label">Region</span>
+        <select id="login-region" name="region">
+          <option value="US" selected>US</option>
+          <option value="EU">EU</option>
+        </select>
+      </label>
+
+      <div id="login-error" class="login-error" hidden></div>
+
+      <button id="login-submit" class="btn btn-primary" type="submit">Sign in</button>
+      <p class="login-foot">We'll verify against Jackery before saving. Your password stays on this Mac.</p>
+    </form>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <h1>Jackery Monitor</h1>
+    </div>
+
+    <div class="topbar-right">
+      <label id="device-picker" class="device-picker" hidden>
+        <span class="dp-label">Device</span>
+        <select id="device-select" class="device-select"></select>
+      </label>
+      <span id="conn-pill" class="pill pill-conn">
+        <span id="conn-dot" class="conn-dot"></span>
+        <span id="conn-text">connecting…</span>
+      </span>
+      <button id="reconnect" class="btn btn-ghost" title="Re-scan and reconnect">Reconnect</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Tab nav -->
+    <nav class="tabs">
+      <button class="tab on" data-tab="live">Live</button>
+      <button class="tab" data-tab="energy">Energy</button>
+      <button class="tab" data-tab="device">Device</button>
+    </nav>
+
+    <!-- ============== LIVE TAB ============== -->
+    <section id="tab-live" class="tab-panel">
+      <!-- Hero: battery + key KPIs -->
+      <div class="grid hero-grid">
+        <section class="card battery-card">
+          <div class="card-eyebrow">
+            <span>State of charge</span>
+            <span id="source-badge" class="pill pill-source">—</span>
+          </div>
+          <div class="battery-pct">
+            <span id="battery-pct">—</span><small>%</small>
+          </div>
+          <div class="battery-bar">
+            <div id="battery-bar-fill" class="battery-bar-fill"></div>
+          </div>
+          <div class="battery-meta">
+            <span id="battery-time">— h remaining</span>
+            <span class="dot-sep">·</span>
+            <span id="battery-temp">— °C</span>
+          </div>
+        </section>
+
+        <section class="card kpi-card">
+          <div class="card-eyebrow"><span>Output now</span></div>
+          <div class="kpi-value"><span id="output-w">—</span><small>W</small></div>
+          <div class="kpi-sub">
+            <span id="ac-out-v">—</span><small>V</small>
+            <span class="dot-sep">·</span>
+            <span id="ac-out-hz">—</span><small>Hz</small>
+          </div>
+        </section>
+
+        <section class="card kpi-card">
+          <div class="card-eyebrow"><span>Input now</span></div>
+          <div class="kpi-value"><span id="input-w">—</span><small>W</small></div>
+          <div class="kpi-sub" id="input-source-line">grid / solar</div>
+        </section>
+
+        <section class="card kpi-card">
+          <div class="card-eyebrow"><span>Today</span></div>
+          <div class="kpi-value">
+            <span id="today-out-kwh">—</span><small>kWh out</small>
+          </div>
+          <div class="kpi-sub">
+            <span id="today-in-kwh">—</span><small>kWh in</small>
+          </div>
+        </section>
+      </div>
+
+      <!-- Outputs (read-only — cloud API does not expose toggles) -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Outputs</h2>
+          <span class="hint">Read-only</span>
+        </div>
+        <div class="switches">
+          <div class="switch" data-port="ac"><span class="sw-label">AC</span><span class="sw-state" id="sw-ac">—</span></div>
+          <div class="switch" data-port="dc"><span class="sw-label">DC</span><span class="sw-state" id="sw-dc">—</span></div>
+          <div class="switch" data-port="usb"><span class="sw-label">USB</span><span class="sw-state" id="sw-usb">—</span></div>
+          <div class="switch" data-port="car"><span class="sw-label">Car</span><span class="sw-state" id="sw-car">—</span></div>
+        </div>
+      </section>
+
+      <!-- Live chart -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Power last 6 hours</h2>
+          <div class="legend">
+            <span class="legend-item"><i class="lg-bat"></i> Battery %</span>
+            <span class="legend-item"><i class="lg-out"></i> Output W</span>
+            <span class="legend-item"><i class="lg-in"></i> Input W</span>
+          </div>
+        </div>
+        <canvas id="chart-live" class="chart"></canvas>
+      </section>
+    </section>
+
+    <!-- ============== ENERGY TAB ============== -->
+    <section id="tab-energy" class="tab-panel" hidden>
+      <div class="grid energy-grid">
+        <section class="card">
+          <div class="card-eyebrow"><span>Today</span></div>
+          <div class="kpi-row">
+            <div><div class="kpi-value"><span id="e-today-out">—</span><small>kWh</small></div><div class="kpi-sub">consumed</div></div>
+            <div><div class="kpi-value alt"><span id="e-today-in">—</span><small>kWh</small></div><div class="kpi-sub">charged</div></div>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-eyebrow"><span>Last 7 days</span></div>
+          <div class="kpi-row">
+            <div><div class="kpi-value"><span id="e-7d-out">—</span><small>kWh</small></div><div class="kpi-sub">consumed</div></div>
+            <div><div class="kpi-value alt"><span id="e-7d-in">—</span><small>kWh</small></div><div class="kpi-sub">charged</div></div>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-eyebrow"><span>Last 30 days</span></div>
+          <div class="kpi-row">
+            <div><div class="kpi-value"><span id="e-30d-out">—</span><small>kWh</small></div><div class="kpi-sub">consumed</div></div>
+            <div><div class="kpi-value alt"><span id="e-30d-in">—</span><small>kWh</small></div><div class="kpi-sub">charged</div></div>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-eyebrow"><span>Lifetime</span></div>
+          <div class="kpi-row">
+            <div><div class="kpi-value"><span id="e-life-out">—</span><small>kWh</small></div><div class="kpi-sub">consumed</div></div>
+            <div><div class="kpi-value alt"><span id="e-life-in">—</span><small>kWh</small></div><div class="kpi-sub">charged</div></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Energy history</h2>
+          <div class="range-picker" role="tablist">
+            <button class="range-btn on"  data-hours="6">6h</button>
+            <button class="range-btn"     data-hours="24">24h</button>
+            <button class="range-btn"     data-hours="168">7d</button>
+            <button class="range-btn"     data-hours="720">30d</button>
+          </div>
+        </div>
+        <canvas id="chart-energy" class="chart chart-tall"></canvas>
+        <div class="legend energy-legend">
+          <span class="legend-item"><i class="lg-out"></i> Consumed (Wh per bucket)</span>
+          <span class="legend-item"><i class="lg-in"></i> Charged (Wh per bucket)</span>
+          <span class="legend-item"><i class="lg-bat"></i> Battery %</span>
+        </div>
+      </section>
+
+      <section id="energy-devices" class="card" hidden>
+        <div class="card-header">
+          <h2>All devices</h2>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr><th>Device</th><th>Today</th><th>7d</th><th>30d</th><th>Lifetime</th></tr>
+          </thead>
+          <tbody id="energy-devices-body"></tbody>
+        </table>
+      </section>
+    </section>
+
+    <!-- ============== DEVICE TAB ============== -->
+    <section id="tab-device" class="tab-panel" hidden>
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>Device info</h2>
+          <span id="source-badge-2" class="pill pill-source">—</span>
+        </div>
+        <dl>
+          <dt>Name</dt><dd id="dev-name">—</dd>
+          <dt>Model</dt><dd id="dev-model">—</dd>
+          <dt>Serial</dt><dd id="dev-sn">—</dd>
+          <dt>Cloud</dt><dd id="src-cloud">—</dd>
+          <dt>Last update</dt><dd id="dev-updated">—</dd>
+          <dt>UPS / Super charge</dt><dd id="dev-ups">—</dd>
+          <dt>Error code</dt><dd id="dev-err">—</dd>
+        </dl>
+      </section>
+    </section>
+
+    <div id="alert-banner" class="alert" hidden></div>
+  </main>
+
+  <footer>
+    Energy persisted in SQLite
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

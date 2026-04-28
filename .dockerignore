@@ -1,0 +1,12 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.DS_Store
+*.zip
+run.sh
+run-bridge.sh
+com.jackery.bridge.plist
+README.md

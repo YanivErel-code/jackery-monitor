@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd agent for the Jackery BLE bridge.
+
+  Install:
+    1. Edit the WorkingDirectory below to the absolute path of jackery-monitor/
+       (e.g. /Users/yaniv/jackery-monitor)
+    2. cp com.jackery.bridge.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.jackery.bridge.plist
+    4. launchctl start com.jackery.bridge
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.jackery.bridge.plist
+    rm ~/Library/LaunchAgents/com.jackery.bridge.plist
+
+  Logs:
+    tail -f /tmp/jackery-bridge.out /tmp/jackery-bridge.err
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jackery.bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>./run-bridge.sh</string>
+    </array>
+
+    <!-- IMPORTANT: replace with the absolute path to your jackery-monitor folder -->
+    <key>WorkingDirectory</key>
+    <string>/Users/CHANGE_ME/jackery-monitor</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BRIDGE_HOST</key>
+        <string>0.0.0.0</string>
+        <key>BRIDGE_PORT</key>
+        <string>8766</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/jackery-bridge.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/jackery-bridge.err</string>
+</dict>
+</plist>

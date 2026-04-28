@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+.smoke-venv/
+
+# Local data — energy aggregator SQLite lives here, never commit user data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+energy.db
+
+# Docker volumes / build artifacts
+.docker-data/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/tmp/jackery-*.out
+/tmp/jackery-*.err
+
+# Local env overrides — never commit credentials or host-specific paths
+.env
+.env.local
+*.local.plist

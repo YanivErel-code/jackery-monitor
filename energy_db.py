@@ -1,0 +1,239 @@
+"""
+Energy aggregator: integrates instantaneous input/output power readings into
+energy (Wh) per device, persists them in SQLite, and serves time-bucketed
+history + lifetime totals.
+
+Design:
+  - Each call to record(device_sn, ts, input_w, output_w) computes Wh accrued
+    since the previous reading for that device (trapezoidal integration), and
+    UPSERTs into a per-minute bucket. Idle/restart gaps > 10 minutes are
+    treated as zero-power gaps so they don't inflate totals.
+  - `samples` table: one row per (device_sn, bucket_minute) with summed Wh in/out
+    and last seen instantaneous values. Compact and cheap to query.
+  - `devices` table: friendly metadata for the UI.
+  - All queries are read-only & wrapped in short transactions; safe to call
+    concurrently with the aggregator.
+
+Storage path is configurable via JACKERY_DB env var.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional
+
+log = logging.getLogger("energy_db")
+
+# Default DB location: env > Docker /data > workspace
+DEFAULT_DB = (
+    os.environ.get("JACKERY_DB")
+    or ("/data/energy.db" if Path("/data").is_dir() else None)
+    or str(Path(__file__).parent / "energy.db")
+)
+
+# If two readings are >10 min apart, assume the device was off in between
+# (don't extrapolate; just record the new sample as a fresh starting point).
+MAX_GAP_S = 600
+
+# Aggregation bucket size in seconds (60 = per-minute)
+BUCKET_S = 60
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS devices (
+    device_sn   TEXT PRIMARY KEY,
+    name        TEXT,
+    model_code  INTEGER,
+    model_name  TEXT,
+    first_seen  INTEGER,
+    last_seen   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS samples (
+    device_sn   TEXT NOT NULL,
+    bucket      INTEGER NOT NULL,    -- unix epoch (seconds), floored to BUCKET_S
+    input_wh    REAL NOT NULL DEFAULT 0,
+    output_wh   REAL NOT NULL DEFAULT 0,
+    last_input_w   INTEGER,
+    last_output_w  INTEGER,
+    last_battery_pct INTEGER,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_sn, bucket)
+);
+
+CREATE INDEX IF NOT EXISTS idx_samples_bucket ON samples(bucket);
+CREATE INDEX IF NOT EXISTS idx_samples_dev_bucket ON samples(device_sn, bucket);
+"""
+
+
+class EnergyDB:
+    def __init__(self, path: str = DEFAULT_DB) -> None:
+        self.path = path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        # per-device last-reading state for trapezoidal integration
+        self._last: dict[str, tuple[float, float, float]] = {}
+        # ^ device_sn -> (ts, input_w, output_w)
+        self._init()
+        log.info("Energy DB at %s", path)
+
+    @contextmanager
+    def _conn(self):
+        with self._lock:
+            con = sqlite3.connect(self.path, timeout=5.0)
+            try:
+                con.execute("PRAGMA journal_mode=WAL")
+                con.execute("PRAGMA synchronous=NORMAL")
+                yield con
+                con.commit()
+            finally:
+                con.close()
+
+    def _init(self) -> None:
+        with self._conn() as c:
+            c.executescript(SCHEMA)
+
+    # ---------- ingestion ----------
+    def upsert_device(self, device_sn: str, name: Optional[str],
+                      model_code: Optional[int],
+                      model_name: Optional[str]) -> None:
+        if not device_sn:
+            return
+        now = int(time.time())
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO devices (device_sn, name, model_code, model_name,
+                                        first_seen, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(device_sn) DO UPDATE SET
+                     name = COALESCE(excluded.name, devices.name),
+                     model_code = COALESCE(excluded.model_code, devices.model_code),
+                     model_name = COALESCE(excluded.model_name, devices.model_name),
+                     last_seen = excluded.last_seen
+                """,
+                (device_sn, name, model_code, model_name, now, now),
+            )
+
+    def record(self, device_sn: str, ts: float,
+               input_w: float, output_w: float,
+               battery_pct: Optional[int] = None) -> None:
+        """Integrate (input_w, output_w) since last reading for this device."""
+        if not device_sn:
+            return
+        prev = self._last.get(device_sn)
+        self._last[device_sn] = (ts, float(input_w), float(output_w))
+        if prev is None:
+            return  # need two samples to integrate
+        prev_ts, prev_in, prev_out = prev
+        dt = ts - prev_ts
+        if dt <= 0 or dt > MAX_GAP_S:
+            return
+        # Trapezoidal: avg power × dt, in seconds
+        in_wh = ((prev_in + input_w) / 2.0) * (dt / 3600.0)
+        out_wh = ((prev_out + output_w) / 2.0) * (dt / 3600.0)
+        bucket = int(ts // BUCKET_S) * BUCKET_S
+
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO samples
+                       (device_sn, bucket, input_wh, output_wh,
+                        last_input_w, last_output_w, last_battery_pct,
+                        sample_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(device_sn, bucket) DO UPDATE SET
+                     input_wh = input_wh + excluded.input_wh,
+                     output_wh = output_wh + excluded.output_wh,
+                     last_input_w = excluded.last_input_w,
+                     last_output_w = excluded.last_output_w,
+                     last_battery_pct = COALESCE(excluded.last_battery_pct,
+                                                 last_battery_pct),
+                     sample_count = sample_count + 1
+                """,
+                (device_sn, bucket, in_wh, out_wh,
+                 int(input_w), int(output_w), battery_pct),
+            )
+
+    # ---------- queries ----------
+    def list_devices(self) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT device_sn, name, model_code, model_name,
+                          first_seen, last_seen
+                   FROM devices ORDER BY last_seen DESC"""
+            ).fetchall()
+        return [
+            {"device_sn": r[0], "name": r[1], "model_code": r[2],
+             "model_name": r[3], "first_seen": r[4], "last_seen": r[5]}
+            for r in rows
+        ]
+
+    def totals(self, device_sn: str) -> dict:
+        """Lifetime + windowed totals for a single device."""
+        now = int(time.time())
+        windows = {
+            "today": _start_of_day(now),
+            "last_7d": now - 7 * 86400,
+            "last_30d": now - 30 * 86400,
+        }
+        with self._conn() as c:
+            out: dict = {"device_sn": device_sn}
+            # Lifetime
+            r = c.execute(
+                "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0) "
+                "FROM samples WHERE device_sn = ?", (device_sn,)
+            ).fetchone()
+            out["lifetime"] = {"input_wh": r[0], "output_wh": r[1]}
+            # Windows
+            for label, since in windows.items():
+                r = c.execute(
+                    "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0) "
+                    "FROM samples WHERE device_sn = ? AND bucket >= ?",
+                    (device_sn, since),
+                ).fetchone()
+                out[label] = {"input_wh": r[0], "output_wh": r[1], "since": since}
+        return out
+
+    def all_totals(self) -> list[dict]:
+        return [self.totals(d["device_sn"]) | {"name": d["name"]}
+                for d in self.list_devices()]
+
+    def history(self, device_sn: str, hours: int = 24,
+                bucket_s: int = 600) -> list[dict]:
+        """Time-bucketed history. bucket_s controls aggregation granularity:
+           600 (10min) for 24h view, 3600 (1h) for 7d, 86400 (1d) for 30d."""
+        since = int(time.time()) - hours * 3600
+        bucket_s = max(BUCKET_S, int(bucket_s))
+        with self._conn() as c:
+            rows = c.execute(
+                f"""SELECT (bucket / ?) * ? AS b,
+                           SUM(input_wh) AS in_wh,
+                           SUM(output_wh) AS out_wh,
+                           AVG(last_input_w) AS in_w,
+                           AVG(last_output_w) AS out_w,
+                           AVG(last_battery_pct) AS bat
+                    FROM samples
+                    WHERE device_sn = ? AND bucket >= ?
+                    GROUP BY b
+                    ORDER BY b""",
+                (bucket_s, bucket_s, device_sn, since),
+            ).fetchall()
+        return [
+            {"ts": r[0], "input_wh": r[1] or 0, "output_wh": r[2] or 0,
+             "input_w": int(r[3] or 0), "output_w": int(r[4] or 0),
+             "battery_pct": int(r[5]) if r[5] is not None else None}
+            for r in rows
+        ]
+
+
+def _start_of_day(now_ts: int) -> int:
+    """Local midnight as unix seconds."""
+    lt = time.localtime(now_ts)
+    midnight = time.mktime(time.struct_time(
+        (lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0,
+         lt.tm_wday, lt.tm_yday, lt.tm_isdst)))
+    return int(midnight)
