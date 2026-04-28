@@ -41,8 +41,11 @@ BATTERY_CAPACITY_WH: dict[int, int] = {
 DEFAULT_BATTERY_CAPACITY_WH = 3024
 
 # Minimum paired (solar_w, ghi) samples required to trust a regression fit.
-# Below this, fall back to a generic coefficient.
-MIN_FIT_SAMPLES = 8
+# Below this, fall back to a generic coefficient. 4 = one solid morning of
+# daylight hours; small enough that the model converges to the user's
+# actual array within hours of first run, large enough that one freak
+# hour can't poison the fit.
+MIN_FIT_SAMPLES = 4
 
 # Generic GHI-to-solar coefficient when we don't have enough data yet
 # (assumes ~400W of panels at typical 80% derate). User-specific fits will
@@ -63,8 +66,11 @@ def fit_solar_coefficient(
 ) -> tuple[float, int]:
     """Fit k where solar_w ≈ k * ghi_w_m2 using paired hourly samples.
 
-    Returns (k, n_samples_used). Falls back to DEFAULT_SOLAR_COEFF if there
-    aren't enough good pairs.
+    Returns (k, n_samples_used). Three regimes:
+      • No positive solar readings in history → k = 0 (this device has no
+        panels, or none we can detect — don't fabricate production).
+      • Few pairs but evidence of solar → DEFAULT_SOLAR_COEFF (rough fit).
+      • Enough pairs → least-squares regression against actual data.
     """
     # Bucket both series to the hour (epoch // 3600) and join.
     by_hour_solar: dict[int, float] = {}
@@ -79,6 +85,12 @@ def fit_solar_coefficient(
         prev = by_hour_solar.get(h, 0.0)
         if sol > prev:
             by_hour_solar[h] = sol
+
+    # If the device has produced literally no solar in 14 days of history,
+    # treat it as "no panels detected" rather than guessing with a default.
+    # 5W threshold (not 0) ignores idle-noise readings.
+    if not any(v > 5 for v in by_hour_solar.values()):
+        return 0.0, 0
 
     pairs: list[tuple[float, float]] = []
     for w in weather_hourly:

@@ -1695,9 +1695,15 @@ async function fetchForecast() {
     setText('forecast-avg-load', j.overall_load_w);
     const sub = $('forecast-coeff-sub');
     if (sub) {
-      sub.textContent = j.fit_samples >= 8
-        ? `learned from ${j.fit_samples} hourly samples`
-        : `default — need ${8 - j.fit_samples} more daylight hours of data to fit`;
+      const minFit = 4;
+      if (j.solar_coefficient === 0) {
+        sub.textContent = 'no solar production detected on this device';
+      } else if (j.fit_samples >= minFit) {
+        sub.textContent = `learned from ${j.fit_samples} hourly samples`;
+      } else {
+        const need = Math.max(1, minFit - j.fit_samples);
+        sub.textContent = `default — need ${need} more daylight hours of data to fit`;
+      }
     }
     drawForecastChart(j);
   } catch (e) { console.warn('forecast fetch failed', e); }
@@ -1828,16 +1834,6 @@ async function fetchEodForecast() {
     // If the closest forecast point is hours away, the forecast doesn't
     // cover tonight — bail rather than mislead.
     if (bestDelta > 4 * 3600 || best.predicted_soc == null) {
-      el.hidden = true;
-      return;
-    }
-    // Predictions at the SOC clamp boundaries (0% or 100%) are simulator
-    // artifacts — the load model is too pessimistic / optimistic with
-    // limited history. Same story before the solar regression has had
-    // ≥8 daylight samples to fit. Hide the pill rather than mislead.
-    const fitConverged = (j.fit_samples ?? 0) >= 8;
-    const atClamp = best.predicted_soc <= 0 || best.predicted_soc >= 100;
-    if (!fitConverged || atClamp) {
       el.hidden = true;
       return;
     }

@@ -69,6 +69,15 @@ CREATE TABLE IF NOT EXISTS samples (
 
 CREATE INDEX IF NOT EXISTS idx_samples_bucket ON samples(bucket);
 CREATE INDEX IF NOT EXISTS idx_samples_dev_bucket ON samples(device_sn, bucket);
+
+CREATE TABLE IF NOT EXISTS forecast_predictions (
+    device_sn     TEXT NOT NULL,
+    made_at       INTEGER NOT NULL,   -- hour-aligned unix epoch (when made)
+    target        INTEGER NOT NULL,   -- hour-aligned unix epoch (when about)
+    predicted_soc REAL NOT NULL,
+    PRIMARY KEY (device_sn, made_at, target)
+);
+CREATE INDEX IF NOT EXISTS idx_pred_target ON forecast_predictions(device_sn, target);
 """
 
 
@@ -215,6 +224,76 @@ class EnergyDB:
     def all_totals(self) -> list[dict]:
         return [self.totals(d["device_sn"]) | {"name": d["name"]}
                 for d in self.list_devices()]
+
+    # ---------- forecast predictions vs actuals ----------
+    def record_forecast(self, device_sn: str, made_at: float,
+                        predictions: list[dict]) -> int:
+        """Persist a forecast snapshot. `predictions` is a list of
+        {ts, predicted_soc} entries. INSERT OR REPLACE on the (device,
+        made_at, target) primary key so multiple calls within the same
+        hour collapse to one row per target. Returns rows written."""
+        if not device_sn or not predictions:
+            return 0
+        made_at_hour = int(made_at // 3600) * 3600
+        rows = []
+        for p in predictions:
+            ts = p.get("ts")
+            soc = p.get("predicted_soc")
+            if ts is None or soc is None:
+                continue
+            target = int(int(ts) // 3600) * 3600
+            rows.append((device_sn, made_at_hour, target, float(soc)))
+        if not rows:
+            return 0
+        with self._conn() as c:
+            c.executemany(
+                """INSERT OR REPLACE INTO forecast_predictions
+                       (device_sn, made_at, target, predicted_soc)
+                   VALUES (?, ?, ?, ?)""",
+                rows,
+            )
+        return len(rows)
+
+    def prediction_accuracy(self, device_sn: str,
+                            max_age_days: int = 14,
+                            limit: int = 500) -> list[dict]:
+        """Return predicted-vs-actual pairs for predictions whose target is
+        in the past. Each entry has {made_at, target, predicted_soc,
+        actual_soc, lead_time_h, error}. Joins each prediction to the
+        average last_battery_pct in the ±30 min window around the target."""
+        now = int(time.time())
+        cutoff_low = now - max_age_days * 86400
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT p.made_at, p.target, p.predicted_soc,
+                          (SELECT AVG(s.last_battery_pct)
+                             FROM samples s
+                            WHERE s.device_sn = p.device_sn
+                              AND s.bucket >= p.target - 1800
+                              AND s.bucket <  p.target + 1800
+                              AND s.last_battery_pct IS NOT NULL) AS actual_soc
+                     FROM forecast_predictions p
+                    WHERE p.device_sn = ?
+                      AND p.target <= ?
+                      AND p.made_at >= ?
+                    ORDER BY p.target DESC
+                    LIMIT ?""",
+                (device_sn, now, cutoff_low, int(limit)),
+            ).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            actual = r[3]
+            if actual is None:
+                continue
+            out.append({
+                "made_at": r[0],
+                "target": r[1],
+                "predicted_soc": float(r[2]),
+                "actual_soc": float(actual),
+                "lead_time_h": round((r[1] - r[0]) / 3600, 1),
+                "error": round(abs(float(actual) - float(r[2])), 1),
+            })
+        return out
 
     def history(self, device_sn: str, hours: int = 24,
                 bucket_s: int = 600) -> list[dict]:
