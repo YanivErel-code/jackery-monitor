@@ -493,10 +493,55 @@ main {
 /* ============== Charts ============== */
 .chart {
   width: 100%;
-  height: 220px;
+  height: 240px;
   display: block;
 }
 .chart-tall { height: 320px; }
+
+/* Hover tooltip for both Live and Energy charts */
+.chart-tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 100;
+  background: rgba(20, 24, 29, .96);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  box-shadow: 0 10px 28px rgba(0,0,0,.45);
+  min-width: 160px;
+  color: var(--text);
+}
+.chart-tooltip[hidden] { display: none; }
+.chart-tooltip .cht-ts {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-mute);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.chart-tooltip .cht-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 0;
+  font-family: var(--font-sans);
+  color: var(--text-dim);
+}
+.chart-tooltip .cht-row i {
+  display: inline-block;
+  width: 10px; height: 10px; border-radius: 2px;
+}
+.chart-tooltip .cht-row b {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  color: var(--text);
+  font-weight: 500;
+}
 
 .legend {
   display: flex; gap: 18px; flex-wrap: wrap;
