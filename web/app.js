@@ -169,6 +169,14 @@ setInterval(renderPausePill, 1000);
 // ============================================================
 // OUTPUT TOGGLES — click an AC/DC/USB/Car card to toggle it
 // ============================================================
+// After a successful toggle, we don't trust the next ~30s of telemetry to
+// reflect the change — the device takes ~5-30s to apply the command and
+// push the new state back to the Jackery cloud. During that window we hold
+// the optimistic value and tag the button as "pending"; it clears as soon
+// as telemetry matches what we asked for, or after the timeout (revert).
+const PENDING_TOGGLE_MS = 30000;
+const _pendingToggle = {};   // port -> { expected: bool, until: ms }
+
 document.querySelectorAll('.switch').forEach((btn) => {
   btn.addEventListener('click', async () => {
     const port = btn.dataset.port;
@@ -198,7 +206,9 @@ document.querySelectorAll('.switch').forEach((btn) => {
         const j = await r.json().catch(() => ({}));
         throw new Error(j.detail || j.error || ('HTTP ' + r.status));
       }
-      // Optimistically update; the next telemetry poll will confirm/reconcile.
+      // Optimistic update + remember the expectation so subsequent telemetry
+      // polls can't flip the label back during the device's apply window.
+      _pendingToggle[port] = { expected: turnOn, until: Date.now() + PENDING_TOGGLE_MS };
       lbl.textContent = turnOn ? 'ON' : 'OFF';
       btn.classList.toggle('on', turnOn);
     } catch (e) {
@@ -206,7 +216,7 @@ document.querySelectorAll('.switch').forEach((btn) => {
       alert(`Failed to toggle ${port.toUpperCase()}: ${e.message || e}`);
     } finally {
       btn.disabled = false;
-      btn.classList.remove('pending');
+      // Note: we keep .pending until telemetry confirms the change
     }
   });
 });
@@ -492,12 +502,33 @@ function applyStatus(s) {
     $('today-in-kwh').textContent  = fmtKwh(s.energy.today.input_wh);
   }
 
-  // Output state (read-only display from cloud telemetry)
+  // Output state. If a toggle is pending and the device hasn't propagated
+  // yet, hold the expected value and keep the .pending tag so the user
+  // sees the change "stick" instead of flapping back to the old state.
+  const now = Date.now();
   for (const port of ['ac', 'dc', 'usb', 'car']) {
     const v = t[`${port}_on`];
     const sw = document.querySelector(`.switch[data-port="${port}"]`);
     const lbl = $(`sw-${port}`);
     if (!sw || !lbl) continue;
+    const pending = _pendingToggle[port];
+    if (pending && pending.until > now) {
+      if (v === pending.expected) {
+        // Telemetry has caught up — apply normally and clear pending.
+        delete _pendingToggle[port];
+        sw.classList.remove('pending');
+        sw.classList.toggle('on', v);
+        lbl.textContent = v ? 'ON' : 'OFF';
+      } else {
+        // Still propagating — hold the optimistic value, mark as pending.
+        sw.classList.add('pending');
+        sw.classList.toggle('on', pending.expected);
+        lbl.textContent = pending.expected ? 'ON' : 'OFF';
+      }
+      continue;
+    }
+    // No (or expired) pending toggle — render the actual telemetry.
+    if (pending) { delete _pendingToggle[port]; sw.classList.remove('pending'); }
     if (v === true)       { sw.classList.add('on');  lbl.textContent = 'ON';  }
     else if (v === false) { sw.classList.remove('on'); lbl.textContent = 'OFF'; }
     else                  { sw.classList.remove('on'); lbl.textContent = '—'; }
