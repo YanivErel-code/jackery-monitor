@@ -903,7 +903,20 @@ def service_worker():
                         headers={"Service-Worker-Allowed": "/"})
 
 
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+# Wrap StaticFiles to send `Cache-Control: no-cache` so caching CDNs (e.g.
+# Cloudflare in front of a Tunnel) revalidate every request instead of
+# happily serving 14-hour-old CSS after a deploy. ETag handling already
+# makes revalidation cheap — `no-cache` doesn't mean "don't store", just
+# "always check with origin first".
+class _NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        resp = await super().get_response(path, scope)
+        if "cache-control" not in {k.lower() for k in resp.headers.keys()}:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", _NoCacheStaticFiles(directory=WEB_DIR), name="static")
 
 
 if __name__ == "__main__":
