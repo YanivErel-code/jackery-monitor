@@ -5,3 +5,8 @@ pycryptodomex>=3.19
 httpx>=0.27
 paho-mqtt>=2.0
 python-kasa>=0.10
+# tzdata is needed because python-kasa parses device-reported timezone
+# strings (e.g. "PST8PDT") that require the IANA tz database; the
+# python:3.11-slim image doesn't ship it system-wide. Without this, all
+# Kasa connections fail with ZoneInfoNotFoundError before auth even starts.
+tzdata>=2024.1
