@@ -294,6 +294,13 @@ class BridgeDeviceClient(DeviceClient):
             raise DeviceClientError(r.get("error", "resume_polling failed"))
         return r
 
+    async def get_events(self, limit: int = 100, since: float = 0.0) -> list[dict]:
+        """Fetch the bridge's recent event log (auth, poll, mqtt, session)."""
+        r = await self._rpc("get_events", limit=int(limit), since=float(since))
+        if not r.get("ok"):
+            raise DeviceClientError(r.get("error", "get_events failed"))
+        return r.get("events") or []
+
     async def disconnect(self):
         try:
             await self._rpc("disconnect")
