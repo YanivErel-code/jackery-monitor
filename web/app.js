@@ -1068,6 +1068,13 @@ function applyStatus(s) {
   if (activeTab === 'automation' && _allRules.length && prevDeviceSn !== newDeviceSn) {
     renderRulesWithFilter();
   }
+  // Same idea for the Forecast tab: forecast is per-device (battery
+  // capacity, solar regression, load profile all differ), so re-fetch on
+  // device switch.
+  if (activeTab === 'forecast' && prevDeviceSn !== newDeviceSn) {
+    forecastCache = null;
+    fetchForecast();
+  }
 
   // Connection pill
   const pill = $('conn-pill');
@@ -1671,9 +1678,17 @@ async function fetchForecast() {
     content.hidden = false;
     stats.hidden = false;
     forecastCache = j;
-    set('forecast-capacity', j.capacity_wh);
-    set('forecast-coeff',    j.solar_coefficient);
-    set('forecast-avg-load', j.overall_load_w);
+    const setText = (id, v, d = 0) => { const el = $(id); if (el) el.textContent = fmt(v, d); };
+    const dev = activeJackeryDevice();
+    const title = $('forecast-title');
+    if (title) {
+      title.textContent = dev?.name
+        ? `${dev.name} — next 5 days`
+        : 'State of charge — next 5 days';
+    }
+    setText('forecast-capacity', j.capacity_wh);
+    setText('forecast-coeff',    j.solar_coefficient, 2);
+    setText('forecast-avg-load', j.overall_load_w);
     const sub = $('forecast-coeff-sub');
     if (sub) {
       sub.textContent = j.fit_samples >= 8
