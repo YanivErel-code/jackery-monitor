@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Jackery Monitor — Sign in</title>
+  <meta name="theme-color" content="#0b0d10" />
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="auth-page">
+    <form id="auth-form" class="login-card" autocomplete="on">
+      <div class="login-brand">
+        <span class="logo-dot"></span>
+        <h1>Jackery Monitor</h1>
+      </div>
+      <p id="auth-sub" class="login-sub">Sign in to continue.</p>
+
+      <label class="field">
+        <span class="field-label">Username</span>
+        <input id="auth-username" type="text" name="username" autocomplete="username" required />
+      </label>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input id="auth-password" type="password" name="password" autocomplete="current-password" required minlength="6" />
+      </label>
+      <label id="auth-confirm-row" class="field" hidden>
+        <span class="field-label">Confirm password</span>
+        <input id="auth-confirm" type="password" name="confirm" autocomplete="new-password" minlength="6" />
+      </label>
+
+      <div id="auth-error" class="login-error" hidden></div>
+
+      <button id="auth-submit" class="btn btn-primary" type="submit">Sign in</button>
+      <p class="login-foot">Stored locally on this NAS, never sent off-device. The session cookie is HMAC-signed and lasts 30 days.</p>
+    </form>
+  </main>
+
+  <script>
+    (function() {
+      const setup = window.location.pathname === '/setup';
+      const $ = (id) => document.getElementById(id);
+      const errEl = $('auth-error');
+      const subEl = $('auth-sub');
+      const submitBtn = $('auth-submit');
+      const confirmRow = $('auth-confirm-row');
+      const confirmInput = $('auth-confirm');
+
+      if (setup) {
+        document.title = 'Jackery Monitor — Set up';
+        subEl.textContent = 'First-time setup. Pick a username and password.';
+        submitBtn.textContent = 'Create account';
+        confirmRow.hidden = false;
+        confirmInput.required = true;
+        $('auth-password').autocomplete = 'new-password';
+      }
+
+      function showError(msg) {
+        errEl.textContent = msg;
+        errEl.hidden = false;
+      }
+      function clearError() { errEl.hidden = true; errEl.textContent = ''; }
+
+      document.getElementById('auth-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const username = $('auth-username').value.trim();
+        const password = $('auth-password').value;
+        if (setup) {
+          if (password !== confirmInput.value) {
+            showError("Passwords don't match.");
+            return;
+          }
+        }
+        submitBtn.disabled = true;
+        const original = submitBtn.textContent;
+        submitBtn.textContent = setup ? 'Creating…' : 'Signing in…';
+        try {
+          const url = setup ? '/api/auth/setup' : '/api/auth/login';
+          const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+          }
+          window.location.replace('/');
+        } catch (err) {
+          showError(err.message || String(err));
+          submitBtn.disabled = false;
+          submitBtn.textContent = original;
+        }
+      });
+
+      // If we're on /login but no user is set up yet, redirect to /setup.
+      // (Edge case if someone bookmarks /login pre-setup.)
+      if (!setup) {
+        fetch('/api/auth/me', { credentials: 'same-origin' }).catch(() => {});
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -590,6 +590,19 @@ main {
   .auto-rule { grid-template-columns: 1fr; }
 }
 
+/* ============== Standalone auth page (/login, /setup) ============== */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.auth-page .login-card {
+  max-width: 400px;
+  width: 100%;
+}
+
 /* ============== Logs tab ============== */
 .logs-controls { display: flex; align-items: center; gap: 10px; }
 .logs-auto { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
