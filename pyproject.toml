@@ -1,0 +1,53 @@
+# Tooling config for the Jackery Monitor.
+# - pytest config + paths
+# - ruff config (lint + format on save / pre-commit)
+# - mypy is intentionally NOT configured project-wide; type hints are
+#   advisory in this codebase, and the FastAPI / async stack confuses
+#   mypy more than it helps.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Treat the repo root as importable so tests can `import auth` etc.
+# without a setup.py / src layout.
+pythonpath = ["."]
+# `smoke_*` are integration tests that spin up a fake server / process —
+# they're slower and depend on the full dep set. Default `pytest` runs
+# the unit tests; opt into smokes with `pytest -k smoke`.
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+filterwarnings = [
+    # paho-mqtt emits a DeprecationWarning we can't fix
+    "ignore::DeprecationWarning:paho.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Don't lint the diagnostic scripts — they're meant to be ad-hoc and
+# their `print()` style is intentional.
+extend-exclude = ["diag_*.py", "tests/smoke_*.py"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "RUF",  # ruff-specific
+]
+ignore = [
+    # Long lines are sometimes the right call (URLs, comments)
+    "E501",
+    # `pass` after `try/except: pass` — common pattern, fine
+    "B011",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can use private members of modules they're testing.
+"tests/*" = ["F401", "F811"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
