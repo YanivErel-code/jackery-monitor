@@ -63,6 +63,24 @@ CHARGE_EFFICIENCY = 0.90
 # headroom for clearer-sky days without runaway overprediction.
 SOLAR_RECENT_CAP_MULT = 1.5
 
+# Idle/standby load when an hour has no historical data of its own AND
+# neighboring hours don't either. ~30W covers the device's own electronics
+# + small always-on draws (LED indicators, USB hubs idle). Critically: NOT
+# the global mean — that's what bled daytime activity into nighttime
+# forecasts and caused the 44pp overnight error.
+IDLE_LOAD_W = 30.0
+
+# Cutoff for "recent" samples in load-profile recency weighting (seconds).
+# Variable buckets (high IQR / median) weight samples newer than this 70%
+# vs older 30%, so recent behavior shifts dominate without throwing away
+# longer-term context entirely.
+LOAD_RECENCY_S = 3 * 86400
+
+# Threshold for treating a bucket as "variable" vs "stable". Buckets with
+# relative-IQR (IQR / median) above this get recency-weighted; below it,
+# we just use the median (stable hour, e.g. overnight idle).
+LOAD_VARIABILITY_THRESHOLD = 0.5
+
 
 def battery_capacity_wh(model_code: int | None) -> int:
     if model_code is None:
@@ -138,28 +156,36 @@ def fit_solar_coefficient(
 # ---------- load model ----------
 def fit_load_profile(
     energy_history: list[dict[str, Any]],
+    *,
+    now_ts: float | None = None,
 ) -> dict[tuple[int, int], float]:
-    """Median output_w by (hour-of-day, weekend-flag), with outlier capping.
+    """Per-hour load profile with stability-aware fitting.
 
-    Clips each sample at the global 95th percentile *before* bucketing so a
-    single heavy-load moment (microwave, dryer, EV) doesn't poison the
-    forecast for that hour-of-day forever. Then median per bucket — also
-    robust to single spikes when the bucket has just a couple samples.
+    Pipeline:
+      1. Cap each sample at global 95th percentile (kills one-off spikes).
+      2. Bucket by (hour-of-day, weekend-flag), keeping the timestamp.
+      3. For each bucket, compute median + IQR. If IQR/median is small
+         (stable hour — typical for overnight idle), use the median. If
+         large (variable hour — daytime activity), blend recent (last 3d
+         at 70%) with older (30%) so the forecast follows recent shifts.
 
-    Returns dict keyed by (hour 0-23, weekend 0|1) → watts. Hours not
-    present are absent; the simulator falls back to the overall average.
+    Hours absent from the dict get a neighbor-hour fallback in
+    `expected_load_w`, NOT a global average — global average bleeds
+    daytime activity into nighttime forecasts.
     """
+    now_ts = now_ts if now_ts is not None else time.time()
+    recency_cutoff = now_ts - LOAD_RECENCY_S
+
     all_vals = sorted(
         float(r["output_w"]) for r in energy_history
         if r.get("output_w") is not None
     )
     if not all_vals:
         return {}
-    # 95th-percentile cap. With <20 samples, take the max — there's no
-    # meaningful percentile yet.
     cap = all_vals[min(len(all_vals) - 1, int(len(all_vals) * 0.95))]
 
-    buckets: dict[tuple[int, int], list[float]] = {}
+    # bucket → list of (value, ts)
+    buckets: dict[tuple[int, int], list[tuple[float, int]]] = {}
     for row in energy_history:
         ts = row.get("ts")
         out_w = row.get("output_w")
@@ -168,18 +194,68 @@ def fit_load_profile(
         v = min(float(out_w), cap)
         d = datetime.fromtimestamp(int(ts))
         key = (d.hour, 1 if d.weekday() >= 5 else 0)
-        buckets.setdefault(key, []).append(v)
-    return {k: sorted(v)[len(v) // 2] for k, v in buckets.items()}
+        buckets.setdefault(key, []).append((v, int(ts)))
+
+    profile: dict[tuple[int, int], float] = {}
+    for key, samples in buckets.items():
+        vals = sorted(v for v, _ in samples)
+        n = len(vals)
+        median = vals[n // 2]
+        q25 = vals[n // 4]
+        q75 = vals[(3 * n) // 4]
+        iqr = q75 - q25
+        rel_iqr = iqr / median if median > 0 else 0
+
+        # Stable bucket OR too few samples to recency-weight reliably.
+        if rel_iqr < LOAD_VARIABILITY_THRESHOLD or n < 6:
+            profile[key] = median
+            continue
+
+        # Variable bucket: blend recent and older medians.
+        recent = sorted(v for v, t in samples if t >= recency_cutoff)
+        older = sorted(v for v, t in samples if t < recency_cutoff)
+        if not recent:
+            profile[key] = median
+            continue
+        recent_med = recent[len(recent) // 2]
+        older_med = older[len(older) // 2] if older else recent_med
+        profile[key] = 0.7 * recent_med + 0.3 * older_med
+
+    return profile
 
 
 def expected_load_w(
     profile: dict[tuple[int, int], float],
-    overall_avg_w: float,
     ts: int,
 ) -> float:
+    """Look up the expected load for a forecast hour.
+
+    Fallback hierarchy when the (hour, weekend) bucket is empty:
+      1. Same hour, opposite weekend-flag.
+      2. Neighboring hours within ±3, same weekend-flag (preserves day/night).
+      3. Neighboring hours within ±3, opposite weekend-flag.
+      4. IDLE_LOAD_W (30W) — never the global mean.
+
+    Step 2 is the critical fix: a missing 2am bucket should be guessed
+    from 1am or 3am, NOT from the global daytime-skewed average.
+    """
     d = datetime.fromtimestamp(ts)
-    key = (d.hour, 1 if d.weekday() >= 5 else 0)
-    return profile.get(key, overall_avg_w)
+    h = d.hour
+    w = 1 if d.weekday() >= 5 else 0
+
+    if (h, w) in profile:
+        return profile[(h, w)]
+    if (h, 1 - w) in profile:
+        return profile[(h, 1 - w)]
+    for delta in (1, -1, 2, -2, 3, -3):
+        nh = (h + delta) % 24
+        if (nh, w) in profile:
+            return profile[(nh, w)]
+    for delta in (1, -1, 2, -2, 3, -3):
+        nh = (h + delta) % 24
+        if (nh, 1 - w) in profile:
+            return profile[(nh, 1 - w)]
+    return IDLE_LOAD_W
 
 
 # ---------- simulation ----------
@@ -225,8 +301,10 @@ def build_forecast(
     cutoff = int(now_ts)
 
     k, n_fit = fit_solar_coefficient(energy_history, weather_hourly)
-    profile = fit_load_profile(energy_history)
+    profile = fit_load_profile(energy_history, now_ts=now_ts)
     out_vals = [r["output_w"] for r in energy_history if r.get("output_w") is not None]
+    # Reported as a debug stat only — NOT used as a fallback for missing
+    # hours. Mixing daytime samples into nighttime forecasts was the bug.
     overall_load = sum(out_vals) / len(out_vals) if out_vals else 0.0
 
     # Cap projected solar by the device's recent observed peak so an
@@ -252,7 +330,7 @@ def build_forecast(
         solar_w = max(0.0, k * ghi)
         if solar_cap is not None:
             solar_w = min(solar_w, solar_cap)
-        load_w = expected_load_w(profile, overall_load, ts)
+        load_w = expected_load_w(profile, ts)
         forecast_hours.append({
             "ts": ts,
             "solar_w": round(solar_w, 1),
