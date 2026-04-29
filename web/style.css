@@ -558,13 +558,9 @@ main {
   border-radius: 6px;
 }
 .pack-row:hover { background: var(--card-bg-hover, rgba(255,255,255,.02)); }
-.pack-row-main {
-  background: rgba(56, 189, 248, .07);
-  border: 1px solid rgba(56, 189, 248, .25);
-  padding: 6px 8px;
-  margin-bottom: 4px;
-}
 .pack-idx { color: var(--text-mute); text-align: center; font-weight: 600; }
+/* Main row keeps the same grid as pack rows so columns line up exactly;
+   only the star icon is tinted to mark it visually. */
 .pack-row-main .pack-idx { color: var(--accent-2); }
 .pack-bar {
   height: 8px; border-radius: 4px;
