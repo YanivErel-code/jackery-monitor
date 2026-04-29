@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import auth
+import cost as cost_module
 import forecaster
 import kasa_client
 import kasa_creds
@@ -296,12 +297,39 @@ async def broadcast(message: dict[str, Any]) -> None:
         state.ws_clients.discard(ws)
 
 
+def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
+    """Add today_savings + lifetime_savings + cost_plan to a totals dict.
+
+    Cheap enough to do per-poll (hourly buckets over 1y is ~8760 rows
+    iterated through Python). Idempotent — safe to call from any caller
+    that already produced the kWh totals."""
+    try:
+        plan = cost_module.get_plan()
+        loc = device_location.get() or {}
+        tz_offset = int(loc.get("utc_offset_seconds") or 0)
+        from energy_db import _start_of_day
+        today_since = _start_of_day(int(time.time()))
+        today_hist = [r for r in state.energy.history(device_sn, hours=24, bucket_s=3600)
+                      if (r.get("ts") or 0) >= today_since]
+        life_hist = state.energy.history(device_sn, hours=24 * 365, bucket_s=3600)
+        totals["today_savings"] = cost_module.today_savings(today_hist, plan, tz_offset)
+        totals["lifetime_savings"] = cost_module.lifetime_savings(life_hist, plan, tz_offset)
+        totals["cost_plan"] = {"type": plan["type"],
+                               "currency": plan.get("currency", "USD")}
+    except Exception as e:
+        log.debug("cost decoration failed: %s", e)
+    return totals
+
+
 def serialize_status() -> dict[str, Any]:
     device_info = state.device.to_dict() if state.device else None
     energy = None
     try:
         if state.device and state.device.device_sn:
-            energy = state.energy.totals(state.device.device_sn)
+            energy = _decorate_totals_with_savings(
+                state.energy.totals(state.device.device_sn),
+                state.device.device_sn,
+            )
     except Exception as e:
         log.debug("energy totals lookup failed: %s", e)
     return {
@@ -495,13 +523,32 @@ def api_devices():
 
 @app.get("/api/energy/totals")
 def api_energy_totals(device_sn: str | None = None):
-    """Lifetime + today + 7d + 30d totals.
+    """Lifetime + today + 7d + 30d totals + dollar savings.
        If device_sn omitted, returns totals for the currently-active device."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         return {"device_sn": None, "lifetime": {"input_wh": 0, "output_wh": 0}}
-    return state.energy.totals(device_sn)
+    return _decorate_totals_with_savings(state.energy.totals(device_sn), device_sn)
+
+
+@app.get("/api/cost/plan")
+def api_cost_get():
+    """Return the saved plan plus the list of presets the UI can offer."""
+    return {"plan": cost_module.get_plan(), "presets": cost_module.list_presets()}
+
+
+@app.post("/api/cost/plan")
+async def api_cost_set(req: Request):
+    """Persist a new electricity plan. Body shape per cost.py docstring."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    saved = cost_module.set_plan(body if isinstance(body, dict) else {})
+    if saved is None:
+        raise HTTPException(status_code=400, detail="invalid plan shape")
+    return {"plan": saved}
 
 
 @app.get("/api/energy/history")

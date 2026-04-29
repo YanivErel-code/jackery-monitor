@@ -430,6 +430,39 @@ main {
 }
 .kpi-row .kpi-value { font-size: 26px; }
 
+/* Cost savings row inside the TODAY (Live) and Lifetime (Energy) cards.
+   Three numbers in a row: solar savings (green), grid cost (red),
+   and the net (highlighted). Hidden if the cost plan can't be loaded. */
+.savings-row {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+.savings-row .sav-pos { color: var(--accent); }
+.savings-row .sav-neg { color: #ef4444; }
+.savings-row .sav-net { color: var(--text); margin-left: auto; }
+.savings-row .sav-sep { color: var(--text-mute); font-weight: 400; }
+
+/* TOU summary in Settings. A compact monospace block showing the active
+   slots so the user can confirm the preset matches their plan. */
+.cost-tou-summary {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  white-space: pre;
+  max-width: 380px;
+  overflow-x: auto;
+}
+
 /* ============== Switches ============== */
 .switches {
   display: grid;

@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') { loadAutomation(); }
 }
@@ -979,6 +979,133 @@ document.getElementById('settings-form')?.addEventListener('submit', async (e) =
 });
 
 // ============================================================
+// COST / SAVINGS SETTINGS
+// ============================================================
+let _costPresets = [];
+
+async function loadCostPlan() {
+  try {
+    const r = await fetch('/api/cost/plan');
+    if (!r.ok) return;
+    const j = await r.json();
+    _costPresets = j.presets || [];
+    renderCostFields(j.plan);
+  } catch (e) {
+    console.warn('cost plan load failed', e);
+  }
+}
+
+function renderCostFields(plan) {
+  const sel = $('cost-preset');
+  if (!sel) return;
+  // Build the preset dropdown — every preset + a "Custom flat rate" entry
+  // for users who want to type their own number.
+  sel.innerHTML = '';
+  for (const p of _costPresets) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.label;
+    sel.appendChild(opt);
+  }
+  const customOpt = document.createElement('option');
+  customOpt.value = '__custom_flat__';
+  customOpt.textContent = 'Custom flat rate';
+  sel.appendChild(customOpt);
+
+  // Pick the option that matches the saved plan. If the saved plan is a
+  // flat rate that exactly matches a preset, prefer the preset; otherwise
+  // fall back to "Custom flat rate".
+  const matchPreset = _costPresets.find((p) => deepEqualPlan(p.plan, plan));
+  sel.value = matchPreset ? matchPreset.id : '__custom_flat__';
+
+  if (plan?.type === 'flat') {
+    $('cost-flat-rate').value = plan.rate_per_kwh;
+  }
+  applyCostSelection();
+}
+
+function deepEqualPlan(a, b) {
+  if (!a || !b || a.type !== b.type) return false;
+  if (a.type === 'flat') return a.rate_per_kwh === b.rate_per_kwh;
+  if (a.type === 'tou') {
+    const sa = a.tou_rates || [];
+    const sb = b.tou_rates || [];
+    if (sa.length !== sb.length) return false;
+    for (let i = 0; i < sa.length; i++) {
+      if (sa[i].start_hour !== sb[i].start_hour) return false;
+      if (sa[i].end_hour !== sb[i].end_hour) return false;
+      if (Math.abs(sa[i].rate - sb[i].rate) > 1e-6) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function applyCostSelection() {
+  const sel = $('cost-preset');
+  if (!sel) return;
+  const id = sel.value;
+  const flatRow = $('cost-flat-row');
+  const touRow  = $('cost-tou-row');
+  if (id === '__custom_flat__') {
+    flatRow.hidden = false;
+    touRow.hidden = true;
+    return;
+  }
+  const preset = _costPresets.find((p) => p.id === id);
+  if (!preset) return;
+  if (preset.plan.type === 'flat') {
+    flatRow.hidden = false;
+    touRow.hidden = true;
+    $('cost-flat-rate').value = preset.plan.rate_per_kwh;
+  } else if (preset.plan.type === 'tou') {
+    flatRow.hidden = true;
+    touRow.hidden = false;
+    $('cost-tou-summary').textContent = preset.plan.tou_rates
+      .map((s) => `${String(s.start_hour).padStart(2, '0')}:00–${String(s.end_hour).padStart(2, '0')}:00  $${s.rate.toFixed(2)}/kWh  ${s.label || ''}`)
+      .join('\n');
+  }
+}
+
+$('cost-preset')?.addEventListener('change', applyCostSelection);
+
+document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('cost-status');
+  const sel = $('cost-preset');
+  const id = sel.value;
+  let plan;
+  if (id === '__custom_flat__') {
+    plan = {
+      type: 'flat',
+      rate_per_kwh: parseFloat($('cost-flat-rate').value) || 0,
+      currency: 'USD',
+    };
+  } else {
+    const preset = _costPresets.find((p) => p.id === id);
+    if (!preset) return;
+    plan = preset.plan;
+  }
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/cost/plan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(plan),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || ('HTTP ' + r.status));
+    }
+    status.textContent = 'Saved.';
+    setTimeout(() => { status.hidden = true; }, 2500);
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message || err}`;
+  }
+});
+
+// ============================================================
 // DEVICE PICKER
 // ============================================================
 $('device-select')?.addEventListener('change', async (e) => {
@@ -1173,6 +1300,13 @@ function applyStatus(s) {
     $('today-out-kwh').textContent = fmtKwh(s.energy.today.output_wh);
     $('today-in-kwh').textContent  = fmtKwh(s.energy.today.input_wh);
   }
+  // Cost savings row in the TODAY card. Server only populates this when
+  // the cost plan loads cleanly; keep the row hidden otherwise.
+  if (s.energy) {
+    renderSavingsRow('today',
+      s.energy.today_savings,
+      s.energy.cost_plan?.currency || 'USD');
+  }
 
   // Output state. If a toggle is pending and the device hasn't propagated
   // yet, hold the expected value and keep the .pending tag so the user
@@ -1249,6 +1383,36 @@ function renderEnergyKpis(e) {
   set('e-30d-in',    e.last_30d?.input_wh);
   set('e-life-out',  e.lifetime?.output_wh);
   set('e-life-in',   e.lifetime?.input_wh);
+
+  // Cost / savings rows. Server returns today_savings + lifetime_savings
+  // alongside the kWh totals when the cost plan loads cleanly. If either
+  // is absent, hide the corresponding row.
+  const currency = e.cost_plan?.currency || 'USD';
+  renderSavingsRow('today',    e.today_savings,    currency);
+  renderSavingsRow('lifetime', e.lifetime_savings, currency);
+}
+
+function fmtMoney(amount, currency = 'USD') {
+  if (amount == null || Number.isNaN(amount)) return '—';
+  try {
+    return new Intl.NumberFormat(undefined,
+      { style: 'currency', currency, maximumFractionDigits: 2 }).format(amount);
+  } catch {
+    return `$${Number(amount).toFixed(2)}`;
+  }
+}
+
+function renderSavingsRow(prefix, savings, currency) {
+  const row = $(`${prefix}-savings-row`);
+  if (!row) return;
+  if (!savings) { row.hidden = true; return; }
+  const setText = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+  const idPrefix = prefix === 'today' ? 'today' : 'life';
+  setText(`${idPrefix}-solar-savings`, `+${fmtMoney(savings.solar_savings, currency)} solar`);
+  setText(`${idPrefix}-grid-cost`,     `−${fmtMoney(savings.grid_cost, currency)} grid`);
+  const net = savings.net_savings ?? 0;
+  setText(`${idPrefix}-net-savings`, `${net >= 0 ? '+' : ''}${fmtMoney(net, currency)} net`);
+  row.hidden = false;
 }
 
 // ============================================================
