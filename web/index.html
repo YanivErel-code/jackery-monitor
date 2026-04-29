@@ -637,6 +637,88 @@
 
       <section class="card device-card">
         <div class="card-header">
+          <h2>Smart charge</h2>
+          <span id="sc-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          On cloudy days when the forecast says SOC won't last to sunrise, this turns on a Kasa smart plug just enough to make it through. <strong>Test mode logs decisions but doesn't toggle the plug</strong> — use it to verify the plan is sane before going active.
+        </p>
+        <form id="sc-form">
+          <div class="settings-row">
+            <label class="settings-label" for="sc-mode">
+              <span class="settings-label-text">Mode</span>
+              <span class="settings-hint">off = disabled, test = log only, active = actually toggle Kasa.</span>
+            </label>
+            <div class="settings-control">
+              <select id="sc-mode">
+                <option value="off">off</option>
+                <option value="test">test (no Kasa toggle)</option>
+                <option value="active">active</option>
+              </select>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="sc-kasa-host">
+              <span class="settings-label-text">Kasa plug</span>
+              <span class="settings-hint">The plug that controls grid power into the Jackery. Picks from your saved devices.</span>
+            </label>
+            <div class="settings-control">
+              <select id="sc-kasa-host"><option value="">— none —</option></select>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="sc-target-soc">
+              <span class="settings-label-text">Target sunrise SOC</span>
+              <span class="settings-hint">Don't fall below this % before the sun comes back. 25% is conservative; 15-20% is aggressive.</span>
+            </label>
+            <div class="settings-control">
+              <input id="sc-target-soc" type="number" min="5" max="95" step="1" value="25" /> <small>%</small>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="sc-max-charge-w">
+              <span class="settings-label-text">Max charge W</span>
+              <span class="settings-hint">Observed AC charging rate of the unit; used to size the on-window. 800W is typical for the 5000 Plus from a 15A circuit.</span>
+            </label>
+            <div class="settings-control">
+              <input id="sc-max-charge-w" type="number" min="50" max="5000" step="50" value="800" /> <small>W</small>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="sc-max-on-min">
+              <span class="settings-label-text">Max ON duration</span>
+              <span class="settings-hint">Safety cap per dusk-dawn cycle so a forecast bug can't leave the plug on indefinitely.</span>
+            </label>
+            <div class="settings-control">
+              <input id="sc-max-on-min" type="number" min="30" max="1440" step="30" value="480" /> <small>min</small>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="sc-claude-toggle">
+              <span class="settings-label-text">Claude narration</span>
+              <span class="settings-hint">Optional natural-language explanation of each decision. Off by default — costs API calls.</span>
+            </label>
+            <div class="settings-control">
+              <label class="keep-awake-row">
+                <input id="sc-claude-toggle" type="checkbox" />
+                <span class="hint">Enable</span>
+              </label>
+            </div>
+          </div>
+          <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+            <button class="btn btn-primary" type="submit">Save</button>
+            <button id="sc-evaluate" class="btn btn-ghost" type="button">Evaluate now</button>
+          </div>
+        </form>
+        <div id="sc-current-plan" class="sc-current-plan" hidden></div>
+        <div id="sc-history-block" style="margin-top:18px" hidden>
+          <h3 style="margin:0 0 8px; font-size:14px">Recent decisions</h3>
+          <div id="sc-history" class="sc-history"></div>
+        </div>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
           <h2>Electricity rates</h2>
           <span id="cost-status" class="hint" hidden></span>
         </div>

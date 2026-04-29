@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadSmartCharge(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') { loadAutomation(); }
   if (name === 'device')   { loadDeviceCapacity(); }
@@ -1345,6 +1345,169 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
     setTimeout(() => { status.hidden = true; }, 2500);
   } catch (err) {
     status.textContent = `Save failed: ${err.message || err}`;
+  }
+});
+
+// ============================================================
+// SMART CHARGE
+// ============================================================
+// Load config + Kasa device list + recent decisions into the form.
+// Called on Settings tab activation; re-runs are cheap.
+async function loadSmartCharge() {
+  try {
+    const [cfgRes, kasaRes, statusRes] = await Promise.all([
+      fetch('/api/smart_charge/config'),
+      fetch('/api/kasa/saved'),
+      fetch('/api/smart_charge/status'),
+    ]);
+    const cfg = cfgRes.ok ? await cfgRes.json() : {};
+    const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
+    const status = statusRes.ok ? await statusRes.json() : {};
+
+    // Populate Kasa picker. Show alias + last 4 of host so dupes don't
+    // collide. Preserve current selection if the host still exists.
+    const sel = $('sc-kasa-host');
+    const currentHost = cfg.kasa_device_host || '';
+    sel.innerHTML = '<option value="">— none —</option>';
+    for (const d of (kasa.devices || [])) {
+      const opt = document.createElement('option');
+      opt.value = d.host;
+      const label = d.alias || d.host;
+      const tail = d.host ? ` (${d.host.slice(-7)})` : '';
+      opt.textContent = `${label}${tail}`;
+      if (d.host === currentHost) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (currentHost && !Array.from(sel.options).some(o => o.value === currentHost)) {
+      // Saved host no longer in registry — show it anyway so the user
+      // doesn't silently lose the binding.
+      const opt = document.createElement('option');
+      opt.value = currentHost;
+      opt.textContent = `${currentHost} (not in registry)`;
+      opt.selected = true;
+      sel.appendChild(opt);
+    }
+
+    // Hydrate the form fields. Defaults match smart_charge.DEFAULT_CONFIG.
+    $('sc-mode').value = cfg.mode || 'off';
+    $('sc-target-soc').value = cfg.target_sunrise_soc_pct ?? 25;
+    $('sc-max-charge-w').value = cfg.max_charge_w ?? 800;
+    $('sc-max-on-min').value = cfg.max_on_duration_minutes ?? 480;
+    $('sc-claude-toggle').checked = !!cfg.claude_enabled;
+
+    renderSmartChargeHistory(status.history || []);
+  } catch (e) {
+    console.warn('smart_charge load failed', e);
+  }
+}
+
+function renderSmartChargeHistory(rows) {
+  const block = $('sc-history-block');
+  const list = $('sc-history');
+  if (!block || !list) return;
+  if (!rows.length) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+  list.innerHTML = rows.slice(0, 20).map((r) => {
+    const when = new Date((r.decided_at || 0) * 1000).toLocaleString();
+    const pred = r.predicted_sunrise_soc_pct != null
+      ? `${Math.round(r.predicted_sunrise_soc_pct)}%` : '—';
+    const actual = r.actual_sunrise_soc_pct != null
+      ? `${Math.round(r.actual_sunrise_soc_pct)}%` : '—';
+    const target = r.target_sunrise_soc_pct != null
+      ? `${Math.round(r.target_sunrise_soc_pct)}%` : '—';
+    const actionCls = r.action === 'on' ? 'sc-act-on'
+                    : r.action === 'off' ? 'sc-act-off'
+                    : 'sc-act-skip';
+    return `
+      <div class="sc-row">
+        <span class="sc-when">${when}</span>
+        <span class="sc-action ${actionCls}">${(r.action || '?').toUpperCase()}</span>
+        <span class="sc-mode">[${r.mode || '?'}]</span>
+        <span class="sc-pred">predicted ${pred} → actual ${actual} (target ${target})</span>
+        <span class="sc-reason" title="${r.reason || ''}">${r.reason || ''}</span>
+      </div>`;
+  }).join('');
+}
+
+function renderSmartChargePlan(plan) {
+  const el = $('sc-current-plan');
+  if (!el) return;
+  if (!plan) { el.hidden = true; return; }
+  const window_ = plan.window_start && plan.window_end
+    ? `${new Date(plan.window_start * 1000).toLocaleTimeString()} → ${new Date(plan.window_end * 1000).toLocaleTimeString()}`
+    : '—';
+  const sunrise = plan.sunrise_ts
+    ? new Date(plan.sunrise_ts * 1000).toLocaleTimeString()
+    : '—';
+  const rate = plan.cheapest_rate != null
+    ? `$${plan.cheapest_rate.toFixed(3)}/kWh` : '—';
+  const actionCls = plan.action === 'on' ? 'sc-act-on'
+                  : plan.action === 'off' ? 'sc-act-off'
+                  : 'sc-act-skip';
+  el.innerHTML = `
+    <div class="sc-plan-header">
+      <span class="sc-action ${actionCls}">${(plan.action || '?').toUpperCase()}</span>
+      <span class="sc-mode">[${plan.mode || '?'}]</span>
+      <span class="sc-reason">${plan.reason || ''}</span>
+    </div>
+    <div class="sc-plan-grid">
+      <div><span class="sc-lbl">Current SOC</span><span>${plan.current_soc_pct != null ? Math.round(plan.current_soc_pct) + '%' : '—'}</span></div>
+      <div><span class="sc-lbl">Predicted at sunrise</span><span>${plan.predicted_sunrise_soc_pct != null ? Math.round(plan.predicted_sunrise_soc_pct) + '%' : '—'}</span></div>
+      <div><span class="sc-lbl">Target</span><span>${Math.round(plan.target_sunrise_soc_pct)}%</span></div>
+      <div><span class="sc-lbl">Deficit</span><span>${plan.deficit_kwh != null ? plan.deficit_kwh.toFixed(2) + ' kWh' : '—'}</span></div>
+      <div><span class="sc-lbl">Charge window</span><span>${window_}</span></div>
+      <div><span class="sc-lbl">Sunrise</span><span>${sunrise}</span></div>
+      <div><span class="sc-lbl">Cheapest rate</span><span>${rate}</span></div>
+    </div>`;
+  el.hidden = false;
+}
+
+document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('sc-status');
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  const cfg = {
+    mode: $('sc-mode').value,
+    kasa_device_host: $('sc-kasa-host').value || null,
+    target_sunrise_soc_pct: parseInt($('sc-target-soc').value, 10) || 25,
+    max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 800,
+    max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
+    claude_enabled: $('sc-claude-toggle').checked,
+  };
+  try {
+    const r = await fetch('/api/smart_charge/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${r.status}`);
+    }
+    status.textContent = 'Saved.';
+    setTimeout(() => { status.hidden = true; }, 2500);
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message || err}`;
+  }
+});
+
+document.getElementById('sc-evaluate')?.addEventListener('click', async () => {
+  const status = $('sc-status');
+  status.hidden = false;
+  status.textContent = 'Evaluating…';
+  try {
+    const r = await fetch('/api/smart_charge/evaluate_now', { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    renderSmartChargePlan(j.plan);
+    status.textContent = 'Plan computed (no execution).';
+    setTimeout(() => { status.hidden = true; }, 3500);
+  } catch (err) {
+    status.textContent = `Evaluate failed: ${err.message || err}`;
   }
 });
 

@@ -581,6 +581,61 @@ main {
 .pack-temp { color: var(--text-mute); font-size: 12px; text-align: right; }
 .pack-sn { color: var(--text-mute); font-size: 11px; text-align: right; }
 
+/* Smart-charge: current plan card + decision history. Compact, mono
+   for numbers so the columns line up. */
+.sc-current-plan {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .02);
+}
+.sc-plan-header {
+  display: flex; align-items: baseline; gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.sc-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.sc-plan-grid > div {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.sc-lbl { color: var(--text-mute); }
+.sc-action {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.sc-act-on   { background: rgba(74,222,128,.15);  color: var(--accent); }
+.sc-act-off  { background: rgba(239,68,68,.15);   color: #ef4444; }
+.sc-act-skip { background: rgba(148,163,184,.15); color: var(--text-mute); }
+.sc-mode    { color: var(--text-mute); font-size: 12px; font-family: var(--font-mono); }
+.sc-reason  { color: var(--text); font-size: 13px; }
+.sc-history { display: flex; flex-direction: column; gap: 4px;
+              font-size: 12px; font-family: var(--font-mono); }
+.sc-row {
+  display: grid;
+  grid-template-columns: 140px 56px 56px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.sc-row:hover { background: rgba(255,255,255,.02); }
+.sc-row .sc-when   { color: var(--text-mute); }
+.sc-row .sc-pred   { color: var(--text-dim); }
+.sc-row .sc-reason { color: var(--text-mute); white-space: nowrap;
+                     overflow: hidden; text-overflow: ellipsis; }
+
 /* TOU rate slot editor in Settings. One row per slot, with the
    start-end window read-only (utility-defined) and the rate editable. */
 .cost-tou-slots {
