@@ -298,6 +298,30 @@ async def broadcast(message: dict[str, Any]) -> None:
         state.ws_clients.discard(ws)
 
 
+def _in_progress_savings_row() -> dict | None:
+    """A synthetic energy_db.history row covering [last_db_record, now]
+    so the cost display reflects current grid/output use without waiting
+    for the next 2s poll to land in the DB.
+
+    Returns None if there's no recent telemetry or the gap is large
+    enough that linear interpolation would be wrong (>60s)."""
+    t = state.last_status
+    if not t or not state.last_update_ts:
+        return None
+    now = time.time()
+    dt = now - state.last_update_ts
+    if dt <= 0 or dt > 60:
+        return None
+    h = dt / 3600.0
+    return {
+        "ts": int(now),  # tagged with "now" so rate_at picks the correct TOU slot
+        "output_wh":   float(t.get("output_power_w") or 0) * h,
+        "input_wh":    float(t.get("input_power_w") or 0) * h,
+        "solar_wh":    float(t.get("solar_input_w") or 0) * h,
+        "ac_input_wh": float(t.get("ac_input_w") or 0) * h,
+    }
+
+
 def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
     """Add today_savings + lifetime_savings + cost_plan to a totals dict.
 
@@ -313,6 +337,14 @@ def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
         today_hist = [r for r in state.energy.history(device_sn, hours=24, bucket_s=3600)
                       if (r.get("ts") or 0) >= today_since]
         life_hist = state.energy.history(device_sn, hours=24 * 365, bucket_s=3600)
+        # Tack on the in-progress sliver — covers grid/output activity
+        # since the last DB record() call so the dashboard reflects
+        # changes within ~2s instead of waiting for the next poll
+        # cycle to land.
+        in_progress = _in_progress_savings_row()
+        if in_progress:
+            today_hist.append(in_progress)
+            life_hist.append(in_progress)
         totals["today_savings"] = cost_module.today_savings(today_hist, plan, tz_offset)
         totals["lifetime_savings"] = cost_module.lifetime_savings(life_hist, plan, tz_offset)
         totals["cost_plan"] = {"type": plan["type"],
