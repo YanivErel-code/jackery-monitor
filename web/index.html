@@ -601,6 +601,20 @@
 
       <section class="card device-card">
         <div class="card-header">
+          <h2>Display</h2>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          For dashboards left open on a wall-mounted iPad / tablet — uses the browser's Wake Lock API to keep the screen from dimming while the dashboard is the active tab. Per-browser preference; turn on for kiosk setups, leave off on phones. Requires iOS 16.4+ on iPad, modern Chrome/Firefox elsewhere.
+        </p>
+        <label class="keep-awake-row">
+          <input id="keep-awake-toggle" type="checkbox" />
+          <span>Keep screen on</span>
+          <span id="keep-awake-status" class="hint"></span>
+        </label>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
           <h2>Electricity rates</h2>
           <span id="cost-status" class="hint" hidden></span>
         </div>

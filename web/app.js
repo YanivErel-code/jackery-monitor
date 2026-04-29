@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') { loadAutomation(); }
   if (name === 'device')   { loadDeviceCapacity(); }
@@ -2383,6 +2383,80 @@ function drawForecastChart(j) {
 // BOOT
 // ============================================================
 // ============================================================
+// SCREEN WAKE LOCK ("Keep screen on" toggle for iPad kiosks)
+// ============================================================
+const KEEP_AWAKE_KEY = 'jackery-keep-awake';
+let _wakeLock = null;
+
+function isKeepAwakeOn() {
+  return localStorage.getItem(KEEP_AWAKE_KEY) === '1';
+}
+
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator)) {
+    return { ok: false, reason: 'not-supported' };
+  }
+  try {
+    _wakeLock = await navigator.wakeLock.request('screen');
+    _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e?.message || String(e) };
+  }
+}
+
+async function releaseWakeLock() {
+  if (_wakeLock) {
+    try { await _wakeLock.release(); } catch {}
+    _wakeLock = null;
+  }
+}
+
+// Browsers release the wake lock when the tab becomes hidden. Re-acquire
+// when it comes back into view, so the iPad mounted-on-wall use case
+// keeps working after notifications, app switches, etc.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && isKeepAwakeOn()) {
+    requestWakeLock();
+  }
+});
+
+function setKeepAwakeStatus(text) {
+  const el = $('keep-awake-status');
+  if (el) el.textContent = text;
+}
+
+function initKeepAwakeToggle() {
+  const t = $('keep-awake-toggle');
+  if (!t) return;
+  t.checked = isKeepAwakeOn();
+  if (!('wakeLock' in navigator)) {
+    setKeepAwakeStatus('— not supported on this browser (needs iOS 16.4+)');
+  } else if (t.checked) {
+    setKeepAwakeStatus(_wakeLock ? '— active' : '— pending');
+  } else {
+    setKeepAwakeStatus('');
+  }
+}
+
+document.addEventListener('change', async (e) => {
+  if (e.target?.id !== 'keep-awake-toggle') return;
+  const on = e.target.checked;
+  localStorage.setItem(KEEP_AWAKE_KEY, on ? '1' : '0');
+  if (on) {
+    const res = await requestWakeLock();
+    setKeepAwakeStatus(res.ok
+      ? '— active (screen will stay on while this tab is visible)'
+      : (res.reason === 'not-supported'
+          ? '— not supported on this browser (needs iOS 16.4+)'
+          : `— failed: ${res.reason}`));
+  } else {
+    await releaseWakeLock();
+    setKeepAwakeStatus('');
+  }
+});
+
+// ============================================================
 // HERO CARD REORDER (drag-and-drop, persisted per-browser)
 // ============================================================
 const HERO_ORDER_KEY = 'jackery-hero-order';
@@ -2424,6 +2498,13 @@ function initHeroSortable() {
   // Restore card order BEFORE first paint so the user doesn't see a flash
   // of the default arrangement.
   applyHeroOrder();
+
+  // Re-acquire wake lock on boot if the user previously enabled it.
+  // Silent failure on unsupported browsers — toggle UI surfaces the
+  // not-supported message when the user opens Settings.
+  if (isKeepAwakeOn()) {
+    requestWakeLock();
+  }
 
   const ok = await checkAuth();
   // Always start the WS — server returns whatever it has, even if cloud is logging in

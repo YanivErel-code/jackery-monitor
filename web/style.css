@@ -579,6 +579,22 @@ main {
   letter-spacing: 0.05em;
 }
 
+/* "Keep screen on" toggle row in Settings. Compact, single-line. */
+.keep-awake-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.keep-awake-row input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.keep-awake-row .hint { margin-left: auto; }
+
 /* Raw cloud-properties dump on the Device tab. Shown collapsed by
    default; clicking "Show" expands it. */
 .raw-props {
