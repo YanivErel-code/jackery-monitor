@@ -1066,6 +1066,39 @@ function deepEqualPlan(a, b) {
 // start/end hours are utility-defined and stay locked to the preset.
 let _costTouCurrent = null;
 
+// Compact "Jun-Sep" / "Oct-May" / etc. label from a months list.
+function _monthsToString(months) {
+  if (!months || !months.length) return '';
+  const NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  // If the months form a single contiguous run (mod 12), show "first-last".
+  // Otherwise, list them.
+  const sorted = [...new Set(months)].sort((a, b) => a - b);
+  // Try contiguous detection in normal order
+  let contiguous = true;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] !== sorted[i - 1] + 1) { contiguous = false; break; }
+  }
+  if (contiguous) return `${NAMES[sorted[0] - 1]}–${NAMES[sorted[sorted.length - 1] - 1]}`;
+  // Try contiguous wrapping (e.g. winter = 1,2,3,4,5,10,11,12 wraps Oct-May)
+  const present = new Set(sorted);
+  // Find the start of the longest gap
+  for (let start = 1; start <= 12; start++) {
+    if (!present.has(start)) continue;
+    if (present.has(start - 1 < 1 ? 12 : start - 1)) continue;
+    let m = start, count = 0;
+    while (present.has(m)) {
+      count++;
+      m = m === 12 ? 1 : m + 1;
+      if (count > 12) break;
+    }
+    if (count === sorted.length) {
+      const end = m === 1 ? 12 : m - 1;
+      return `${NAMES[start - 1]}–${NAMES[end - 1]}`;
+    }
+  }
+  return sorted.map(m => NAMES[m - 1]).join(',');
+}
+
 function renderTouEditor(plan) {
   _costTouCurrent = plan;
   const wrap = $('cost-tou-slots');
@@ -1076,8 +1109,12 @@ function renderTouEditor(plan) {
     row.className = 'cost-tou-slot';
     const start = String(slot.start_hour).padStart(2, '0');
     const end   = String(slot.end_hour).padStart(2, '0');
+    const monthsStr = _monthsToString(slot.months);
+    const timeText = monthsStr
+      ? `${monthsStr} · ${start}:00–${end}:00`
+      : `${start}:00–${end}:00`;
     row.innerHTML = `
-      <span class="slot-time">${start}:00–${end}:00</span>
+      <span class="slot-time">${timeText}</span>
       <span><input type="number" class="slot-rate" data-idx="${i}"
              step="0.001" min="0" max="5"
              value="${slot.rate.toFixed(3)}" /> $/kWh</span>
@@ -1135,12 +1172,18 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
     const touRates = (_costTouCurrent.tou_rates || []).map((slot, i) => {
       const inp = inputs[i];
       const editedRate = inp ? parseFloat(inp.value) : slot.rate;
-      return {
+      const out = {
         start_hour: slot.start_hour,
         end_hour: slot.end_hour,
         rate: Number.isFinite(editedRate) ? editedRate : slot.rate,
         label: slot.label || '',
       };
+      // Preserve the seasonal `months` filter so the saved plan keeps
+      // its per-season grouping.
+      if (slot.months && slot.months.length) {
+        out.months = [...slot.months];
+      }
+      return out;
     });
     plan = {
       type: 'tou',
