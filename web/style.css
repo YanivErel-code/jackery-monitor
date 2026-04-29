@@ -488,11 +488,6 @@ main {
   font-size: 12px;
   color: var(--text-dim);
 }
-.battery-meta .battery-main-pct {
-  color: var(--accent-2);
-  font-family: var(--font-mono);
-  font-weight: 600;
-}
 .dot-sep { color: var(--text-mute); }
 
 /* ============== KPI cards ============== */

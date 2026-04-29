@@ -370,7 +370,18 @@ async function loadDeviceCapacity() {
     if (!dev) return;
     const inp = $('capacity-input');
     const def = $('capacity-default');
-    if (def) def.textContent = `(device default: ${dev.default_capacity_wh} Wh)`;
+    // Prefer the auto-detected value (main + N x pack from the live
+    // battery_packs cache) over the bare device default — it's the
+    // capacity actually used by the forecaster + smart-charge.
+    if (def) {
+      if (dev.auto_capacity_wh) {
+        def.textContent =
+          `(auto-detected: ${dev.auto_capacity_wh} Wh — ${dev.pack_count} packs + main; ` +
+          `override only if Jackery's pack capacity differs from spec)`;
+      } else {
+        def.textContent = `(device default: ${dev.default_capacity_wh} Wh)`;
+      }
+    }
     if (inp) inp.value = dev.capacity_wh_override ?? '';
     inp.dataset.deviceSn = dev.device_sn;
   } catch (e) {
@@ -2355,7 +2366,19 @@ async function fetchBatteryPacks() {
     if (!r.ok) { card.hidden = true; return; }
     const j = await r.json();
     const packs = Array.isArray(j.packs) ? j.packs : [];
-    if (!packs.length) { card.hidden = true; return; }
+    if (!packs.length) {
+      // Reveal the card with a status line if the cloud returned an
+      // error — invisible failure is the worst kind. Hide it cleanly
+      // when we know there are no packs (single-unit setup).
+      if (j.error) {
+        if (summary) summary.textContent = `error: ${j.error}`;
+        list.innerHTML = '';
+        card.hidden = false;
+      } else {
+        card.hidden = true;
+      }
+      return;
+    }
 
     const mainPct = window._lastStatus?.battery_percent ?? null;
     const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH;
@@ -2418,23 +2441,11 @@ async function fetchBatteryPacks() {
 // Idempotent — safe to call repeatedly.
 function applySystemSocOverlay() {
   const sys = window._systemSoc;
-  const main = window._mainSoc;
+  if (sys == null) return;
   const pctEl = $('battery-pct');
   const barEl = $('battery-bar-fill');
-  const mainEl = $('battery-main-pct');
-  const mainSep = $('battery-main-pct-sep');
-  if (sys == null) {
-    if (mainEl) mainEl.hidden = true;
-    if (mainSep) mainSep.hidden = true;
-    return;
-  }
   if (pctEl) pctEl.textContent = Math.round(sys);
   if (barEl) barEl.style.width = `${sys}%`;
-  if (mainEl && main != null) {
-    mainEl.textContent = `main ${Math.round(main)}%`;
-    mainEl.hidden = false;
-    if (mainSep) mainSep.hidden = false;
-  }
 }
 
 // Called from applyStatus() on every WS telemetry tick. If the actual

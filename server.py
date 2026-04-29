@@ -241,19 +241,29 @@ async def poll_loop() -> None:
 
                 # Per-expansion-battery refresh. Throttled to BATTERY_PACK_REFRESH_S
                 # since pack state moves slowly. Cached on state for the API,
-                # persisted to energy_db for the daily-learning job.
+                # persisted to energy_db for the daily-learning job. On failure
+                # we deliberately DO NOT advance last_packs_ts — that would
+                # delay the retry by a full refresh window.
                 if dev_sn and ts - state.last_packs_ts >= BATTERY_PACK_REFRESH_S:
                     rpc = getattr(state.client, "_rpc", None)
                     if rpc is not None:
                         try:
                             result = await rpc("get_battery_packs", device_sn=dev_sn)
+                            err = (result or {}).get("error")
                             packs = (result or {}).get("packs") or []
-                            state.battery_packs = packs
-                            state.last_packs_ts = ts
-                            if packs:
+                            if err:
+                                log.warning("battery_packs RPC returned error: %s", err)
+                            elif packs:
+                                state.battery_packs = packs
+                                state.last_packs_ts = ts
                                 state.energy.record_battery_packs(dev_sn, packs, int(ts))
+                            else:
+                                # Empty list with no error means the device has
+                                # no expansion packs — record that and back off.
+                                state.battery_packs = []
+                                state.last_packs_ts = ts
                         except Exception as e:
-                            log.debug("battery_packs refresh failed: %s", e)
+                            log.warning("battery_packs refresh failed: %s", e)
 
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
@@ -636,9 +646,51 @@ async def smart_charge_loop():
         await asyncio.sleep(5 * 60)
 
 
+def _db_pack_to_cloud_shape(row: dict) -> dict:
+    """energy_db's per-row shape uses internal names; the UI + smart-charge
+    expect the cloud's raw field names. Convert at the boundary so neither
+    side has to know about the other."""
+    return {
+        "deviceSn": row.get("pack_sn"),
+        "deviceOrder": row.get("device_order") or 0,
+        "rb": row.get("soc_pct"),
+        "ip": row.get("input_w"),
+        "op": row.get("output_w"),
+        "it": row.get("internal_temp_c"),
+        "ec": row.get("error_code") or 0,
+    }
+
+
+def _hydrate_battery_packs_from_db() -> None:
+    """Seed state.battery_packs from the latest energy_db snapshot so a
+    fresh server boot doesn't show an empty packs card while waiting for
+    the first cloud fetch (~5-15s on the first poll-loop iteration; longer
+    if the cloud is slow / contested). The hydrated data may be up to
+    BATTERY_PACK_REFRESH_S stale; the live refresh will overwrite it as
+    soon as it lands."""
+    try:
+        for d in state.energy.list_devices():
+            sn = d.get("device_sn")
+            if not sn:
+                continue
+            rows = state.energy.latest_battery_packs(sn)
+            if rows:
+                state.battery_packs = [_db_pack_to_cloud_shape(r) for r in rows]
+                # Don't pretend this is a fresh fetch — leave last_packs_ts at
+                # 0 so the poll loop refreshes on its first iteration.
+                log.info("Hydrated %d battery packs for %s from DB",
+                         len(rows), sn)
+                break
+    except Exception as e:
+        log.debug("battery pack hydration skipped: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting Jackery monitor on backend=%s", state.backend)
+    # Pre-load the last persisted pack snapshot so the UI shows something
+    # immediately on subsequent boots (live refresh overwrites within seconds).
+    _hydrate_battery_packs_from_db()
     # try to connect at startup, but don't block app boot if it fails
     asyncio.create_task(connect_device())
     state.poll_task = asyncio.create_task(poll_loop())
