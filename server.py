@@ -41,6 +41,7 @@ import kasa_client
 import kasa_creds
 import location as device_location
 import settings as user_settings
+import smart_charge
 import weather_client
 from automation import AutomationEngine, AutomationError
 from device_client import DeviceClient, DeviceClientError, DeviceInfo, make_client
@@ -393,15 +394,181 @@ def serialize_status() -> dict[str, Any]:
 
 
 # ---------- FastAPI ----------
+def _find_sun_phases(forecast_hours: list[dict]) -> tuple[int | None, int | None, dict, dict]:
+    """Walk a forecast and return (sunset_ts, sunrise_ts, sunset_entry,
+    sunrise_entry). Sunset = last hour with solar_w > 0 before a dark run.
+    Sunrise = first hour with solar_w > 0 after a dark run. Either may be
+    None if not found within the forecast window."""
+    sunset_ts: int | None = None
+    sunrise_ts: int | None = None
+    sunset_entry: dict = {}
+    sunrise_entry: dict = {}
+    in_day = (forecast_hours[0].get("solar_w") or 0) > 0 if forecast_hours else False
+    for i, h in enumerate(forecast_hours):
+        sun = (h.get("solar_w") or 0) > 0
+        if in_day and not sun:
+            # transition day → night: previous hour was sunset
+            if i > 0:
+                sunset_ts = int(forecast_hours[i - 1]["ts"])
+                sunset_entry = forecast_hours[i - 1]
+        if not in_day and sun:
+            # transition night → day: previous hour was the last dark hour
+            # (i.e., sunrise's predicted SOC)
+            if i > 0 and sunrise_ts is None:
+                sunrise_ts = int(forecast_hours[i - 1]["ts"]) + 3600
+                sunrise_entry = forecast_hours[i - 1]
+                break
+        in_day = sun
+    return sunset_ts, sunrise_ts, sunset_entry, sunrise_entry
+
+
+def _local_date_str(ts: int, tz_offset_seconds: int) -> str:
+    """ISO YYYY-MM-DD in the user's local TZ."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(
+        ts + tz_offset_seconds, tz=timezone.utc
+    ).strftime("%Y-%m-%d")
+
+
+async def _update_daily_summary(device_sn: str, fcast: dict,
+                                tz_offset_seconds: int) -> None:
+    """Fill in today's daily_solar_summary row with whatever we currently
+    know — predicted values for moments still ahead, actual values pulled
+    from the samples table for moments already past. Called from the
+    smart-charge tick (every 5 min) so the row converges to ground truth
+    progressively."""
+    fc = fcast.get("forecast") or []
+    if not fc:
+        return
+    sunset_ts, sunrise_ts, sunset_e, sunrise_e = _find_sun_phases(fc)
+    now = int(time.time())
+    today = _local_date_str(now, tz_offset_seconds)
+
+    pred_sunset = sunset_e.get("predicted_soc") if sunset_e else None
+    pred_sunrise = sunrise_e.get("predicted_soc") if sunrise_e else None
+
+    actual_sunset = (state.energy.actual_soc_at(device_sn, sunset_ts)
+                     if sunset_ts and sunset_ts <= now else None)
+    actual_sunrise = (state.energy.actual_soc_at(device_sn, sunrise_ts)
+                      if sunrise_ts and sunrise_ts <= now else None)
+
+    state.energy.upsert_daily_summary(
+        device_sn=device_sn, local_date=today,
+        sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
+        predicted_sunset_soc_pct=pred_sunset,
+        actual_sunset_soc_pct=actual_sunset,
+        predicted_sunrise_soc_pct=pred_sunrise,
+        actual_sunrise_soc_pct=actual_sunrise,
+    )
+
+
+async def _smart_charge_evaluate(record: bool = True):
+    """Pull the inputs the smart-charge module needs, compute a Plan, and
+    (in active mode) toggle the configured Kasa plug. Used by the
+    periodic tick AND the UI's "Evaluate now" button (record=False
+    skips history + side effects)."""
+    cfg = smart_charge.get_config()
+    if cfg["mode"] == "off":
+        return None
+    device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return None
+
+    # Inputs: forecast (uses the same cached weather as the Forecast tab),
+    # current SOC, capacity (override-aware), TOU plan, tz offset.
+    loc = device_location.get() or {}
+    if not loc.get("latitude"):
+        # No location → no forecast → no decision possible. Surface this in
+        # the history so the user knows.
+        return smart_charge.compute_plan(
+            config=cfg, current_soc_pct=None,
+            forecast={"forecast": []}, cost_plan=cost_module.get_plan(),
+            capacity_wh=forecaster.battery_capacity_wh(
+                getattr(state.device, "model_code", None)),
+        )
+    lat, lon = loc["latitude"], loc["longitude"]
+    weather = await weather_client.fetch_irradiance(lat, lon)
+    if weather.get("error"):
+        return None
+    starting_soc = float((state.last_status or {}).get("battery_percent") or 50)
+    energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+    override = state.energy.get_capacity_override(device_sn)
+    capacity = override or forecaster.battery_capacity_wh(
+        getattr(state.device, "model_code", None))
+    fcast = forecaster.build_forecast(
+        energy_history=energy_hist,
+        weather_hourly=weather["hourly"],
+        starting_soc_pct=starting_soc,
+        capacity_wh=capacity,
+    )
+    plan = smart_charge.compute_plan(
+        config=cfg, current_soc_pct=starting_soc,
+        forecast=fcast, cost_plan=cost_module.get_plan(),
+        capacity_wh=capacity,
+        tz_offset_seconds=int(loc.get("utc_offset_seconds") or 0),
+    )
+
+    # Always update the daily sunset/sunrise summary regardless of mode —
+    # it's pure data tracking, not a control action.
+    if record:
+        try:
+            await _update_daily_summary(
+                device_sn, fcast, int(loc.get("utc_offset_seconds") or 0))
+        except Exception as e:
+            log.debug("daily summary update failed: %s", e)
+
+    executed = False
+    if record and cfg["mode"] == "active" and plan.action in ("on", "off"):
+        host = cfg.get("kasa_device_host")
+        if host:
+            try:
+                await kasa_client.set_state(host, plan.action == "on")
+                executed = True
+            except Exception as e:
+                log.warning("smart_charge Kasa toggle failed: %s", e)
+
+    if record:
+        narration = ""
+        if cfg.get("claude_enabled"):
+            narration = await _smart_charge_narrate(plan)
+        smart_charge.record_decision(plan, executed=executed, narration=narration)
+    return plan
+
+
+async def _smart_charge_narrate(plan) -> str:
+    """Optional Claude narration. Off by default — only invoked when the
+    user explicitly enables it in Settings. Stub returns empty string until
+    the Anthropic SDK is wired up."""
+    try:
+        import claude_narrator
+        return await claude_narrator.narrate_smart_charge(plan)
+    except Exception as e:
+        log.debug("claude narration failed: %s", e)
+        return ""
+
+
+async def smart_charge_loop():
+    """Periodic tick — every 5 minutes, run the smart-charge evaluator."""
+    while True:
+        try:
+            await _smart_charge_evaluate(record=True)
+        except Exception as e:
+            log.warning("smart_charge tick failed: %s", e)
+        await asyncio.sleep(5 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting Jackery monitor on backend=%s", state.backend)
     # try to connect at startup, but don't block app boot if it fails
     asyncio.create_task(connect_device())
     state.poll_task = asyncio.create_task(poll_loop())
+    state.smart_charge_task = asyncio.create_task(smart_charge_loop())
     yield
     if state.poll_task:
         state.poll_task.cancel()
+    if getattr(state, "smart_charge_task", None):
+        state.smart_charge_task.cancel()
     try:
         await state.client.disconnect()
     except Exception:
@@ -695,6 +862,69 @@ def api_forecast_accuracy(device_sn: str | None = None):
         b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
         del b["sum_err"]
     return {"device_sn": device_sn, "samples": samples, "summary": summary}
+
+
+@app.get("/api/smart_charge/config")
+def api_smart_charge_get():
+    """Current smart-charge config + saved Kasa devices for the picker."""
+    return {
+        "config": smart_charge.get_config(),
+        "kasa_devices": state.kasa.list(),
+    }
+
+
+@app.post("/api/smart_charge/config")
+async def api_smart_charge_set(req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    return {"config": smart_charge.set_config(body if isinstance(body, dict) else {})}
+
+
+@app.get("/api/smart_charge/status")
+def api_smart_charge_status(device_sn: str | None = None):
+    """Latest decision + recent history for the UI status panel.
+    History pulls from the persisted log in energy_db so it survives
+    container restarts."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    history: list[dict] = []
+    if device_sn:
+        history = state.energy.list_smart_charge_decisions(device_sn, limit=50)
+    return {"config": smart_charge.get_config(), "history": history}
+
+
+@app.get("/api/smart_charge/analytics")
+def api_smart_charge_analytics(device_sn: str | None = None, days: int = 14):
+    """Predicted-vs-actual sunrise SOC pairs for the last N days. Joins
+    every decision row whose sunrise_ts is in the past with the actual
+    last_battery_pct from the samples table at that moment."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "samples": []}
+    days = max(1, min(int(days), 90))
+    samples = state.energy.smart_charge_analytics(device_sn, days=days)
+    summary = {"n": len(samples), "target_hit_rate": None, "mae_pp": None}
+    if samples:
+        hits = sum(1 for s in samples if s.get("target_hit"))
+        errors = [abs(s["prediction_error_pp"]) for s in samples
+                  if s.get("prediction_error_pp") is not None]
+        summary["target_hit_rate"] = round(hits / len(samples), 3)
+        if errors:
+            summary["mae_pp"] = round(sum(errors) / len(errors), 2)
+    return {"device_sn": device_sn, "days": days,
+            "summary": summary, "samples": samples}
+
+
+@app.post("/api/smart_charge/evaluate_now")
+async def api_smart_charge_evaluate_now():
+    """Compute a decision RIGHT NOW (no execution, no history write).
+    Used by the UI's "Evaluate now" button to show what the controller
+    would currently decide. Same pure logic as the periodic tick."""
+    plan = await _smart_charge_evaluate(record=False)
+    return {"plan": plan.to_dict() if plan else None}
 
 
 @app.get("/api/devices/capacity")

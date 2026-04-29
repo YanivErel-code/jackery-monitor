@@ -81,6 +81,62 @@ CREATE TABLE IF NOT EXISTS forecast_predictions (
     PRIMARY KEY (device_sn, made_at, target)
 );
 CREATE INDEX IF NOT EXISTS idx_pred_target ON forecast_predictions(device_sn, target);
+
+-- Smart-charge controller decision log. Every periodic tick (5 min) writes
+-- one row capturing what the controller decided AND why. Used to audit
+-- behavior over time and to compute predicted-vs-actual analytics (cf.
+-- forecast_predictions joined to samples).
+CREATE TABLE IF NOT EXISTS smart_charge_decisions (
+    decided_at    INTEGER NOT NULL,
+    device_sn     TEXT NOT NULL,
+    mode          TEXT NOT NULL,       -- off | test | active
+    action        TEXT NOT NULL,       -- on | off | skip
+    executed      INTEGER NOT NULL DEFAULT 0,  -- 0 = test/skipped, 1 = Kasa actually toggled
+    reason        TEXT,
+    current_soc_pct           REAL,
+    predicted_sunrise_soc_pct REAL,
+    target_sunrise_soc_pct    REAL,
+    deficit_kwh               REAL,
+    window_start              INTEGER,
+    window_end                INTEGER,
+    sunrise_ts                INTEGER,
+    cheapest_rate             REAL,
+    narration                 TEXT,
+    PRIMARY KEY (decided_at, device_sn)
+);
+CREATE INDEX IF NOT EXISTS idx_sc_decided ON smart_charge_decisions(decided_at);
+CREATE INDEX IF NOT EXISTS idx_sc_sunrise ON smart_charge_decisions(sunrise_ts);
+
+-- Daily denormalized summary: one row per (local-date, device) with the
+-- noteworthy moments labelled — sunset SOC + sunrise SOC, predicted vs
+-- actual. Filled progressively by the smart-charge tick: predicted values
+-- written when the moment is in the future; actual values written once
+-- it's in the past and a sample exists. Cheap to query for daily checks
+-- and ML-style tuning over time.
+-- Hourly weather observations (GHI + cloud cover) from Open-Meteo's
+-- past_days response. Persisted so a future offline learning job can
+-- correlate weather with our actual solar production WITHOUT re-fetching
+-- (Open-Meteo deletes their archive after a while; once we've seen a
+-- value we keep it).
+CREATE TABLE IF NOT EXISTS weather_observations (
+    ts              INTEGER NOT NULL,    -- hour-aligned unix epoch
+    ghi_w_m2        REAL NOT NULL,
+    cloud_cover_pct REAL,
+    PRIMARY KEY (ts)
+);
+
+CREATE TABLE IF NOT EXISTS daily_solar_summary (
+    date           TEXT NOT NULL,         -- YYYY-MM-DD in user's local TZ
+    device_sn      TEXT NOT NULL,
+    sunset_ts      INTEGER,
+    sunrise_ts     INTEGER,                -- the NEXT sunrise (tomorrow's)
+    predicted_sunset_soc_pct  REAL,
+    actual_sunset_soc_pct     REAL,
+    predicted_sunrise_soc_pct REAL,
+    actual_sunrise_soc_pct    REAL,
+    updated_at     INTEGER NOT NULL,
+    PRIMARY KEY (date, device_sn)
+);
 """
 
 
@@ -346,6 +402,267 @@ class EnergyDB:
                 "actual_soc": float(actual),
                 "lead_time_h": round((r[1] - r[0]) / 3600, 1),
                 "error": round(abs(float(actual) - float(r[2])), 1),
+            })
+        return out
+
+    # ---------- weather observations (GHI + cloud cover history) ----------
+    def upsert_weather_observations(self, rows: list[dict]) -> int:
+        """Bulk-write weather observations. Each row is {ts, ghi_w_m2,
+        cloud_cover_pct}. INSERT OR IGNORE — once we've recorded a value
+        for a given hour we don't overwrite (Open-Meteo's historical
+        re-analysis can shift a tiny bit and we'd rather have the value
+        we saw at observation time)."""
+        if not rows:
+            return 0
+        prepared = [
+            (int(r["ts"]),
+             float(r.get("ghi_w_m2") or 0),
+             float(r["cloud_cover_pct"]) if r.get("cloud_cover_pct") is not None else None)
+            for r in rows if r.get("ts")
+        ]
+        if not prepared:
+            return 0
+        with self._conn() as c:
+            c.executemany(
+                """INSERT OR IGNORE INTO weather_observations
+                       (ts, ghi_w_m2, cloud_cover_pct)
+                   VALUES (?, ?, ?)""",
+                prepared,
+            )
+        return len(prepared)
+
+    def list_weather_observations(self, since_ts: int = 0,
+                                  limit: int = 24 * 30) -> list[dict]:
+        """Past hourly weather observations, oldest first. since_ts=0
+        returns everything stored."""
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT ts, ghi_w_m2, cloud_cover_pct
+                     FROM weather_observations
+                    WHERE ts >= ?
+                    ORDER BY ts ASC
+                    LIMIT ?""",
+                (int(since_ts), int(limit)),
+            ).fetchall()
+        return [
+            {"ts": r[0], "ghi_w_m2": r[1], "cloud_cover_pct": r[2]}
+            for r in rows
+        ]
+
+    # ---------- daily solar summary (sunset/sunrise predicted vs actual) ----------
+    def upsert_daily_summary(self, *, device_sn: str, local_date: str,
+                             sunset_ts: int | None,
+                             sunrise_ts: int | None,
+                             predicted_sunset_soc_pct: float | None = None,
+                             actual_sunset_soc_pct: float | None = None,
+                             predicted_sunrise_soc_pct: float | None = None,
+                             actual_sunrise_soc_pct: float | None = None) -> None:
+        """Upsert one daily row. Only NON-None values overwrite the existing
+        row, so the same call can fill predicted at noon and actual at
+        midnight without clobbering anything that's already there."""
+        if not device_sn or not local_date:
+            return
+        now = int(time.time())
+        with self._conn() as c:
+            existing = c.execute(
+                """SELECT sunset_ts, sunrise_ts,
+                          predicted_sunset_soc_pct, actual_sunset_soc_pct,
+                          predicted_sunrise_soc_pct, actual_sunrise_soc_pct
+                     FROM daily_solar_summary
+                    WHERE date = ? AND device_sn = ?""",
+                (local_date, device_sn),
+            ).fetchone()
+            if existing:
+                merged = (
+                    sunset_ts if sunset_ts is not None else existing[0],
+                    sunrise_ts if sunrise_ts is not None else existing[1],
+                    predicted_sunset_soc_pct if predicted_sunset_soc_pct is not None else existing[2],
+                    actual_sunset_soc_pct if actual_sunset_soc_pct is not None else existing[3],
+                    predicted_sunrise_soc_pct if predicted_sunrise_soc_pct is not None else existing[4],
+                    actual_sunrise_soc_pct if actual_sunrise_soc_pct is not None else existing[5],
+                )
+                c.execute(
+                    """UPDATE daily_solar_summary
+                          SET sunset_ts = ?, sunrise_ts = ?,
+                              predicted_sunset_soc_pct = ?,
+                              actual_sunset_soc_pct = ?,
+                              predicted_sunrise_soc_pct = ?,
+                              actual_sunrise_soc_pct = ?,
+                              updated_at = ?
+                        WHERE date = ? AND device_sn = ?""",
+                    (*merged, now, local_date, device_sn),
+                )
+            else:
+                c.execute(
+                    """INSERT INTO daily_solar_summary
+                           (date, device_sn, sunset_ts, sunrise_ts,
+                            predicted_sunset_soc_pct, actual_sunset_soc_pct,
+                            predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
+                            updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (local_date, device_sn, sunset_ts, sunrise_ts,
+                     predicted_sunset_soc_pct, actual_sunset_soc_pct,
+                     predicted_sunrise_soc_pct, actual_sunrise_soc_pct, now),
+                )
+
+    def list_daily_summary(self, device_sn: str, days: int = 30) -> list[dict]:
+        """Most recent N daily rows for a device, newest first."""
+        cutoff = int(time.time()) - days * 86400
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT date, sunset_ts, sunrise_ts,
+                          predicted_sunset_soc_pct, actual_sunset_soc_pct,
+                          predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
+                          updated_at
+                     FROM daily_solar_summary
+                    WHERE device_sn = ?
+                      AND updated_at >= ?
+                    ORDER BY date DESC""",
+                (device_sn, cutoff),
+            ).fetchall()
+        return [
+            {"date": r[0], "sunset_ts": r[1], "sunrise_ts": r[2],
+             "predicted_sunset_soc_pct": r[3], "actual_sunset_soc_pct": r[4],
+             "predicted_sunrise_soc_pct": r[5], "actual_sunrise_soc_pct": r[6],
+             "sunset_error_pp": (r[4] - r[3])
+                                if r[3] is not None and r[4] is not None else None,
+             "sunrise_error_pp": (r[6] - r[5])
+                                 if r[5] is not None and r[6] is not None else None,
+             "updated_at": r[7]}
+            for r in rows
+        ]
+
+    def actual_soc_at(self, device_sn: str, ts: int,
+                      window_s: int = 1800) -> float | None:
+        """Average last_battery_pct in the ±window around `ts`. Used by the
+        daily summary populator to read 'what SOC actually was at sunset.'"""
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT AVG(last_battery_pct)
+                     FROM samples
+                    WHERE device_sn = ?
+                      AND bucket >= ?
+                      AND bucket <  ?
+                      AND last_battery_pct IS NOT NULL""",
+                (device_sn, ts - window_s, ts + window_s),
+            ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    # ---------- smart-charge decision log ----------
+    def record_smart_charge_decision(self, device_sn: str, plan: dict,
+                                     executed: bool,
+                                     narration: str = "") -> None:
+        """Persist one tick's worth of smart-charge decision. Idempotent on
+        (decided_at, device_sn) — safe if the periodic tick fires twice
+        in the same second."""
+        if not device_sn or not plan:
+            return
+        row = (
+            int(plan.get("decided_at") or time.time()),
+            device_sn,
+            str(plan.get("mode") or "off")[:16],
+            str(plan.get("action") or "skip")[:16],
+            1 if executed else 0,
+            (plan.get("reason") or "")[:256],
+            plan.get("current_soc_pct"),
+            plan.get("predicted_sunrise_soc_pct"),
+            plan.get("target_sunrise_soc_pct"),
+            plan.get("deficit_kwh"),
+            plan.get("window_start"),
+            plan.get("window_end"),
+            plan.get("sunrise_ts"),
+            plan.get("cheapest_rate"),
+            (narration or "")[:512],
+        )
+        with self._conn() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO smart_charge_decisions
+                       (decided_at, device_sn, mode, action, executed, reason,
+                        current_soc_pct, predicted_sunrise_soc_pct,
+                        target_sunrise_soc_pct, deficit_kwh,
+                        window_start, window_end, sunrise_ts, cheapest_rate,
+                        narration)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                row,
+            )
+
+    def list_smart_charge_decisions(self, device_sn: str | None = None,
+                                    limit: int = 100,
+                                    since_ts: int = 0) -> list[dict]:
+        """Most-recent-first decision log. since_ts=0 returns everything."""
+        params: list = []
+        sql = """SELECT decided_at, device_sn, mode, action, executed, reason,
+                        current_soc_pct, predicted_sunrise_soc_pct,
+                        target_sunrise_soc_pct, deficit_kwh,
+                        window_start, window_end, sunrise_ts, cheapest_rate,
+                        narration
+                 FROM smart_charge_decisions"""
+        clauses = []
+        if device_sn:
+            clauses.append("device_sn = ?")
+            params.append(device_sn)
+        if since_ts:
+            clauses.append("decided_at >= ?")
+            params.append(int(since_ts))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY decided_at DESC LIMIT ?"
+        params.append(int(limit))
+        with self._conn() as c:
+            rows = c.execute(sql, params).fetchall()
+        return [
+            {"decided_at": r[0], "device_sn": r[1], "mode": r[2],
+             "action": r[3], "executed": bool(r[4]), "reason": r[5],
+             "current_soc_pct": r[6], "predicted_sunrise_soc_pct": r[7],
+             "target_sunrise_soc_pct": r[8], "deficit_kwh": r[9],
+             "window_start": r[10], "window_end": r[11],
+             "sunrise_ts": r[12], "cheapest_rate": r[13],
+             "narration": r[14]}
+            for r in rows
+        ]
+
+    def smart_charge_analytics(self, device_sn: str,
+                               days: int = 14) -> list[dict]:
+        """For each `decided_at` row whose `sunrise_ts` is in the past, look
+        up the actual SOC at that sunrise from the samples table and return
+        predicted-vs-actual pairs. Used by the Automation tab to render a
+        learning chart."""
+        cutoff = int(time.time()) - days * 86400
+        now = int(time.time())
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT d.decided_at, d.action, d.executed,
+                          d.predicted_sunrise_soc_pct, d.target_sunrise_soc_pct,
+                          d.sunrise_ts,
+                          (SELECT AVG(s.last_battery_pct)
+                             FROM samples s
+                            WHERE s.device_sn = d.device_sn
+                              AND s.bucket >= d.sunrise_ts - 1800
+                              AND s.bucket <  d.sunrise_ts + 1800
+                              AND s.last_battery_pct IS NOT NULL) AS actual_soc
+                     FROM smart_charge_decisions d
+                    WHERE d.device_sn = ?
+                      AND d.decided_at >= ?
+                      AND d.sunrise_ts IS NOT NULL
+                      AND d.sunrise_ts <= ?
+                    ORDER BY d.decided_at DESC""",
+                (device_sn, cutoff, now),
+            ).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            actual = r[6]
+            if actual is None:
+                continue
+            out.append({
+                "decided_at": r[0], "action": r[1], "executed": bool(r[2]),
+                "predicted_sunrise_soc_pct": r[3],
+                "target_sunrise_soc_pct": r[4],
+                "sunrise_ts": r[5],
+                "actual_sunrise_soc_pct": float(actual),
+                "prediction_error_pp": round(float(actual) - float(r[3]), 1)
+                                        if r[3] is not None else None,
+                "target_hit": (float(actual) >= float(r[4]))
+                              if r[4] is not None else None,
             })
         return out
 

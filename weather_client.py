@@ -107,6 +107,19 @@ async def fetch_irradiance(
         _cache[key] = (now + CACHE_TTL_S, out)
     log.info("weather: %d hours fetched (past %d / forecast %d days) for (%.3f,%.3f) tz=%s",
              len(rows), past_days, forecast_days, lat, lon, timezone)
+
+    # Persist PAST observations so a future learning job has the actual
+    # GHI + cloud cover paired with the actual solar_w (samples table).
+    # Skip future hours — those are predictions, not observations.
+    cutoff_ts = int(now)
+    past_obs = [r for r in rows if r["ts"] <= cutoff_ts]
+    if past_obs:
+        try:
+            from energy_db import EnergyDB
+            EnergyDB().upsert_weather_observations(past_obs)
+        except Exception as e:
+            log.debug("weather observation persist failed: %s", e)
+
     return out
 
 
