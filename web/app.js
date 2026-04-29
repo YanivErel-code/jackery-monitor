@@ -1470,6 +1470,17 @@ function applyStatus(s) {
     $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
     // EOD pill follows live SOC drift so it doesn't go stale between refreshes.
     maybeRefitEodOnDrift(t.battery_percent);
+    // If expansion packs are present, recompute system SOC from cached
+    // packs + the live main %. Pack values lag (server polls every 5 min)
+    // but the main % updates every tick — re-derivation keeps the
+    // headline number in sync without waiting for the next pack fetch.
+    if (window._cachedPacks?.length) {
+      window._mainSoc = t.battery_percent;
+      window._systemSoc = computeSystemSoc(
+        t.battery_percent, window._cachedPacks, window._mainWh,
+      );
+      applySystemSocOverlay();
+    }
   }
   // Battery time label. The Jackery cloud sends two fields:
   //   time_to_full_h     -> ETA to 100% when the unit is charging
@@ -2297,9 +2308,11 @@ async function fetchEodForecast() {
 
 // ---- Per-expansion-battery list ----
 // Fetches /api/devices/battery_packs and renders one row per attached
-// pack. The dashboard's main SOC (`battery_percent` from /v1/device/property)
-// is the main unit's standalone value — NOT a system-wide aggregate. So
-// the useful derived number here is the *combined system SOC*:
+// pack plus a "Main" row showing the host unit's actual SOC (the value
+// the cloud reports as `battery_percent` on /v1/device/property).
+//
+// The State of Charge card shows the *combined* system SOC, computed
+// here and stashed on window for applyStatus to pick up:
 //   system_pct = (main_pct × main_wh + Σ pack_pct × pack_wh) / total_wh
 // 5000 Plus expansion packs are 5040 Wh — same as the main unit.
 // (The smaller 2042 Wh packs are for the older 1500/2000 series.)
@@ -2318,6 +2331,20 @@ function computeSystemSoc(mainPct, packs, mainWh) {
   return Math.max(0, Math.min(100, pct));
 }
 
+function packRow({ idx, soc, flow, flowClass, temp, label, snTitle, isMain }) {
+  const cls = isMain ? 'pack-row pack-row-main' : 'pack-row';
+  const socTxt = soc != null ? Math.round(soc) : '—';
+  return `
+    <div class="${cls}">
+      <span class="pack-idx">${idx}</span>
+      <span class="pack-bar"><span class="pack-bar-fill" style="width:${Math.max(0, Math.min(100, soc || 0))}%"></span></span>
+      <span class="pack-soc">${socTxt}<small>%</small></span>
+      <span class="pack-flow ${flowClass}">${flow}</span>
+      <span class="pack-temp">${temp}</span>
+      <span class="pack-sn" title="${snTitle}">${label}</span>
+    </div>`;
+}
+
 async function fetchBatteryPacks() {
   const card = $('battery-packs-card');
   const list = $('battery-packs-list');
@@ -2332,7 +2359,16 @@ async function fetchBatteryPacks() {
 
     const mainPct = window._lastStatus?.battery_percent ?? null;
     const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH;
-    const systemSoc = computeSystemSoc(mainPct, packs, mainWh);
+
+    // Cache for on-tick re-derivation in applyStatus(). The packs only
+    // refresh every 5 min server-side, but the main % updates every
+    // poll — recomputing system SOC from cached packs + live main keeps
+    // the headline number fluid.
+    window._cachedPacks = packs;
+    window._mainWh = mainWh;
+    window._systemSoc = computeSystemSoc(mainPct, packs, mainWh);
+    window._mainSoc = mainPct;
+    applySystemSocOverlay();
 
     const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
     const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
@@ -2341,27 +2377,63 @@ async function fetchBatteryPacks() {
       summary.textContent = `${packs.length} packs · avg ${Math.round(avgPack)}%${sysTxt} · ${totalIn}W in`;
     }
 
-    list.innerHTML = packs.map(p => {
+    const rows = [];
+    if (mainPct != null) {
+      rows.push(packRow({
+        idx: '★',
+        soc: mainPct,
+        flow: '',
+        flowClass: 'flow-idle',
+        temp: '',
+        label: 'Main',
+        snTitle: 'Host unit (cloud-reported SOC)',
+        isMain: true,
+      }));
+    }
+    for (const p of packs) {
       const sn = String(p.deviceSn || '');
       const ip = p.ip != null ? Math.round(p.ip) : 0;
       const op = p.op != null ? Math.round(p.op) : 0;
-      const flow = ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle');
-      const flowClass = ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle');
-      const temp = (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '';
-      const soc = p.rb != null ? Math.round(p.rb) : '—';
-      return `
-        <div class="pack-row">
-          <span class="pack-idx">${(p.deviceOrder ?? 0) + 1}</span>
-          <span class="pack-bar"><span class="pack-bar-fill" style="width:${Math.max(0, Math.min(100, p.rb || 0))}%"></span></span>
-          <span class="pack-soc">${soc}<small>%</small></span>
-          <span class="pack-flow ${flowClass}">${flow}</span>
-          <span class="pack-temp">${temp}</span>
-          <span class="pack-sn" title="${sn}">…${sn.slice(-6)}</span>
-        </div>`;
-    }).join('');
+      rows.push(packRow({
+        idx: (p.deviceOrder ?? 0) + 1,
+        soc: p.rb,
+        flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
+        flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
+        temp: (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '',
+        label: `…${sn.slice(-6)}`,
+        snTitle: sn,
+        isMain: false,
+      }));
+    }
+    list.innerHTML = rows.join('');
     card.hidden = false;
   } catch (e) {
     console.warn('battery packs fetch failed:', e);
+  }
+}
+
+// Apply the cached system SOC to the SOC card's big number + bar.
+// applyStatus() runs on every WS tick and writes the main-only SOC; we
+// re-write here so the system value wins whenever packs are present.
+// Idempotent — safe to call repeatedly.
+function applySystemSocOverlay() {
+  const sys = window._systemSoc;
+  const main = window._mainSoc;
+  const pctEl = $('battery-pct');
+  const barEl = $('battery-bar-fill');
+  const mainEl = $('battery-main-pct');
+  const mainSep = $('battery-main-pct-sep');
+  if (sys == null) {
+    if (mainEl) mainEl.hidden = true;
+    if (mainSep) mainSep.hidden = true;
+    return;
+  }
+  if (pctEl) pctEl.textContent = Math.round(sys);
+  if (barEl) barEl.style.width = `${sys}%`;
+  if (mainEl && main != null) {
+    mainEl.textContent = `main ${Math.round(main)}%`;
+    mainEl.hidden = false;
+    if (mainSep) mainSep.hidden = false;
   }
 }
 

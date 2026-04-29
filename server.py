@@ -336,6 +336,33 @@ async def broadcast(message: dict[str, Any]) -> None:
         state.ws_clients.discard(ws)
 
 
+def _system_soc_pct(main_pct: float, model_code: int | None = None) -> float:
+    """Combined SOC across the main unit + every cached expansion pack,
+    weighted by capacity. The cloud's main `battery_percent` describes
+    the host unit only — using it as `starting_soc` in the forecaster
+    while pairing it with the FULL system capacity (main + N packs)
+    silently over-counts energy. This helper keeps the two numbers
+    consistent.
+
+    Returns main_pct unchanged if no packs are cached, so single-unit
+    setups keep behaving exactly as before.
+    """
+    packs = state.battery_packs or []
+    if not packs:
+        return main_pct
+    main_wh = forecaster.battery_capacity_wh(model_code)
+    pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
+    total_wh = main_wh + len(packs) * pack_wh
+    if total_wh <= 0:
+        return main_pct
+    stored = main_pct * main_wh / 100.0
+    for p in packs:
+        rb = p.get("rb")
+        if rb is not None:
+            stored += float(rb) * pack_wh / 100.0
+    return max(0.0, min(100.0, stored / total_wh * 100.0))
+
+
 def _total_capacity_wh(device_sn: str | None,
                        model_code: int | None = None) -> int:
     """Total system capacity for a device, including expansion packs.
@@ -540,10 +567,13 @@ async def _smart_charge_evaluate(record: bool = True):
     weather = await weather_client.fetch_irradiance(lat, lon)
     if weather.get("error"):
         return None
-    starting_soc = float((state.last_status or {}).get("battery_percent") or 50)
+    main_soc = float((state.last_status or {}).get("battery_percent") or 50)
+    model_code = getattr(state.device, "model_code", None)
+    # If packs are attached, the forecaster needs the system-wide SOC to
+    # match the system-wide capacity it'll be paired with.
+    starting_soc = _system_soc_pct(main_soc, model_code)
     energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
-    capacity = _total_capacity_wh(
-        device_sn, getattr(state.device, "model_code", None))
+    capacity = _total_capacity_wh(device_sn, model_code)
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
@@ -854,15 +884,18 @@ async def api_forecast(device_sn: str | None = None):
     # Starting SOC: the latest battery reading we have. Falls back to 50% if
     # the bridge hasn't returned a fresh poll yet (the simulation still works,
     # the curve will just be offset by the SOC error).
-    starting_soc = 50.0
+    main_soc = 50.0
     if state.last_status and state.last_status.get("battery_percent") is not None:
-        starting_soc = float(state.last_status["battery_percent"])
+        main_soc = float(state.last_status["battery_percent"])
 
     model_code = getattr(state.device, "model_code", None) if state.device else None
     # _total_capacity_wh() auto-derives total capacity from the live
     # battery_packs cache (main + N x pack), with the manual override
     # winning if set and the spec capacity as the fallback.
     capacity = _total_capacity_wh(device_sn, model_code)
+    # Pair the system-wide capacity with the system-wide SOC so the
+    # simulation starts from the right energy level.
+    starting_soc = _system_soc_pct(main_soc, model_code)
 
     # 14 days of hourly-bucketed history is plenty for both the regression and
     # the load profile.
@@ -884,6 +917,9 @@ async def api_forecast(device_sn: str | None = None):
     return {
         "device_sn": device_sn,
         "low_battery_threshold": user_settings.get("low_battery_threshold"),
+        "main_soc_pct": main_soc,
+        "system_soc_pct": starting_soc,
+        "pack_count": len(state.battery_packs or []),
         **result,
         "configured": True,
     }
