@@ -116,23 +116,27 @@
           </div>
         </section>
 
-        <section class="card kpi-card output has-accent">
-          <div class="card-eyebrow"><span>Output now</span></div>
-          <div class="kpi-value"><span id="output-w">—</span><small>W</small></div>
-          <div class="kpi-sub">
-            <span id="ac-out-v">—</span><small>V</small>
-            <span class="dot-sep">·</span>
-            <span id="ac-out-hz">—</span><small>Hz</small>
-          </div>
-        </section>
-
-        <section class="card kpi-card input has-accent">
-          <div class="card-eyebrow"><span>Input now</span></div>
-          <div class="kpi-value"><span id="input-w">—</span><small>W</small></div>
-          <div class="kpi-sub" id="input-source-line">
-            <span class="lbl">Grid</span> <span id="input-grid-w">—</span><small>W</small>
-            <span class="dot-sep">·</span>
-            <span class="lbl">Solar</span> <span id="input-solar-w">—</span><small>W</small>
+        <section class="card kpi-card power-flow has-accent">
+          <div class="card-eyebrow"><span>Power flow</span></div>
+          <div class="power-flow-grid">
+            <div class="pf-side pf-out">
+              <div class="pf-label">Output</div>
+              <div class="kpi-value"><span id="output-w">—</span><small>W</small></div>
+              <div class="kpi-sub">
+                <span id="ac-out-v">—</span><small>V</small>
+                <span class="dot-sep">·</span>
+                <span id="ac-out-hz">—</span><small>Hz</small>
+              </div>
+            </div>
+            <div class="pf-side pf-in">
+              <div class="pf-label">Input</div>
+              <div class="kpi-value"><span id="input-w">—</span><small>W</small></div>
+              <div class="kpi-sub" id="input-source-line">
+                <span class="lbl">Grid</span> <span id="input-grid-w">—</span><small>W</small>
+                <span class="dot-sep">·</span>
+                <span class="lbl">Solar</span> <span id="input-solar-w">—</span><small>W</small>
+              </div>
+            </div>
           </div>
         </section>
 

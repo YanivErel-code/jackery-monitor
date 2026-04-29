@@ -224,7 +224,8 @@ main {
 /* ============== Cards / grid ============== */
 .grid { display: grid; gap: 16px; }
 .hero-grid {
-  grid-template-columns: 1.4fr 1fr 1fr 1fr;
+  /* 3 cards: battery | power-flow | today */
+  grid-template-columns: 1.2fr 1.6fr 1.2fr;
 }
 .energy-grid {
   grid-template-columns: 1fr 1fr;
@@ -267,6 +268,42 @@ main {
 .kpi-card.output  { --card-accent: var(--accent);   }
 .kpi-card.input   { --card-accent: var(--accent-2); }
 .kpi-card.today   { --card-accent: var(--accent-3); }
+/* Power-flow card combines output + input, picking up the cooler input
+   accent on the eyebrow stripe. The two halves carry their own colored
+   labels (green=output, sky=input) so the metric origin still reads at
+   a glance. */
+.kpi-card.power-flow { --card-accent: var(--accent-2); }
+/* Slightly smaller value font inside the combined card so two side-by-
+   side numbers ("438 W" + "1766 W") don't crowd. */
+.kpi-card.power-flow .kpi-value { font-size: 28px; }
+.power-flow-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+.pf-side { display: flex; flex-direction: column; gap: 6px; }
+.pf-side + .pf-side {
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+.pf-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-mute);
+}
+.pf-out .pf-label { color: var(--accent); }
+.pf-in  .pf-label { color: var(--accent-2); }
+@media (max-width: 600px) {
+  .power-flow-grid { grid-template-columns: 1fr; }
+  .pf-side + .pf-side {
+    padding-left: 0;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+}
 .card-eyebrow {
   display: flex; justify-content: space-between; align-items: center;
   font-size: 11px;
