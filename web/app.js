@@ -1451,6 +1451,17 @@ function applyStatus(s) {
       fetchForecast();
     }
     fetchEodForecast();
+    // Pack list is per-device — drop the previous device's cache so we
+    // don't briefly show the old packs while the new fetch is in flight.
+    window._cachedPacks = [];
+    window._cachedPackDeviceSn = null;
+    window._cachedPacksMainSoc = null;
+    window._cachedPacksError = null;
+    window._cachedNoPacks = false;
+    window._systemSoc = null;
+    window._mainSoc = null;
+    renderBatteryPacks();
+    fetchBatteryPacks();
   }
 
   // Connection pill
@@ -1481,17 +1492,11 @@ function applyStatus(s) {
     $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
     // EOD pill follows live SOC drift so it doesn't go stale between refreshes.
     maybeRefitEodOnDrift(t.battery_percent);
-    // If expansion packs are present, recompute system SOC from cached
-    // packs + the live main %. Pack values lag (server polls every 5 min)
-    // but the main % updates every tick — re-derivation keeps the
-    // headline number in sync without waiting for the next pack fetch.
-    if (window._cachedPacks?.length) {
-      window._mainSoc = t.battery_percent;
-      window._systemSoc = computeSystemSoc(
-        t.battery_percent, window._cachedPacks, window._mainWh,
-      );
-      applySystemSocOverlay();
-    }
+    // Re-render the pack card with the live main % — pack values lag
+    // (server polls every 5 min) but the main % updates every tick, so
+    // this keeps the Main row + system SOC overlay in sync without
+    // waiting for the next pack fetch.
+    renderBatteryPacks();
   }
   // Battery time label. The Jackery cloud sends two fields:
   //   time_to_full_h     -> ETA to 100% when the unit is charging
@@ -2358,89 +2363,106 @@ function packRow({ idx, soc, flow, flowClass, temp, label, snTitle, isMain }) {
 
 async function fetchBatteryPacks() {
   const card = $('battery-packs-card');
-  const list = $('battery-packs-list');
-  const summary = $('battery-packs-summary');
-  if (!card || !list) return;
+  if (!card) return;
   try {
     const r = await fetch('/api/devices/battery_packs');
     const j = r.ok ? await r.json() : { error: `HTTP ${r.status}` };
-    const packs = Array.isArray(j.packs) ? j.packs : [];
-    // Log every response for diagnosis. If the card stays empty, this
-    // shows up in the browser console with the full payload.
     console.debug('battery_packs response', j);
-    if (!packs.length) {
-      // Always reveal the card so silent failures aren't invisible.
-      // Single-unit setups (no packs ever recorded) are the only case
-      // where it's safe to hide — the server signals this by returning
-      // packs: [] with no error AND no recorded snapshot ever.
-      const hasEverHadPacks = j.cached === true || j.fetched_at;
-      if (j.error || hasEverHadPacks) {
-        const reason = j.error
-          ? `error: ${j.error}`
-          : 'awaiting first cloud fetch…';
-        if (summary) summary.textContent = reason;
-        list.innerHTML = '';
-        card.hidden = false;
-      } else {
-        card.hidden = true;
-      }
-      return;
-    }
-
-    const mainPct = window._lastStatus?.battery_percent ?? null;
-    const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH;
-
-    // Cache for on-tick re-derivation in applyStatus(). The packs only
-    // refresh every 5 min server-side, but the main % updates every
-    // poll — recomputing system SOC from cached packs + live main keeps
-    // the headline number fluid.
-    const systemSoc = computeSystemSoc(mainPct, packs, mainWh);
-    window._cachedPacks = packs;
-    window._mainWh = mainWh;
-    window._systemSoc = systemSoc;
-    window._mainSoc = mainPct;
-    applySystemSocOverlay();
-
-    const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
-    const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
-    if (summary) {
-      const sysTxt = systemSoc != null ? ` · system ${Math.round(systemSoc)}%` : '';
-      summary.textContent = `${packs.length} packs · avg ${Math.round(avgPack)}%${sysTxt} · ${totalIn}W in`;
-    }
-
-    const rows = [];
-    if (mainPct != null) {
-      rows.push(packRow({
-        idx: '★',
-        soc: mainPct,
-        flow: '',
-        flowClass: 'flow-idle',
-        temp: '',
-        label: 'Main',
-        snTitle: 'Host unit (cloud-reported SOC)',
-        isMain: true,
-      }));
-    }
-    for (const p of packs) {
-      const sn = String(p.deviceSn || '');
-      const ip = p.ip != null ? Math.round(p.ip) : 0;
-      const op = p.op != null ? Math.round(p.op) : 0;
-      rows.push(packRow({
-        idx: (p.deviceOrder ?? 0) + 1,
-        soc: p.rb,
-        flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
-        flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
-        temp: (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '',
-        label: `…${sn.slice(-6)}`,
-        snTitle: sn,
-        isMain: false,
-      }));
-    }
-    list.innerHTML = rows.join('');
-    card.hidden = false;
+    window._cachedPacks = Array.isArray(j.packs) ? j.packs : [];
+    window._cachedPackDeviceSn = j.device_sn || null;
+    window._cachedPacksMainSoc = j.main_soc_pct ?? null;
+    window._cachedPacksError = j.error || null;
+    window._cachedNoPacks = j.no_packs === true;
+    renderBatteryPacks();
   } catch (e) {
     console.warn('battery packs fetch failed:', e);
+    window._cachedPacksError = String(e);
+    renderBatteryPacks();
   }
+}
+
+// Pure renderer for the Battery packs card. Uses whatever's in cache
+// plus the live WS SOC if available. Idempotent and re-runnable any
+// time inputs change — wire it from applyStatus() so the Main row
+// paints as soon as the first WS tick lands instead of waiting for
+// the next 30s pack-fetch interval.
+function renderBatteryPacks() {
+  const card = $('battery-packs-card');
+  const list = $('battery-packs-list');
+  const summary = $('battery-packs-summary');
+  if (!card || !list) return;
+
+  const packs = window._cachedPacks || [];
+  const err = window._cachedPacksError;
+  const isNoPackDevice = window._cachedNoPacks === true;
+
+  // Device with no expansion packs (e.g. HomePower 3000): hide the
+  // card cleanly and clear any system-SOC overlay so the SOC card
+  // shows the main reading directly.
+  if (isNoPackDevice && !packs.length && !err) {
+    window._systemSoc = null;
+    window._mainSoc = null;
+    card.hidden = true;
+    return;
+  }
+
+  if (!packs.length) {
+    if (err) {
+      summary.textContent = `error: ${err}`;
+      list.innerHTML = '';
+      card.hidden = false;
+    } else {
+      card.hidden = true;
+    }
+    return;
+  }
+
+  const mainPct =
+    window._lastStatus?.battery_percent ??
+    window._cachedPacksMainSoc ??
+    null;
+  const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH;
+  const systemSoc = computeSystemSoc(mainPct, packs, mainWh);
+  window._mainWh = mainWh;
+  window._systemSoc = systemSoc;
+  window._mainSoc = mainPct;
+  applySystemSocOverlay();
+
+  const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
+  const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
+  const sysTxt = systemSoc != null ? ` · system ${Math.round(systemSoc)}%` : '';
+  summary.textContent = `${packs.length} packs · avg ${Math.round(avgPack)}%${sysTxt} · ${totalIn}W in`;
+
+  const rows = [];
+  if (mainPct != null) {
+    rows.push(packRow({
+      idx: '★',
+      soc: mainPct,
+      flow: '',
+      flowClass: 'flow-idle',
+      temp: '',
+      label: 'Main',
+      snTitle: 'Host unit (cloud-reported SOC)',
+      isMain: true,
+    }));
+  }
+  for (const p of packs) {
+    const sn = String(p.deviceSn || '');
+    const ip = p.ip != null ? Math.round(p.ip) : 0;
+    const op = p.op != null ? Math.round(p.op) : 0;
+    rows.push(packRow({
+      idx: (p.deviceOrder ?? 0) + 1,
+      soc: p.rb,
+      flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
+      flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
+      temp: (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '',
+      label: `…${sn.slice(-6)}`,
+      snTitle: sn,
+      isMain: false,
+    }));
+  }
+  list.innerHTML = rows.join('');
+  card.hidden = false;
 }
 
 // Apply the cached system SOC to the SOC card's big number + bar.

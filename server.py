@@ -93,8 +93,12 @@ class AppState:
         # by the poll loop so the UI gets near-realtime per-pack SOC without
         # hammering the cloud. Populated only when the active device has
         # at least one expansion battery.
-        self.battery_packs: list[dict] = []
-        self.last_packs_ts: float = 0.0
+        # Per-device pack cache. Keys are device SNs; values are the cloud's
+        # raw pack-list shape. Devices without expansion packs (e.g. the
+        # HomePower 3000) just stay missing from the dict so the UI knows
+        # to hide the card for them.
+        self.battery_packs_by_sn: dict[str, list[dict]] = {}
+        self.last_packs_ts_by_sn: dict[str, float] = {}
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
@@ -239,12 +243,13 @@ async def poll_loop() -> None:
                             log.warning("history hydrate failed: %s", e)
                         state.history_hydrated = True
 
-                # Per-expansion-battery refresh. Throttled to BATTERY_PACK_REFRESH_S
-                # since pack state moves slowly. Cached on state for the API,
-                # persisted to energy_db for the daily-learning job. On failure
-                # we deliberately DO NOT advance last_packs_ts — that would
-                # delay the retry by a full refresh window.
-                if dev_sn and ts - state.last_packs_ts >= BATTERY_PACK_REFRESH_S:
+                # Per-expansion-battery refresh. Throttled per-device since
+                # pack state moves slowly. Cached on state for the API,
+                # persisted to energy_db for the daily-learning job. On
+                # failure we deliberately DO NOT advance the per-device
+                # timestamp — that would delay retry by a full refresh window.
+                last_ts = state.last_packs_ts_by_sn.get(dev_sn, 0.0) if dev_sn else 0.0
+                if dev_sn and ts - last_ts >= BATTERY_PACK_REFRESH_S:
                     rpc = getattr(state.client, "_rpc", None)
                     if rpc is not None:
                         try:
@@ -252,18 +257,22 @@ async def poll_loop() -> None:
                             err = (result or {}).get("error")
                             packs = (result or {}).get("packs") or []
                             if err:
-                                log.warning("battery_packs RPC returned error: %s", err)
+                                log.warning("battery_packs RPC error for %s: %s",
+                                            dev_sn, err)
                             elif packs:
-                                state.battery_packs = packs
-                                state.last_packs_ts = ts
+                                state.battery_packs_by_sn[dev_sn] = packs
+                                state.last_packs_ts_by_sn[dev_sn] = ts
                                 state.energy.record_battery_packs(dev_sn, packs, int(ts))
                             else:
-                                # Empty list with no error means the device has
-                                # no expansion packs — record that and back off.
-                                state.battery_packs = []
-                                state.last_packs_ts = ts
+                                # Empty list with no error means the device
+                                # has no expansion packs (e.g. HomePower 3000).
+                                # Record that explicitly so the UI hides the
+                                # pack card for this device.
+                                state.battery_packs_by_sn[dev_sn] = []
+                                state.last_packs_ts_by_sn[dev_sn] = ts
                         except Exception as e:
-                            log.warning("battery_packs refresh failed: %s", e)
+                            log.warning("battery_packs refresh failed for %s: %s",
+                                        dev_sn, e)
 
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
@@ -346,18 +355,14 @@ async def broadcast(message: dict[str, Any]) -> None:
         state.ws_clients.discard(ws)
 
 
-def _system_soc_pct(main_pct: float, model_code: int | None = None) -> float:
-    """Combined SOC across the main unit + every cached expansion pack,
-    weighted by capacity. The cloud's main `battery_percent` describes
-    the host unit only — using it as `starting_soc` in the forecaster
-    while pairing it with the FULL system capacity (main + N packs)
-    silently over-counts energy. This helper keeps the two numbers
-    consistent.
-
-    Returns main_pct unchanged if no packs are cached, so single-unit
-    setups keep behaving exactly as before.
+def _system_soc_pct(main_pct: float, device_sn: str | None,
+                    model_code: int | None = None) -> float:
+    """Combined SOC across the main unit + every cached expansion pack
+    *for the given device*, weighted by capacity. Devices without packs
+    return main_pct unchanged so single-unit setups (e.g. HomePower 3000)
+    behave exactly as before.
     """
-    packs = state.battery_packs or []
+    packs = state.battery_packs_by_sn.get(device_sn or "", []) if device_sn else []
     if not packs:
         return main_pct
     main_wh = forecaster.battery_capacity_wh(model_code)
@@ -390,10 +395,10 @@ def _total_capacity_wh(device_sn: str | None,
         if override:
             return int(override)
     main_wh = forecaster.battery_capacity_wh(model_code)
-    active_sn = state.device.device_sn if state.device else None
-    if device_sn and device_sn == active_sn and state.battery_packs:
+    packs = state.battery_packs_by_sn.get(device_sn or "", []) if device_sn else []
+    if packs:
         pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
-        return main_wh + len(state.battery_packs) * pack_wh
+        return main_wh + len(packs) * pack_wh
     return main_wh
 
 
@@ -464,12 +469,27 @@ def serialize_status() -> dict[str, Any]:
             )
     except Exception as e:
         log.debug("energy totals lookup failed: %s", e)
+    # Augment telemetry with the precomputed system SOC so the SOC card
+    # renders the right number on the very first paint (no main→system
+    # flash). Falls back to the raw telemetry untouched when the active
+    # device has no expansion packs (e.g. HomePower 3000).
+    telemetry = state.last_status
+    active_sn = state.device.device_sn if state.device else None
+    active_packs = state.battery_packs_by_sn.get(active_sn or "", [])
+    if telemetry and active_packs:
+        main_pct = telemetry.get("battery_percent")
+        if main_pct is not None:
+            model_code = getattr(state.device, "model_code", None)
+            sys_pct = _system_soc_pct(float(main_pct), active_sn, model_code)
+            telemetry = {**telemetry,
+                         "main_soc_pct": main_pct,
+                         "system_soc_pct": sys_pct}
     return {
         "connection_status": state.connection_status,
         "connection_error": state.connection_error,
         "device": device_info,
         "last_update_ts": state.last_update_ts,
-        "telemetry": state.last_status,
+        "telemetry": telemetry,
         "history": list(state.history),
         "mock_mode": state.backend == "mock",
         "backend": state.backend,
@@ -581,7 +601,7 @@ async def _smart_charge_evaluate(record: bool = True):
     model_code = getattr(state.device, "model_code", None)
     # If packs are attached, the forecaster needs the system-wide SOC to
     # match the system-wide capacity it'll be paired with.
-    starting_soc = _system_soc_pct(main_soc, model_code)
+    starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
     energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
     capacity = _total_capacity_wh(device_sn, model_code)
     fcast = forecaster.build_forecast(
@@ -662,12 +682,11 @@ def _db_pack_to_cloud_shape(row: dict) -> dict:
 
 
 def _hydrate_battery_packs_from_db() -> None:
-    """Seed state.battery_packs from the latest energy_db snapshot so a
-    fresh server boot doesn't show an empty packs card while waiting for
-    the first cloud fetch (~5-15s on the first poll-loop iteration; longer
-    if the cloud is slow / contested). The hydrated data may be up to
-    BATTERY_PACK_REFRESH_S stale; the live refresh will overwrite it as
-    soon as it lands."""
+    """Seed state.battery_packs_by_sn from the latest energy_db snapshot
+    for every device so fresh boots paint the packs card immediately on
+    device switch, not just for the device that was active at startup.
+    Leaves last_packs_ts_by_sn at 0 so the poll loop refreshes on its
+    first iteration."""
     try:
         for d in state.energy.list_devices():
             sn = d.get("device_sn")
@@ -675,12 +694,11 @@ def _hydrate_battery_packs_from_db() -> None:
                 continue
             rows = state.energy.latest_battery_packs(sn)
             if rows:
-                state.battery_packs = [_db_pack_to_cloud_shape(r) for r in rows]
-                # Don't pretend this is a fresh fetch — leave last_packs_ts at
-                # 0 so the poll loop refreshes on its first iteration.
+                state.battery_packs_by_sn[sn] = [
+                    _db_pack_to_cloud_shape(r) for r in rows
+                ]
                 log.info("Hydrated %d battery packs for %s from DB",
                          len(rows), sn)
-                break
     except Exception as e:
         log.debug("battery pack hydration skipped: %s", e)
 
@@ -947,7 +965,7 @@ async def api_forecast(device_sn: str | None = None):
     capacity = _total_capacity_wh(device_sn, model_code)
     # Pair the system-wide capacity with the system-wide SOC so the
     # simulation starts from the right energy level.
-    starting_soc = _system_soc_pct(main_soc, model_code)
+    starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
 
     # 14 days of hourly-bucketed history is plenty for both the regression and
     # the load profile.
@@ -1069,25 +1087,25 @@ def api_devices_capacity():
     """List every recorded device with its current capacity (default vs
     user override). Used by the Device tab to render the capacity editor."""
     out = []
-    active_sn = state.device.device_sn if state.device else None
-    pack_count = len(state.battery_packs) if state.battery_packs else 0
     for d in state.energy.list_devices():
         default_wh = forecaster.battery_capacity_wh(d.get("model_code"))
         override = d.get("capacity_wh_override")
-        # Auto-derived from live battery_packs cache for the active device.
+        # Auto-derived from this device's own pack cache.
+        sn = d["device_sn"]
+        pack_count = len(state.battery_packs_by_sn.get(sn, []))
         auto_wh: int | None = None
-        if pack_count and d["device_sn"] == active_sn:
+        if pack_count:
             pack_wh = forecaster.expansion_pack_capacity_wh(d.get("model_code"))
             auto_wh = default_wh + pack_count * pack_wh
         effective = override or auto_wh or default_wh
         out.append({
-            "device_sn": d["device_sn"],
+            "device_sn": sn,
             "name": d.get("name"),
             "model_code": d.get("model_code"),
             "default_capacity_wh": default_wh,
             "capacity_wh_override": override,
             "auto_capacity_wh": auto_wh,
-            "pack_count": pack_count if d["device_sn"] == active_sn else 0,
+            "pack_count": pack_count,
             "effective_capacity_wh": effective,
         })
     return {"devices": out}
@@ -1155,20 +1173,38 @@ async def api_devices_battery_packs(device_sn: str | None = None,
     — useful for a manual refresh button in the UI."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
+    active_sn = state.device.device_sn if state.device else None
+    cached_packs = state.battery_packs_by_sn.get(device_sn or "", [])
+    last_ts = state.last_packs_ts_by_sn.get(device_sn or "", 0.0)
     diag = {
-        "active_sn": state.device.device_sn if state.device else None,
-        "cached_count": len(state.battery_packs or []),
-        "last_packs_ts": state.last_packs_ts,
+        "active_sn": active_sn,
+        "device_sn": device_sn,
+        "cached_count": len(cached_packs),
+        "last_packs_ts": last_ts,
         "backend": state.backend,
     }
     if not device_sn:
         return {"error": "no device", "packs": [], "_diag": diag}
-    active_sn = diag["active_sn"]
-    if not fresh and device_sn == active_sn and state.battery_packs:
+    # Only return live main_soc_pct for the *active* device — that's the
+    # one whose battery_percent is in state.last_status.
+    main_pct = (state.last_status or {}).get("battery_percent") if device_sn == active_sn else None
+    if not fresh and cached_packs:
         return {"device_sn": device_sn,
-                "packs": state.battery_packs,
-                "fetched_at": state.last_packs_ts,
+                "packs": cached_packs,
+                "main_soc_pct": main_pct,
+                "fetched_at": last_ts,
                 "cached": True,
+                "_diag": diag}
+    # No cache for this device. If we've already learned (via a prior
+    # successful fetch with empty packs) that this device has no packs,
+    # short-circuit so the UI hides the card without another RPC.
+    if not fresh and device_sn in state.battery_packs_by_sn and not cached_packs:
+        return {"device_sn": device_sn,
+                "packs": [],
+                "main_soc_pct": main_pct,
+                "fetched_at": last_ts,
+                "cached": True,
+                "no_packs": True,
                 "_diag": diag}
     rpc = getattr(state.client, "_rpc", None)
     if rpc is None:
@@ -1192,6 +1228,7 @@ async def api_devices_battery_packs(device_sn: str | None = None,
             log.debug("record_battery_packs failed: %s", e)
     return {"device_sn": device_sn,
             "packs": packs,
+            "main_soc_pct": main_pct,
             "fetched_at": time.time(),
             "cached": False,
             "error": rpc_err,
