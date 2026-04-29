@@ -2297,39 +2297,25 @@ async function fetchEodForecast() {
 
 // ---- Per-expansion-battery list ----
 // Fetches /api/devices/battery_packs and renders one row per attached
-// pack plus a derived "main unit" row. The displayed SOC on the main
-// dashboard is the combined SOC across main + packs; we back out the
-// main's standalone SOC by:
-//   main_pct = (combined_pct × total_wh − Σ pack_pct × pack_wh) / main_wh
+// pack. The dashboard's main SOC (`battery_percent` from /v1/device/property)
+// is the main unit's standalone value — NOT a system-wide aggregate. So
+// the useful derived number here is the *combined system SOC*:
+//   system_pct = (main_pct × main_wh + Σ pack_pct × pack_wh) / total_wh
 // 5000 Plus expansion packs are 5040 Wh — same as the main unit.
 // (The smaller 2042 Wh packs are for the older 1500/2000 series.)
 const PACK_NOMINAL_WH = 5040;       // 5000 Plus Battery Pack 5040
-const MAIN_DEFAULT_WH_5000 = 5040;  // 5000 Plus internal
+const MAIN_DEFAULT_WH = 5040;       // 5000 Plus internal
 
-function deriveMainSoc(combinedPct, packs, mainWh) {
-  if (combinedPct == null || !packs.length || !mainWh) return null;
+function computeSystemSoc(mainPct, packs, mainWh) {
+  if (mainPct == null || !packs.length || !mainWh) return null;
   const totalWh = mainWh + packs.length * PACK_NOMINAL_WH;
-  const packStored = packs.reduce(
-    (s, p) => s + (p.rb != null ? p.rb * PACK_NOMINAL_WH : 0), 0,
-  );
-  const mainStored = combinedPct * totalWh / 100 - packStored / 100;
-  const mainPct = (mainStored / mainWh) * 100;
-  if (!Number.isFinite(mainPct)) return null;
-  // Clamp to [0,100] — rounding noise can push it slightly outside.
-  return Math.max(0, Math.min(100, mainPct));
-}
-
-function packRow({ idx, label, soc, flow, flowClass, temp, sn, isMain }) {
-  const cls = isMain ? 'pack-row pack-row-main' : 'pack-row';
-  return `
-    <div class="${cls}">
-      <span class="pack-idx">${idx}</span>
-      <span class="pack-bar"><span class="pack-bar-fill" style="width:${Math.max(0, Math.min(100, soc || 0))}%"></span></span>
-      <span class="pack-soc">${soc != null ? Math.round(soc) : '—'}<small>%</small></span>
-      <span class="pack-flow ${flowClass}">${flow}</span>
-      <span class="pack-temp">${temp}</span>
-      <span class="pack-sn" title="${sn}">${label}</span>
-    </div>`;
+  let stored = mainPct * mainWh / 100;
+  for (const p of packs) {
+    if (p.rb != null) stored += p.rb * PACK_NOMINAL_WH / 100;
+  }
+  const pct = (stored / totalWh) * 100;
+  if (!Number.isFinite(pct)) return null;
+  return Math.max(0, Math.min(100, pct));
 }
 
 async function fetchBatteryPacks() {
@@ -2344,45 +2330,35 @@ async function fetchBatteryPacks() {
     const packs = Array.isArray(j.packs) ? j.packs : [];
     if (!packs.length) { card.hidden = true; return; }
 
-    // Derive the main unit's standalone SOC from the combined SOC on
-    // the dashboard. capacity_wh_override (if set on the device) wins
-    // over the spec default.
-    const combinedPct = window._lastStatus?.battery_percent ?? null;
-    const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH_5000;
-    const mainSoc = deriveMainSoc(combinedPct, packs, mainWh);
+    const mainPct = window._lastStatus?.battery_percent ?? null;
+    const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH;
+    const systemSoc = computeSystemSoc(mainPct, packs, mainWh);
 
     const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
-    const avgSoc = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
+    const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
     if (summary) {
-      const mainTxt = mainSoc != null ? ` · main ${Math.round(mainSoc)}%` : '';
-      summary.textContent = `${packs.length} packs · avg ${Math.round(avgSoc)}%${mainTxt} · ${totalIn}W in`;
+      const sysTxt = systemSoc != null ? ` · system ${Math.round(systemSoc)}%` : '';
+      summary.textContent = `${packs.length} packs · avg ${Math.round(avgPack)}%${sysTxt} · ${totalIn}W in`;
     }
 
-    const rows = [];
-    if (mainSoc != null) {
-      rows.push(packRow({
-        idx: '★', label: 'Main', soc: mainSoc,
-        flow: '', flowClass: 'flow-idle', temp: '',
-        sn: 'derived from combined SOC',
-        isMain: true,
-      }));
-    }
-    for (const p of packs) {
+    list.innerHTML = packs.map(p => {
       const sn = String(p.deviceSn || '');
       const ip = p.ip != null ? Math.round(p.ip) : 0;
       const op = p.op != null ? Math.round(p.op) : 0;
-      rows.push(packRow({
-        idx: (p.deviceOrder ?? 0) + 1,
-        label: `…${sn.slice(-6)}`,
-        soc: p.rb,
-        flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
-        flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
-        temp: (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '',
-        sn,
-        isMain: false,
-      }));
-    }
-    list.innerHTML = rows.join('');
+      const flow = ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle');
+      const flowClass = ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle');
+      const temp = (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '';
+      const soc = p.rb != null ? Math.round(p.rb) : '—';
+      return `
+        <div class="pack-row">
+          <span class="pack-idx">${(p.deviceOrder ?? 0) + 1}</span>
+          <span class="pack-bar"><span class="pack-bar-fill" style="width:${Math.max(0, Math.min(100, p.rb || 0))}%"></span></span>
+          <span class="pack-soc">${soc}<small>%</small></span>
+          <span class="pack-flow ${flowClass}">${flow}</span>
+          <span class="pack-temp">${temp}</span>
+          <span class="pack-sn" title="${sn}">…${sn.slice(-6)}</span>
+        </div>`;
+    }).join('');
     card.hidden = false;
   } catch (e) {
     console.warn('battery packs fetch failed:', e);
