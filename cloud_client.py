@@ -301,16 +301,58 @@ class JackeryCloudClient:
         d = data.get("data") or {}
         props = d.get("properties") if isinstance(d, dict) else None
         props = props or {}
+        # The `device` sibling sometimes contains expansion-pack metadata
+        # (per-battery SOC/SN/model) that the iOS app uses to render the
+        # per-battery list. Mirror anything that looks like extension data
+        # under reserved property keys so it flows through to the dashboard
+        # without breaking the existing telemetry shape.
+        device_blob = d.get("device") if isinstance(d, dict) else None
+        if isinstance(device_blob, dict):
+            for key in ("packs", "subDevices", "expansionPacks", "extPacks",
+                        "battery_packs", "modules", "subBatteries",
+                        "batteryList", "battList"):
+                if device_blob.get(key):
+                    props[f"_dev_{key}"] = device_blob[key]
         # One-time log of the full property key set so we can see whether the
-        # cloud is exposing per-input solar fields (HPV/LPV) that aren't in
-        # the reverse-engineered protocol doc. Logged once per process start
-        # to avoid noise.
-        if not type(self)._logged_property_keys and props:
+        # cloud is exposing per-input solar / per-battery fields that
+        # aren't in the reverse-engineered protocol doc. Logged once per
+        # process start to avoid noise.
+        if not type(self)._logged_property_keys and (props or device_blob):
             type(self)._logged_property_keys = True
-            log.info("Cloud properties keys=%s | sample=%s",
+            log.info("Cloud /v1/device/property keys=%s | device=%s | sample=%s",
                      sorted(props.keys()),
-                     {k: props[k] for k in sorted(props.keys())})
+                     sorted(device_blob.keys()) if isinstance(device_blob, dict) else "(none)",
+                     {k: props[k] for k in sorted(props.keys()) if not k.startswith("_dev_")})
         return props
+
+    async def probe_endpoints(self, device_id: str) -> dict[str, Any]:
+        """Speculative diagnostic — try a small handful of endpoint shapes
+        the iOS app might use for per-battery / expansion data. Returns a
+        dict mapping each endpoint to its response (or error string). Used
+        from the Device tab "Cloud probe" button to find data we're not
+        currently exposing."""
+        attempts = [
+            ("/v1/device/property",      {"deviceId": device_id}),
+            ("/v1/device/info",          {"deviceId": device_id}),
+            ("/v1/device/detail",        {"deviceId": device_id}),
+            ("/v1/device/expansionPack", {"deviceId": device_id}),
+            ("/v1/device/expansionPacks", {"deviceId": device_id}),
+            ("/v1/device/batteryPacks",  {"deviceId": device_id}),
+            ("/v1/device/subDevices",    {"deviceId": device_id}),
+            ("/v1/device/modules",       {"deviceId": device_id}),
+            ("/v1/device/extension",     {"deviceId": device_id}),
+            ("/v1/device/packs",         {"deviceId": device_id}),
+        ]
+        results: dict[str, Any] = {}
+        for path, params in attempts:
+            try:
+                data = await self._authed_get(path, params)
+                results[path] = {"code": data.get("code"),
+                                 "msg": data.get("msg"),
+                                 "data": data.get("data")}
+            except Exception as e:
+                results[path] = {"error": str(e)[:200]}
+        return results
 
     # ---- MQTT control ----
     # Output toggles (AC/DC/USB/Car/etc.) go over MQTT, NOT the HTTP API.

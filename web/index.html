@@ -356,6 +356,17 @@
 
       <section class="card device-card">
         <div class="card-header">
+          <h2>Cloud endpoint probe (debug)</h2>
+          <button id="cloud-probe-btn" class="btn btn-ghost" type="button">Probe now</button>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Tries a handful of speculative cloud endpoints (<code>/v1/device/expansionPack</code>, <code>/v1/device/subDevices</code>, etc.) to find data the iOS app uses but we don't currently parse — per-battery state, attached pack count, etc. Most will return errors; one or two might hit. Paste anything interesting back to a maintainer.
+        </p>
+        <pre id="cloud-probe-dump" class="raw-props" hidden>—</pre>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
           <h2>Polling</h2>
         </div>
         <p class="hint" style="margin:6px 0 12px">

@@ -853,6 +853,22 @@ async def handle(method: str, params: dict) -> dict:
             limit, since = 100, 0.0
         return {"ok": True, "events": get_events(limit=limit, since=since)}
 
+    if method == "cloud_probe":
+        # Diagnostic — try a handful of speculative endpoints to find
+        # per-battery / expansion data the iOS app uses but we don't
+        # currently parse.
+        device_id = (params.get("device_id") or "").strip()
+        if not device_id:
+            device_id = state.cloud_device_id or ""
+        if not device_id or not state.cloud_client:
+            return {"ok": False, "error": "no device or cloud client",
+                    "results": {}}
+        try:
+            results = await state.cloud_client.probe_endpoints(device_id)
+            return {"ok": True, "device_id": device_id, "results": results}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "results": {}}
+
     if method == "get_raw_props":
         # Diagnostic dump of the raw cloud-property dict for a device.
         # Returns whatever keys the cloud has pushed/polled — useful for

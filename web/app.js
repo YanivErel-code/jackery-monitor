@@ -413,6 +413,38 @@ $('capacity-clear')?.addEventListener('click', async () => {
   $('capacity-form').dispatchEvent(new Event('submit', { cancelable: true }));
 });
 
+$('cloud-probe-btn')?.addEventListener('click', async () => {
+  const dump = $('cloud-probe-dump');
+  const btn  = $('cloud-probe-btn');
+  if (!dump) return;
+  dump.hidden = false;
+  btn.textContent = 'Probing…';
+  btn.disabled = true;
+  dump.textContent = 'Sending probe requests to the Jackery cloud (this may take 5-10 seconds)…';
+  try {
+    const r = await fetch('/api/debug/cloud_probe');
+    const j = await r.json();
+    btn.textContent = 'Probe again';
+    btn.disabled = false;
+    if (j.error) {
+      dump.textContent = `Error: ${j.error}`;
+      return;
+    }
+    const results = j.results || {};
+    const lines = [];
+    for (const [path, resp] of Object.entries(results)) {
+      lines.push(`=== ${path} ===`);
+      lines.push(JSON.stringify(resp, null, 2));
+      lines.push('');
+    }
+    dump.textContent = lines.join('\n');
+  } catch (e) {
+    btn.textContent = 'Probe again';
+    btn.disabled = false;
+    dump.textContent = `Failed: ${e.message || e}`;
+  }
+});
+
 $('raw-props-toggle')?.addEventListener('click', async () => {
   const dump = $('raw-props-dump');
   const btn  = $('raw-props-toggle');

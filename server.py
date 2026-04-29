@@ -966,6 +966,21 @@ async def api_devices_capacity_set(req: Request):
             "capacity_wh_override": state.energy.get_capacity_override(device_sn)}
 
 
+@app.get("/api/debug/cloud_probe")
+async def api_debug_cloud_probe():
+    """Speculative probe of multiple cloud API endpoints to find data we
+    don't currently parse — per-battery state, expansion-pack metadata,
+    etc. Returns raw responses; the user can scan for useful keys."""
+    rpc = getattr(state.client, "_rpc", None)
+    if rpc is None:
+        return {"error": "bridge not available", "results": {}}
+    try:
+        result = await rpc("cloud_probe")
+    except Exception as e:
+        return {"error": str(e), "results": {}}
+    return result
+
+
 @app.get("/api/debug/raw_props")
 async def api_debug_raw_props(device_sn: str | None = None):
     """Diagnostic dump of the raw cloud properties dict for a device.
