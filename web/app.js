@@ -1493,6 +1493,17 @@ function applyStatus(s) {
     batCard.classList.toggle('low',         (t.battery_percent ?? 100) <= 20);
   }
   if (t.ac_output_v != null) $('ac-out-v').textContent  = fmt(t.ac_output_v, 0);
+  // Split-phase L1 leg shown next to the combined 240V — Jackery's
+  // 5000 Plus reports both (acov = line-to-line, acov1 = leg-to-neutral).
+  // Hide if missing or zero.
+  const l1El = $('ac-out-v-l1');
+  if (l1El) {
+    if (t.ac_output_v_l1 && t.ac_output_v_l1 > 0) {
+      l1El.textContent = `(L1: ${fmt(t.ac_output_v_l1, 0)} V)`;
+    } else {
+      l1El.textContent = '';
+    }
+  }
   if (t.ac_output_hz != null)        $('ac-out-hz').textContent = fmt(t.ac_output_hz, 0);
 
   // Today KPIs from energy aggregator

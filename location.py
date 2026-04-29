@@ -96,22 +96,42 @@ def set(lat: Any, lon: Any) -> dict[str, float] | None:
 
 def update_timezone(utc_offset_seconds: int,
                     timezone: str | None = None) -> bool:
-    """Merge a UTC-offset (and optional IANA timezone name) into the existing
-    location record without disturbing lat/lon/updated_at. Used by the
-    weather client after Open-Meteo returns the offset for the lat/lon."""
+    """Merge a UTC-offset (and optional IANA timezone name) into the
+    location record. Works whether or not lat/lon are set — the offset
+    can come from Open-Meteo (with lat/lon) or the device's own `uo`
+    field (without lat/lon). Either way the resulting file lets
+    energy_db._start_of_day bucket "today" at the user's local midnight."""
     with _lock:
-        data = _read_raw()
-        if not data:
-            return False  # no lat/lon yet; nothing to merge into
-        data["utc_offset_seconds"] = int(utc_offset_seconds)
+        data = _read_raw() or {}
+        try:
+            data["utc_offset_seconds"] = int(utc_offset_seconds)
+        except (TypeError, ValueError):
+            return False
         if timezone:
             data["timezone"] = str(timezone)
+        if "updated_at" not in data:
+            data["updated_at"] = time.time()
         os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
         tmp = LOCATION_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, LOCATION_PATH)
     return True
+
+
+def get_tz_offset() -> int | None:
+    """Return the stored UTC offset in seconds, or None. Independent of
+    lat/lon — works when only the device's `uo` field has populated the
+    record."""
+    with _lock:
+        data = _read_raw()
+    if not data:
+        return None
+    raw = data.get("utc_offset_seconds")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def clear() -> bool:

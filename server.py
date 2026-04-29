@@ -175,6 +175,17 @@ async def poll_loop() -> None:
                 state.last_status = status_dict
                 state.last_update_ts = ts
 
+                # Persist the device-reported UTC offset (`uo` field) so
+                # _start_of_day buckets "today" at the user's local
+                # midnight even when no location/Open-Meteo is configured.
+                # No-op if location already has the same offset.
+                tz_off = status_dict.get("utc_offset_seconds")
+                if tz_off is not None and tz_off != device_location.get_tz_offset():
+                    try:
+                        device_location.update_timezone(int(tz_off))
+                    except Exception as e:
+                        log.debug("uo persist failed: %s", e)
+
                 # Energy aggregation: integrate W over time per device
                 dev = state.device
                 dev_sn = dev.device_sn if dev and dev.device_sn else None

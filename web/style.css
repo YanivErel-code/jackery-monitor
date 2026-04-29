@@ -295,6 +295,13 @@ main {
 }
 .pf-out .pf-label { color: var(--accent); }
 .pf-in  .pf-label { color: var(--accent-2); }
+/* Subtle parenthetical for the split-phase L1 voltage on the Output
+   side. Only rendered when the device reports a non-zero acov1. */
+.leg-volt {
+  color: var(--text-mute);
+  font-size: 11px;
+  margin-left: 6px;
+}
 @media (max-width: 600px) {
   .power-flow-grid { grid-template-columns: 1fr; }
   .pf-side + .pf-side {

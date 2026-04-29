@@ -507,6 +507,7 @@ def cloud_props_to_telemetry(p: dict[str, Any]) -> dict[str, Any]:
             return default
 
     acov = f("acov")
+    acov1 = f("acov1")  # split-phase L1 leg (120V when acov is 240V split-phase)
     acohz = f("acohz")
     # Cloud sends acov in deci-volts (e.g. 2401 -> 240.1V) but acohz already
     # in whole Hz (e.g. 60 -> 60Hz). BLE protocol uses deci-Hz; cloud differs.
@@ -531,6 +532,7 @@ def cloud_props_to_telemetry(p: dict[str, Any]) -> dict[str, Any]:
         "car_input_w": car_in_w,        # 12V cigarette
         "solar_input_w": solar_w,       # everything else on DC bus
         "ac_output_v": round(acov / 10.0, 1) if acov else 0.0,
+        "ac_output_v_l1": round(acov1 / 10.0, 1) if acov1 else 0.0,
         "ac_output_hz": round(acohz, 1) if acohz else 0.0,
         "ac_on": bool(i("oac")),
         "dc_on": bool(i("odc")),
@@ -541,4 +543,8 @@ def cloud_props_to_telemetry(p: dict[str, Any]) -> dict[str, Any]:
         "error_code": i("ec"),
         "time_to_full_h":   0.0 if raw_it in (0, 999) else round(raw_it / 10.0, 2),
         "time_remaining_h": 0.0 if raw_ot in (0, 999) else round(raw_ot / 10.0, 2),
+        # Device-reported UTC offset in seconds (e.g. -25200 for PDT). Used
+        # as a fallback by the server to bucket "today" totals at the user's
+        # local midnight when no Open-Meteo location is configured.
+        "utc_offset_seconds": i("uo") if "uo" in p else None,
     }

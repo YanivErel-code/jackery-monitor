@@ -386,15 +386,14 @@ class EnergyDB:
 def _start_of_day(now_ts: int) -> int:
     """User-local midnight as unix seconds.
 
-    Reads the UTC offset from /data/location.json (populated by the weather
-    client from Open-Meteo). Falls back to the container's TZ env var (which
-    is normally UTC in slim images, so the "today" boundary would land at the
-    wrong time without the offset)."""
+    Reads the UTC offset from /data/location.json — set by the weather
+    client (Open-Meteo) when location is configured, or by the server
+    poll loop from the device's own `uo` telemetry field. Falls back to
+    the container's TZ env var (likely UTC on slim images)."""
     try:
         import location as device_location
-        loc = device_location.get()
-        if loc and "utc_offset_seconds" in loc:
-            offset = int(loc["utc_offset_seconds"])
+        offset = device_location.get_tz_offset()
+        if offset is not None:
             local_now = now_ts + offset
             local_midnight_local = (local_now // 86400) * 86400
             return int(local_midnight_local - offset)

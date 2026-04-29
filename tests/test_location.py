@@ -73,8 +73,27 @@ def test_update_timezone_merges_offset(tmp_path, monkeypatch):
     assert abs(got["latitude"] - 37.7749) < 1e-6
 
 
-def test_update_timezone_noop_when_no_location(tmp_path, monkeypatch):
+def test_update_timezone_creates_record_without_lat_lon(tmp_path, monkeypatch):
+    """The device's `uo` telemetry field can populate the offset even
+    when no geographic location is set. update_timezone must accept
+    standalone TZ writes."""
     loc = _fresh_location(monkeypatch, tmp_path)
-    # No prior set() — nothing to merge into.
-    assert loc.update_timezone(-25200, "America/Los_Angeles") is False
+    assert loc.update_timezone(-25200, "America/Los_Angeles") is True
+    # get() still returns None (no lat/lon to validate)
     assert loc.get() is None
+    # but get_tz_offset() returns the saved offset
+    assert loc.get_tz_offset() == -25200
+
+
+def test_get_tz_offset_works_with_full_record(tmp_path, monkeypatch):
+    loc = _fresh_location(monkeypatch, tmp_path)
+    loc.set(37.7749, -122.4194)
+    loc.update_timezone(-25200, "America/Los_Angeles")
+    assert loc.get_tz_offset() == -25200
+
+
+def test_get_tz_offset_none_when_unset(tmp_path, monkeypatch):
+    loc = _fresh_location(monkeypatch, tmp_path)
+    assert loc.get_tz_offset() is None
+    loc.set(37.7749, -122.4194)  # lat/lon only, no tz
+    assert loc.get_tz_offset() is None
