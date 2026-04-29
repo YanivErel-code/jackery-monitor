@@ -121,24 +121,30 @@ def test_compute_savings_flat(tmp_path, monkeypatch):
     cost = _fresh_cost(tmp_path, monkeypatch)
     plan = {"type": "flat", "rate_per_kwh": 0.30, "currency": "USD"}
     history = [
-        # Hour 1: solar 1000Wh, no grid
-        {"ts": 1_700_000_000, "solar_wh": 1000, "input_wh": 1000, "output_wh": 0},
-        # Hour 2: solar 500Wh, grid 500Wh
-        {"ts": 1_700_003_600, "solar_wh": 500, "input_wh": 1000, "output_wh": 0},
+        # Hour 1: 2 kWh out, 1 kWh in (all solar)
+        {"ts": 1_700_000_000, "solar_wh": 1000, "ac_input_wh": 0,
+         "input_wh": 1000, "output_wh": 2000},
+        # Hour 2: 1 kWh out, 0.5 solar + 0.5 from grid
+        {"ts": 1_700_003_600, "solar_wh": 500, "ac_input_wh": 500,
+         "input_wh": 1000, "output_wh": 1000},
     ]
     out = cost.compute_savings(history, plan)
-    # solar_savings: (1.0 + 0.5) kWh x $0.30 = $0.45
-    # grid_cost:    (0   + 0.5) kWh x $0.30 = $0.15
-    # net:          $0.30
-    assert out["solar_savings"] == 0.45
+    # saved (= output * rate):  3.0 kWh * $0.30 = $0.90
+    # grid_cost (= ac * rate):  0.5 kWh * $0.30 = $0.15
+    # net:                      $0.75
+    assert out["solar_savings"] == 0.90
     assert out["grid_cost"] == 0.15
-    assert out["net_savings"] == 0.30
+    assert out["net_savings"] == 0.75
+    assert out["output_kwh"] == 3.0
     assert out["solar_kwh"] == 1.5
     assert out["grid_kwh"] == 0.5
 
 
-def test_compute_savings_tou_credits_solar_at_active_rate(tmp_path, monkeypatch):
-    """1 kWh of solar at peak (4-9pm) is worth more than at off-peak."""
+def test_compute_savings_credits_battery_use_at_active_rate(tmp_path, monkeypatch):
+    """1 kWh out at peak (4-9pm) saves more than 1 kWh out at off-peak —
+    every Wh from the battery displaces a Wh you'd have bought at the
+    rate active when you use it. Storage decouples charging time from
+    consumption time, and the savings credit follows consumption."""
     cost = _fresh_cost(tmp_path, monkeypatch)
     plan = {
         "type": "tou", "currency": "USD",
@@ -150,13 +156,46 @@ def test_compute_savings_tou_credits_solar_at_active_rate(tmp_path, monkeypatch)
     }
     base = 1_700_000_000 - (1_700_000_000 % 86400)
     history = [
-        # 17:00 UTC, 1 kWh solar — peak rate ($0.60)
-        {"ts": base + 17 * 3600, "solar_wh": 1000, "input_wh": 1000, "output_wh": 0},
-        # 10:00 UTC, 1 kWh solar — off-peak rate ($0.30)
-        {"ts": base + 10 * 3600, "solar_wh": 1000, "input_wh": 1000, "output_wh": 0},
+        # 17:00 UTC, 1 kWh out — peak rate ($0.60)
+        {"ts": base + 17 * 3600, "solar_wh": 0, "ac_input_wh": 0,
+         "input_wh": 0, "output_wh": 1000},
+        # 10:00 UTC, 1 kWh out — off-peak rate ($0.30)
+        {"ts": base + 10 * 3600, "solar_wh": 0, "ac_input_wh": 0,
+         "input_wh": 0, "output_wh": 1000},
     ]
     out = cost.compute_savings(history, plan, tz_offset_seconds=0)
     assert out["solar_savings"] == 0.90  # 1 * 0.60 + 1 * 0.30
+
+
+def test_compute_savings_handles_storage_drain(tmp_path, monkeypatch):
+    """Drawing from previously-stored solar (no input today) still credits
+    savings — bug repro for "6 kWh out + 1.7 kWh in only saved $0.52"."""
+    cost = _fresh_cost(tmp_path, monkeypatch)
+    plan = {"type": "flat", "rate_per_kwh": 0.31, "currency": "USD"}
+    history = [
+        {"ts": 1_700_000_000, "output_wh": 6000, "input_wh": 1700,
+         "ac_input_wh": 0, "solar_wh": 1700},
+    ]
+    out = cost.compute_savings(history, plan)
+    # 6 kWh out * $0.31 = $1.86 saved, 0 grid, $1.86 net
+    assert out["solar_savings"] == 1.86
+    assert out["grid_cost"] == 0.0
+    assert out["net_savings"] == 1.86
+
+
+def test_compute_savings_falls_back_to_inferred_grid_for_old_rows(tmp_path, monkeypatch):
+    """Pre-migration samples won't have ac_input_wh. Fall back to the
+    inferred (input - solar) grid estimate so lifetime totals don't
+    silently drop pre-migration grid charging."""
+    cost = _fresh_cost(tmp_path, monkeypatch)
+    plan = {"type": "flat", "rate_per_kwh": 0.30, "currency": "USD"}
+    # Old-format row: ac_input_wh missing entirely.
+    history = [
+        {"ts": 1_700_000_000, "output_wh": 0, "input_wh": 1000, "solar_wh": 200},
+    ]
+    out = cost.compute_savings(history, plan)
+    # input 1.0 - solar 0.2 = 0.8 kWh inferred grid * $0.30 = $0.24
+    assert out["grid_cost"] == 0.24
 
 
 def test_list_presets_returns_id_and_label(tmp_path, monkeypatch):

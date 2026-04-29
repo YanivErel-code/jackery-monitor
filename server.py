@@ -191,6 +191,7 @@ async def poll_loop() -> None:
                         float(status_dict.get("output_power_w") or 0),
                         int(status_dict.get("battery_percent") or 0),
                         solar_w=float(status_dict.get("solar_input_w") or 0),
+                        ac_input_w=float(status_dict.get("ac_input_w") or 0),
                     )
 
                     # Hydrate the live chart from the energy DB on the first

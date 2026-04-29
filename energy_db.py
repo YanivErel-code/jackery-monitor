@@ -59,9 +59,11 @@ CREATE TABLE IF NOT EXISTS samples (
     input_wh    REAL NOT NULL DEFAULT 0,
     output_wh   REAL NOT NULL DEFAULT 0,
     solar_wh    REAL NOT NULL DEFAULT 0,
+    ac_input_wh REAL NOT NULL DEFAULT 0,
     last_input_w   INTEGER,
     last_output_w  INTEGER,
     last_solar_w   INTEGER,
+    last_ac_input_w INTEGER,
     last_battery_pct INTEGER,
     sample_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_sn, bucket)
@@ -87,8 +89,8 @@ class EnergyDB:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         # per-device last-reading state for trapezoidal integration
-        self._last: dict[str, tuple[float, float, float, float]] = {}
-        # ^ device_sn -> (ts, input_w, output_w, solar_w)
+        self._last: dict[str, tuple[float, float, float, float, float]] = {}
+        # ^ device_sn -> (ts, input_w, output_w, solar_w, ac_input_w)
         self._init()
         log.info("Energy DB at %s", path)
 
@@ -116,6 +118,10 @@ class EnergyDB:
                 c.execute("ALTER TABLE samples ADD COLUMN solar_wh REAL NOT NULL DEFAULT 0")
             if "last_solar_w" not in existing:
                 c.execute("ALTER TABLE samples ADD COLUMN last_solar_w INTEGER")
+            if "ac_input_wh" not in existing:
+                c.execute("ALTER TABLE samples ADD COLUMN ac_input_wh REAL NOT NULL DEFAULT 0")
+            if "last_ac_input_w" not in existing:
+                c.execute("ALTER TABLE samples ADD COLUMN last_ac_input_w INTEGER")
 
     # ---------- ingestion ----------
     def upsert_device(self, device_sn: str, name: str | None,
@@ -141,15 +147,20 @@ class EnergyDB:
     def record(self, device_sn: str, ts: float,
                input_w: float, output_w: float,
                battery_pct: int | None = None,
-               solar_w: float = 0.0) -> None:
-        """Integrate (input_w, output_w, solar_w) since last reading for this device."""
+               solar_w: float = 0.0,
+               ac_input_w: float = 0.0) -> None:
+        """Integrate (input_w, output_w, solar_w, ac_input_w) since last
+        reading for this device. ac_input_w is the AC/grid charging power
+        (the device's `acip` field), tracked separately so cost accounting
+        knows what was paid-for vs free."""
         if not device_sn:
             return
         prev = self._last.get(device_sn)
-        self._last[device_sn] = (ts, float(input_w), float(output_w), float(solar_w))
+        self._last[device_sn] = (ts, float(input_w), float(output_w),
+                                  float(solar_w), float(ac_input_w))
         if prev is None:
             return  # need two samples to integrate
-        prev_ts, prev_in, prev_out, prev_solar = prev
+        prev_ts, prev_in, prev_out, prev_solar, prev_ac = prev
         dt = ts - prev_ts
         if dt <= 0 or dt > MAX_GAP_S:
             return
@@ -157,28 +168,32 @@ class EnergyDB:
         in_wh = ((prev_in + input_w) / 2.0) * (dt / 3600.0)
         out_wh = ((prev_out + output_w) / 2.0) * (dt / 3600.0)
         solar_wh = ((prev_solar + solar_w) / 2.0) * (dt / 3600.0)
+        ac_wh = ((prev_ac + ac_input_w) / 2.0) * (dt / 3600.0)
         bucket = int(ts // BUCKET_S) * BUCKET_S
 
         with self._conn() as c:
             c.execute(
                 """INSERT INTO samples
-                       (device_sn, bucket, input_wh, output_wh, solar_wh,
-                        last_input_w, last_output_w, last_solar_w,
+                       (device_sn, bucket, input_wh, output_wh, solar_wh, ac_input_wh,
+                        last_input_w, last_output_w, last_solar_w, last_ac_input_w,
                         last_battery_pct, sample_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                    ON CONFLICT(device_sn, bucket) DO UPDATE SET
                      input_wh = input_wh + excluded.input_wh,
                      output_wh = output_wh + excluded.output_wh,
                      solar_wh = solar_wh + excluded.solar_wh,
+                     ac_input_wh = ac_input_wh + excluded.ac_input_wh,
                      last_input_w = excluded.last_input_w,
                      last_output_w = excluded.last_output_w,
                      last_solar_w = excluded.last_solar_w,
+                     last_ac_input_w = excluded.last_ac_input_w,
                      last_battery_pct = COALESCE(excluded.last_battery_pct,
                                                  last_battery_pct),
                      sample_count = sample_count + 1
                 """,
-                (device_sn, bucket, in_wh, out_wh, solar_wh,
-                 int(input_w), int(output_w), int(solar_w), battery_pct),
+                (device_sn, bucket, in_wh, out_wh, solar_wh, ac_wh,
+                 int(input_w), int(output_w), int(solar_w), int(ac_input_w),
+                 battery_pct),
             )
 
     # ---------- queries ----------
@@ -307,9 +322,11 @@ class EnergyDB:
                            SUM(input_wh) AS in_wh,
                            SUM(output_wh) AS out_wh,
                            SUM(solar_wh) AS sol_wh,
+                           SUM(ac_input_wh) AS ac_wh,
                            AVG(last_input_w) AS in_w,
                            AVG(last_output_w) AS out_w,
                            AVG(last_solar_w) AS sol_w,
+                           AVG(last_ac_input_w) AS ac_w,
                            AVG(last_battery_pct) AS bat
                     FROM samples
                     WHERE device_sn = ? AND bucket >= ?
@@ -319,10 +336,10 @@ class EnergyDB:
             ).fetchall()
         return [
             {"ts": r[0], "input_wh": r[1] or 0, "output_wh": r[2] or 0,
-             "solar_wh": r[3] or 0,
-             "input_w": int(r[4] or 0), "output_w": int(r[5] or 0),
-             "solar_w": int(r[6] or 0),
-             "battery_pct": int(r[7]) if r[7] is not None else None}
+             "solar_wh": r[3] or 0, "ac_input_wh": r[4] or 0,
+             "input_w": int(r[5] or 0), "output_w": int(r[6] or 0),
+             "solar_w": int(r[7] or 0), "ac_input_w": int(r[8] or 0),
+             "battery_pct": int(r[9]) if r[9] is not None else None}
             for r in rows
         ]
 

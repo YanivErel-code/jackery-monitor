@@ -13,10 +13,17 @@ TOU slots are inclusive of start_hour, exclusive of end_hour, evaluated
 in the device's local timezone (from /data/location.json). Slots may
 wrap midnight (e.g. start=23, end=7 means 23:00-07:00).
 
-Savings model matches the user's mental model:
-  solar_savings = solar_kWh * rate(at_time)   # value of solar captured
-  grid_cost     = grid_kWh   * rate(at_time)  # paid for grid charging
-  net_savings   = solar_savings - grid_cost   # net dollar benefit
+Savings model — output-based ("displaced grid"):
+  saved      = output_kWh * rate(at_time)   # what grid would have cost
+                                            # if you didn't have solar+battery
+  grid_cost  = grid_kWh   * rate(at_time)   # paid for grid charging
+  net        = saved - grid_cost            # net dollar benefit
+
+This model correctly handles storage timing — using yesterday's stored
+solar today still counts as savings, because every Wh out of the battery
+displaces a Wh you would otherwise have purchased from grid. Computing
+savings from solar input alone (solar_kWh * rate) under-counts on days
+when you draw from previously-stored sunshine.
 
 Grid kWh is derived as input_wh - solar_wh (car-input is almost always
 zero on these devices and isn't tracked separately).
@@ -198,12 +205,21 @@ def compute_savings(history: list[dict[str, Any]],
                     tz_offset_seconds: int = 0) -> dict[str, float]:
     """Walk hourly buckets, integrate savings/cost in dollars.
 
-    `history` rows must have ts + solar_wh + input_wh (the energy_db
-    history shape). Returns floats rounded to 2 decimals.
+    Output-based model: each Wh leaving the battery would have been
+    purchased from grid without solar+battery; we credit it at the rate
+    active *at output time* (so peak-hour discharge gets peak credit).
+    Grid charging is subtracted at the rate active *at input time*.
+
+    `history` rows must have ts + output_wh + input_wh + solar_wh
+    (the energy_db history shape). Rows with `ac_input_wh` use that
+    directly as grid kWh; rows without (pre-migration) fall back to
+    `input_wh - solar_wh` as a best-effort estimate. Returns floats
+    rounded to 2 decimals.
     """
     plan = plan or get_plan()
-    solar_savings = 0.0
-    grid_cost = 0.0
+    saved_dollars = 0.0
+    grid_cost_dollars = 0.0
+    output_kwh_total = 0.0
     solar_kwh_total = 0.0
     grid_kwh_total = 0.0
     for row in history:
@@ -211,17 +227,28 @@ def compute_savings(history: list[dict[str, Any]],
         if ts is None:
             continue
         rate = rate_at(plan, float(ts), tz_offset_seconds)
+        output_kwh = float(row.get("output_wh") or 0) / 1000.0
         solar_kwh = float(row.get("solar_wh") or 0) / 1000.0
         input_kwh = float(row.get("input_wh") or 0) / 1000.0
-        grid_kwh = max(0.0, input_kwh - solar_kwh)
-        solar_savings += solar_kwh * rate
-        grid_cost += grid_kwh * rate
+        # Prefer the directly-tracked AC input if present; fall back to
+        # input - solar for pre-migration rows.
+        ac_in = row.get("ac_input_wh")
+        if ac_in is not None:
+            grid_kwh = max(0.0, float(ac_in) / 1000.0)
+        else:
+            grid_kwh = max(0.0, input_kwh - solar_kwh)
+        saved_dollars += output_kwh * rate
+        grid_cost_dollars += grid_kwh * rate
+        output_kwh_total += output_kwh
         solar_kwh_total += solar_kwh
         grid_kwh_total += grid_kwh
     return {
-        "solar_savings": round(solar_savings, 2),
-        "grid_cost": round(grid_cost, 2),
-        "net_savings": round(solar_savings - grid_cost, 2),
+        # Key kept as `solar_savings` for UI back-compat; semantics are
+        # "what having solar+battery saved you" not "value of today's solar."
+        "solar_savings": round(saved_dollars, 2),
+        "grid_cost": round(grid_cost_dollars, 2),
+        "net_savings": round(saved_dollars - grid_cost_dollars, 2),
+        "output_kwh": round(output_kwh_total, 3),
         "solar_kwh": round(solar_kwh_total, 3),
         "grid_kwh": round(grid_kwh_total, 3),
         "currency": plan.get("currency", "USD"),
