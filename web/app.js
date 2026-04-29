@@ -1355,14 +1355,16 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
 // Called on Settings tab activation; re-runs are cheap.
 async function loadSmartCharge() {
   try {
-    const [cfgRes, kasaRes, statusRes] = await Promise.all([
+    const [cfgRes, kasaRes, statusRes, anaRes] = await Promise.all([
       fetch('/api/smart_charge/config'),
       fetch('/api/kasa/saved'),
       fetch('/api/smart_charge/status'),
+      fetch('/api/smart_charge/analytics?days=14'),
     ]);
     const cfg = cfgRes.ok ? await cfgRes.json() : {};
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
+    const ana = anaRes.ok ? await anaRes.json() : { summary: {} };
 
     // Populate Kasa picker. Show alias + last 4 of host so dupes don't
     // collide. Preserve current selection if the host still exists.
@@ -1396,9 +1398,30 @@ async function loadSmartCharge() {
     $('sc-claude-toggle').checked = !!cfg.claude_enabled;
 
     renderSmartChargeHistory(status.history || []);
+    renderSmartChargeAnalytics(ana);
   } catch (e) {
     console.warn('smart_charge load failed', e);
   }
+}
+
+function renderSmartChargeAnalytics(j) {
+  const el = $('sc-analytics');
+  if (!el) return;
+  const s = j?.summary || {};
+  if (!s.n) {
+    el.hidden = true;
+    return;
+  }
+  const hitRate = s.target_hit_rate != null
+    ? `${Math.round(s.target_hit_rate * 100)}%` : '—';
+  const mae = s.mae_pp != null ? `${s.mae_pp.toFixed(1)} pp` : '—';
+  el.innerHTML = `
+    <div class="sc-ana-grid">
+      <div><span class="sc-lbl">Samples (${j.days || 14}d)</span><span>${s.n}</span></div>
+      <div><span class="sc-lbl">Target hit rate</span><span>${hitRate}</span></div>
+      <div><span class="sc-lbl">Mean abs error</span><span>${mae}</span></div>
+    </div>`;
+  el.hidden = false;
 }
 
 function renderSmartChargeHistory(rows) {

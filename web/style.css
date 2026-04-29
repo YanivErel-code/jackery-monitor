@@ -636,6 +636,24 @@ main {
 .sc-row .sc-reason { color: var(--text-mute); white-space: nowrap;
                      overflow: hidden; text-overflow: ellipsis; }
 
+.sc-analytics {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: rgba(56, 189, 248, .07);
+  border: 1px solid rgba(56, 189, 248, .25);
+  border-radius: 6px;
+}
+.sc-ana-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.sc-ana-grid > div {
+  display: flex; justify-content: space-between; gap: 8px;
+}
+
 /* TOU rate slot editor in Settings. One row per slot, with the
    start-end window read-only (utility-defined) and the rate editable. */
 .cost-tou-slots {

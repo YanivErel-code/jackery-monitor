@@ -627,6 +627,14 @@ async def _smart_charge_evaluate(record: bool = True):
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
     )
+    # Persist the forecast so we have a continuous trace for predicted-vs-
+    # actual analytics, regardless of whether the Forecast tab is open.
+    # PK collapses multiple writes within an hour so cost is bounded.
+    if record:
+        try:
+            state.energy.record_forecast(device_sn, time.time(), fcast["forecast"])
+        except Exception as e:
+            log.debug("forecast persist (smart_charge) failed: %s", e)
     plan = smart_charge.compute_plan(
         config=cfg, current_soc_pct=starting_soc,
         forecast=fcast, cost_plan=cost_module.get_plan(),
