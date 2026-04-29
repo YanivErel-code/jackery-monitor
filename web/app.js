@@ -2394,9 +2394,10 @@ async function fetchBatteryPacks() {
     // refresh every 5 min server-side, but the main % updates every
     // poll — recomputing system SOC from cached packs + live main keeps
     // the headline number fluid.
+    const systemSoc = computeSystemSoc(mainPct, packs, mainWh);
     window._cachedPacks = packs;
     window._mainWh = mainWh;
-    window._systemSoc = computeSystemSoc(mainPct, packs, mainWh);
+    window._systemSoc = systemSoc;
     window._mainSoc = mainPct;
     applySystemSocOverlay();
 
