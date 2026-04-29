@@ -38,24 +38,43 @@ def _validate(lat: Any, lon: Any) -> tuple[float, float] | None:
     return flat, flon
 
 
-def get() -> dict[str, float] | None:
-    """Return {"latitude", "longitude", "updated_at"} or None if unset."""
-    with _lock:
-        try:
-            with open(LOCATION_PATH) as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            log.warning("location file unreadable: %s", e)
-            return None
+def _read_raw() -> dict | None:
+    """Internal: load and validate the on-disk dict (or None)."""
+    try:
+        with open(LOCATION_PATH) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        log.warning("location file unreadable: %s", e)
+        return None
     if not isinstance(data, dict):
+        return None
+    return data
+
+
+def get() -> dict | None:
+    """Return {"latitude", "longitude", "updated_at",
+       "utc_offset_seconds"?, "timezone"?} or None if unset."""
+    with _lock:
+        data = _read_raw()
+    if not data:
         return None
     pair = _validate(data.get("latitude"), data.get("longitude"))
     if pair is None:
         return None
-    return {"latitude": pair[0], "longitude": pair[1],
-            "updated_at": float(data.get("updated_at") or 0.0)}
+    out: dict = {
+        "latitude": pair[0], "longitude": pair[1],
+        "updated_at": float(data.get("updated_at") or 0.0),
+    }
+    if "utc_offset_seconds" in data:
+        try:
+            out["utc_offset_seconds"] = int(data["utc_offset_seconds"])
+        except (TypeError, ValueError):
+            pass
+    if data.get("timezone"):
+        out["timezone"] = str(data["timezone"])
+    return out
 
 
 def set(lat: Any, lon: Any) -> dict[str, float] | None:
@@ -73,6 +92,26 @@ def set(lat: Any, lon: Any) -> dict[str, float] | None:
         os.replace(tmp, LOCATION_PATH)
     log.info("location saved: lat=%.4f lon=%.4f", pair[0], pair[1])
     return record
+
+
+def update_timezone(utc_offset_seconds: int,
+                    timezone: str | None = None) -> bool:
+    """Merge a UTC-offset (and optional IANA timezone name) into the existing
+    location record without disturbing lat/lon/updated_at. Used by the
+    weather client after Open-Meteo returns the offset for the lat/lon."""
+    with _lock:
+        data = _read_raw()
+        if not data:
+            return False  # no lat/lon yet; nothing to merge into
+        data["utc_offset_seconds"] = int(utc_offset_seconds)
+        if timezone:
+            data["timezone"] = str(timezone)
+        os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
+        tmp = LOCATION_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, LOCATION_PATH)
+    return True
 
 
 def clear() -> bool:

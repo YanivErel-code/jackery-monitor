@@ -88,12 +88,25 @@ async def fetch_irradiance(
          "cloud_cover_pct": float(c) if c is not None else 0.0}
         for t, g, c in zip(times, ghi, cloud, strict=False)
     ]
-    out = {"hourly": rows, "fetched_at": now, "lat": lat, "lon": lon}
+    # Open-Meteo with timezone=auto returns the UTC offset for the lat/lon.
+    # Stash it onto the location record so server-side "what's today" math
+    # uses the user's local midnight, not the container's UTC midnight.
+    utc_offset_seconds = j.get("utc_offset_seconds")
+    timezone = j.get("timezone")
+    if utc_offset_seconds is not None:
+        try:
+            import location as device_location
+            device_location.update_timezone(int(utc_offset_seconds), timezone)
+        except Exception as e:
+            log.warning("could not persist timezone offset: %s", e)
+
+    out = {"hourly": rows, "fetched_at": now, "lat": lat, "lon": lon,
+           "utc_offset_seconds": utc_offset_seconds, "timezone": timezone}
 
     with _cache_lock:
         _cache[key] = (now + CACHE_TTL_S, out)
-    log.info("weather: %d hours fetched (past %d / forecast %d days) for (%.3f,%.3f)",
-             len(rows), past_days, forecast_days, lat, lon)
+    log.info("weather: %d hours fetched (past %d / forecast %d days) for (%.3f,%.3f) tz=%s",
+             len(rows), past_days, forecast_days, lat, lon, timezone)
     return out
 
 
