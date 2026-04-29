@@ -468,9 +468,24 @@ class JackeryCloudClient:
         loop = asyncio.get_running_loop()
         topic_prefix = f"hb/app/{self.user_id}"
 
+        # Optional debug capture of every raw MQTT payload — useful for
+        # discovering whether pack-level updates push over MQTT (they
+        # might come on a different topic or as a different messageType
+        # we currently filter out). Enable with:
+        #   JACKERY_MQTT_DEBUG_PATH=/tmp/jackery-mqtt.log
+        import os as _os
+        debug_path = _os.environ.get("JACKERY_MQTT_DEBUG_PATH")
+
         def _on_message(_client, _userdata, msg):
+            raw = msg.payload.decode(errors="replace")
+            if debug_path:
+                try:
+                    with open(debug_path, "a") as f:
+                        f.write(f"{time.time():.3f}\t{msg.topic}\t{raw}\n")
+                except Exception as e:
+                    log.debug("MQTT debug write failed: %s", e)
             try:
-                payload = json.loads(msg.payload.decode())
+                payload = json.loads(raw)
             except Exception as e:
                 log.warning("MQTT parse error on %s: %s", msg.topic, e)
                 return
