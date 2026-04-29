@@ -124,6 +124,62 @@ def test_load_profile_clips_outliers():
     assert bucket < 200, f"outlier leaked: bucket={bucket}"
 
 
+def test_expected_load_uses_idle_default_when_no_data():
+    # Empty profile → forecast hour gets IDLE_LOAD_W, NOT a global mean.
+    # This is the regression test for the 0%-predicted-vs-44%-actual bug.
+    profile: dict[tuple[int, int], float] = {}
+    load = forecaster.expected_load_w(profile, 1_700_000_000)
+    assert load == forecaster.IDLE_LOAD_W
+
+
+def test_expected_load_falls_back_to_neighbor_hour_not_global_mean():
+    # User has heavy daytime activity (avg ~500W) but quiet evenings
+    # (~50W). A missing 2am bucket should inherit from neighboring night
+    # hours (1am, 3am) — NOT the global mean.
+    from datetime import datetime
+    profile = {
+        # Daytime: high load
+        (12, 0): 500.0, (13, 0): 600.0, (14, 0): 550.0,
+        # Evening: quiet
+        (1, 0): 40.0, (3, 0): 50.0,  # 2am missing
+    }
+    # Pick a weekday-Tuesday 2am for the lookup
+    target = int(datetime(2024, 7, 2, 2, 0, 0).timestamp())
+    load = forecaster.expected_load_w(profile, target)
+    # Should land at 40 or 50 (one of the night neighbors), NOT 500-ish
+    assert load in (40.0, 50.0), f"got {load} — leaked from daytime?"
+
+
+def test_load_profile_recency_weight_for_variable_buckets():
+    # A variable bucket (high IQR/median): old samples around 100W, recent
+    # samples around 300W. Median is 200W; recency-weighted should land
+    # closer to 300W since recent dominates 70/30.
+    from datetime import datetime
+    now = time.time()
+    # 10 old samples (>3d ago) at 100W, 10 recent (<3d ago) at 300W —
+    # all in the same (hour, weekday) bucket via being 7 days apart
+    # plus offsets. Use exact-bucket placement for determinism.
+    base_old = now - 10 * 86400
+    base_new = now - 1 * 86400
+    energy = []
+    target_hour = datetime.fromtimestamp(base_old).hour
+    for i in range(10):
+        # Pick samples with the same hour-of-day as base_old: just keep
+        # offset to nearest 24h.
+        energy.append({"ts": base_old + i * 24 * 3600,
+                       "output_w": 100, "solar_w": 0, "battery_pct": 80})
+    for i in range(10):
+        energy.append({"ts": base_new - i * 24 * 3600,
+                       "output_w": 300, "solar_w": 0, "battery_pct": 80})
+    profile = forecaster.fit_load_profile(energy, now_ts=now)
+    # Find any bucket from this synthetic data
+    matching = [v for k, v in profile.items() if k[0] == target_hour]
+    assert matching, "no bucket created for synthetic data"
+    val = matching[0]
+    # Recency-weighted should pull above the plain median (200W)
+    assert val > 200.0, f"recency weighting didn't kick in: {val}"
+
+
 def test_simulate_soc_clamps_at_bounds():
     fc = [{"ts": 0, "solar_w": 0, "load_w": 5000}]   # would drop SOC below 0
     out = forecaster.simulate_soc(starting_soc_pct=10.0,
