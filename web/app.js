@@ -998,8 +998,10 @@ async function loadCostPlan() {
 function renderCostFields(plan) {
   const sel = $('cost-preset');
   if (!sel) return;
-  // Build the preset dropdown — every preset + a "Custom flat rate" entry
-  // for users who want to type their own number.
+  // Build the preset dropdown — every preset, plus "Custom flat rate" for
+  // a single user-entered rate, plus "Custom TOU" if the saved plan is a
+  // TOU schedule that doesn't match any preset (typical case after a
+  // user edits a preset's rates).
   sel.innerHTML = '';
   for (const p of _costPresets) {
     const opt = document.createElement('option');
@@ -1007,21 +1009,39 @@ function renderCostFields(plan) {
     opt.textContent = p.label;
     sel.appendChild(opt);
   }
-  const customOpt = document.createElement('option');
-  customOpt.value = '__custom_flat__';
-  customOpt.textContent = 'Custom flat rate';
-  sel.appendChild(customOpt);
+  const flatOpt = document.createElement('option');
+  flatOpt.value = '__custom_flat__';
+  flatOpt.textContent = 'Custom flat rate';
+  sel.appendChild(flatOpt);
+  const customTouOpt = document.createElement('option');
+  customTouOpt.value = '__custom_tou__';
+  customTouOpt.textContent = 'Custom TOU';
+  sel.appendChild(customTouOpt);
 
-  // Pick the option that matches the saved plan. If the saved plan is a
-  // flat rate that exactly matches a preset, prefer the preset; otherwise
-  // fall back to "Custom flat rate".
+  // Match against presets first; fall through to "Custom TOU" or "Custom
+  // flat rate" depending on the saved plan shape.
   const matchPreset = _costPresets.find((p) => deepEqualPlan(p.plan, plan));
-  sel.value = matchPreset ? matchPreset.id : '__custom_flat__';
+  if (matchPreset) {
+    sel.value = matchPreset.id;
+  } else if (plan?.type === 'tou') {
+    sel.value = '__custom_tou__';
+  } else {
+    sel.value = '__custom_flat__';
+  }
 
   if (plan?.type === 'flat') {
     $('cost-flat-rate').value = plan.rate_per_kwh;
   }
-  applyCostSelection();
+  // applyCostSelection wires the visible rows to the dropdown choice. For
+  // a custom TOU plan we want to render the SAVED plan's slots, not the
+  // preset's, so handle that branch directly.
+  if (sel.value === '__custom_tou__') {
+    $('cost-flat-row').hidden = true;
+    $('cost-tou-row').hidden = false;
+    renderTouEditor(JSON.parse(JSON.stringify(plan)));
+  } else {
+    applyCostSelection();
+  }
 }
 
 function deepEqualPlan(a, b) {
@@ -1041,6 +1061,32 @@ function deepEqualPlan(a, b) {
   return false;
 }
 
+// Tracks the currently-rendered TOU plan so the save handler can recover
+// the slot windows + labels. Only the per-slot RATES are user-editable;
+// start/end hours are utility-defined and stay locked to the preset.
+let _costTouCurrent = null;
+
+function renderTouEditor(plan) {
+  _costTouCurrent = plan;
+  const wrap = $('cost-tou-slots');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  for (const [i, slot] of (plan.tou_rates || []).entries()) {
+    const row = document.createElement('div');
+    row.className = 'cost-tou-slot';
+    const start = String(slot.start_hour).padStart(2, '0');
+    const end   = String(slot.end_hour).padStart(2, '0');
+    row.innerHTML = `
+      <span class="slot-time">${start}:00–${end}:00</span>
+      <span><input type="number" class="slot-rate" data-idx="${i}"
+             step="0.001" min="0" max="5"
+             value="${slot.rate.toFixed(3)}" /> $/kWh</span>
+      <span class="slot-label">${slot.label || ''}</span>
+    `;
+    wrap.appendChild(row);
+  }
+}
+
 function applyCostSelection() {
   const sel = $('cost-preset');
   if (!sel) return;
@@ -1050,6 +1096,7 @@ function applyCostSelection() {
   if (id === '__custom_flat__') {
     flatRow.hidden = false;
     touRow.hidden = true;
+    _costTouCurrent = null;
     return;
   }
   const preset = _costPresets.find((p) => p.id === id);
@@ -1057,13 +1104,13 @@ function applyCostSelection() {
   if (preset.plan.type === 'flat') {
     flatRow.hidden = false;
     touRow.hidden = true;
+    _costTouCurrent = null;
     $('cost-flat-rate').value = preset.plan.rate_per_kwh;
   } else if (preset.plan.type === 'tou') {
     flatRow.hidden = true;
     touRow.hidden = false;
-    $('cost-tou-summary').textContent = preset.plan.tou_rates
-      .map((s) => `${String(s.start_hour).padStart(2, '0')}:00–${String(s.end_hour).padStart(2, '0')}:00  $${s.rate.toFixed(2)}/kWh  ${s.label || ''}`)
-      .join('\n');
+    // Deep-copy so the user editing rates doesn't mutate _costPresets.
+    renderTouEditor(JSON.parse(JSON.stringify(preset.plan)));
   }
 }
 
@@ -1080,6 +1127,25 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
       type: 'flat',
       rate_per_kwh: parseFloat($('cost-flat-rate').value) || 0,
       currency: 'USD',
+    };
+  } else if (_costTouCurrent) {
+    // TOU: walk the editable rate inputs and rebuild the plan from
+    // _costTouCurrent (which holds the current windows + labels).
+    const inputs = document.querySelectorAll('#cost-tou-slots input.slot-rate');
+    const touRates = (_costTouCurrent.tou_rates || []).map((slot, i) => {
+      const inp = inputs[i];
+      const editedRate = inp ? parseFloat(inp.value) : slot.rate;
+      return {
+        start_hour: slot.start_hour,
+        end_hour: slot.end_hour,
+        rate: Number.isFinite(editedRate) ? editedRate : slot.rate,
+        label: slot.label || '',
+      };
+    });
+    plan = {
+      type: 'tou',
+      currency: _costTouCurrent.currency || 'USD',
+      tou_rates: touRates,
     };
   } else {
     const preset = _costPresets.find((p) => p.id === id);
@@ -1098,6 +1164,8 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || ('HTTP ' + r.status));
     }
+    const j = await r.json();
+    if (j.plan) renderCostFields(j.plan);  // re-anchor on the saved plan
     status.textContent = 'Saved.';
     setTimeout(() => { status.hidden = true; }, 2500);
   } catch (err) {
