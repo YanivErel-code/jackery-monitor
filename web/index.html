@@ -163,6 +163,15 @@
         </section>
       </div>
 
+      <!-- Per-expansion-battery state (only shown when packs are attached) -->
+      <section id="battery-packs-card" class="card" hidden>
+        <div class="card-header">
+          <h2>Battery packs</h2>
+          <span id="battery-packs-summary" class="hint">—</span>
+        </div>
+        <div id="battery-packs-list" class="battery-packs-list"></div>
+      </section>
+
       <!-- Outputs — click to toggle (control via cloud MQTT) -->
       <section class="card">
         <div class="card-header">

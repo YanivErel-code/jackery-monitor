@@ -541,6 +541,49 @@ main {
 .savings-row .sav-net { color: var(--text); margin-left: auto; }
 .savings-row .sav-sep { color: var(--text-mute); font-weight: 400; }
 
+/* Per-expansion-battery list. One row per pack with a small SOC bar +
+   numeric SOC + flow indicator + temp + last-6-of-SN tag. The "Main"
+   row at the top shows the derived standalone SOC for the host unit. */
+.battery-packs-list {
+  display: flex; flex-direction: column; gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.pack-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 56px 64px 48px 80px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  border-radius: 6px;
+}
+.pack-row:hover { background: var(--card-bg-hover, rgba(255,255,255,.02)); }
+.pack-row-main {
+  background: rgba(56, 189, 248, .07);
+  border: 1px solid rgba(56, 189, 248, .25);
+  padding: 6px 8px;
+}
+.pack-idx { color: var(--text-mute); text-align: center; font-weight: 600; }
+.pack-row-main .pack-idx { color: var(--accent-2); }
+.pack-bar {
+  height: 8px; border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.pack-bar-fill {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--accent-3), var(--accent));
+  transition: width .4s ease;
+}
+.pack-soc { font-weight: 700; text-align: right; }
+.pack-soc small { color: var(--text-mute); font-weight: 400; margin-left: 1px; }
+.pack-flow { text-align: right; font-size: 12px; }
+.pack-flow.flow-in   { color: var(--accent); }
+.pack-flow.flow-out  { color: #ef4444; }
+.pack-flow.flow-idle { color: var(--text-mute); }
+.pack-temp { color: var(--text-mute); font-size: 12px; text-align: right; }
+.pack-sn { color: var(--text-mute); font-size: 11px; text-align: right; }
+
 /* TOU rate slot editor in Settings. One row per slot, with the
    start-end window read-only (utility-defined) and the rate editable. */
 .cost-tou-slots {

@@ -51,13 +51,13 @@ AES_KEY = b"1234567890123456"  # fixed key per reverse-engineered protocol
 
 DEFAULT_HEADERS = {
     "accept": "*/*",
-    "app_version": "1.0.5",
-    "sys_version": "17.2",
+    "app_version": "2.0.2",
+    "sys_version": "26.4.2",
     "platform": "1",  # 1 = iOS
     "accept-language": "en-US",
     "accept-encoding": "br;q=1.0, gzip;q=0.9, deflate;q=0.8",
-    "user-agent": "DxPowerProject/1.0.5 (com.hb.jackery; build:2; iOS 17.2.0) Alamofire/5.8.0",
-    "model": "iPad Pro (12.9-inch) (3rd generation)",
+    "user-agent": "DxPowerProject/2.0.2 (com.hb.jackery; build:3; iOS 26.4.2) Alamofire/5.11.2",
+    "model": "iPhone18,4",
 }
 
 CLOUD_POLL_INTERVAL_S = 60
@@ -324,6 +324,38 @@ class JackeryCloudClient:
                      sorted(device_blob.keys()) if isinstance(device_blob, dict) else "(none)",
                      {k: props[k] for k in sorted(props.keys()) if not k.startswith("_dev_")})
         return props
+
+    async def fetch_battery_packs(self, device_sn: str) -> list[dict[str, Any]]:
+        """Per-expansion-battery state. Reverse-engineered from the iOS app
+        (HTTP Toolkit capture). Response shape:
+            {code:0, data:[{deviceSn, parentDeviceSn, rb, ip, op, it, ot,
+                            ec, bt, deviceOrder, needUpgrade, ...}, ...]}
+
+        Field semantics match the BLE/MQTT prop dict for the main device:
+            rb = SOC %        ip = input W       op = output W
+            it = internal °C  ec = error code    bt = battery time (mins)
+            ot = output temp / 999 sentinel for "unknown"
+        Returns the list sorted by deviceOrder so packs render in the same
+        order the iOS app shows them.
+        """
+        data = await self._authed_get("/v1/device/battery/pack/list",
+                                      {"deviceSn": device_sn})
+        if data.get("code") != 0:
+            raise CloudAuthError(
+                f"battery pack list failed: {data.get('msg') or data}"
+            )
+        raw = data.get("data") or []
+        if not isinstance(raw, list):
+            return []
+        packs: list[dict[str, Any]] = []
+        for d in raw:
+            if not isinstance(d, dict):
+                continue
+            if d.get("isDelete"):
+                continue
+            packs.append(d)
+        packs.sort(key=lambda p: p.get("deviceOrder") or 0)
+        return packs
 
     async def probe_endpoints(self, device_id: str) -> dict[str, Any]:
         """Speculative diagnostic — try a small handful of endpoint shapes

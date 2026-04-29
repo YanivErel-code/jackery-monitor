@@ -882,6 +882,24 @@ async def handle(method: str, params: dict) -> dict:
         return {"ok": True, "device_sn": device_sn,
                 "props": dict(state.props_raw_by_sn.get(device_sn, {}))}
 
+    if method == "get_battery_packs":
+        # Per-expansion-battery state from /v1/device/battery/pack/list. The
+        # iOS app uses this to render the per-battery SOC list. Always polls
+        # fresh — packs only update every few minutes, and we want the UI to
+        # reflect a deliberate refresh rather than stale cached data.
+        device_sn = (params.get("device_sn") or "").strip()
+        if not device_sn:
+            device_sn = (state.cloud_device or {}).get("device_sn", "")
+        if not device_sn:
+            return {"ok": False, "error": "no device_sn", "packs": []}
+        if not state.cloud_client:
+            return {"ok": False, "error": "cloud client not initialised", "packs": []}
+        try:
+            packs = await state.cloud_client.fetch_battery_packs(device_sn)
+        except Exception as e:
+            return {"ok": False, "error": str(e), "packs": []}
+        return {"ok": True, "device_sn": device_sn, "packs": packs}
+
     if method == "set_output":
         # Output toggles go over MQTT (emqx.jackeryapp.com). The cloud_client
         # publishes the command and waits for the broker PUBACK; the actual

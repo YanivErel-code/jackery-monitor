@@ -61,6 +61,10 @@ WEB_DIR = Path(__file__).parent / "web"
 LIVE_CHART_HOURS = 6
 LIVE_CHART_INTERVAL_S = 60
 HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
+# Per-expansion-battery refresh cadence. The cloud's `updateTime` field
+# moves at roughly 30s resolution so anything sub-minute is wasted; 5 min
+# is plenty for a daily-learning trace + UI freshness.
+BATTERY_PACK_REFRESH_S = 300
 
 
 # ---------- app state ----------
@@ -85,6 +89,12 @@ class AppState:
         self.ws_clients: set[WebSocket] = set()
         self.last_source: str | None = None
         self.last_cloud_meta: dict | None = None
+        # Per-expansion-battery cache. Refreshed every BATTERY_PACK_REFRESH_S
+        # by the poll loop so the UI gets near-realtime per-pack SOC without
+        # hammering the cloud. Populated only when the active device has
+        # at least one expansion battery.
+        self.battery_packs: list[dict] = []
+        self.last_packs_ts: float = 0.0
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
@@ -229,6 +239,22 @@ async def poll_loop() -> None:
                             log.warning("history hydrate failed: %s", e)
                         state.history_hydrated = True
 
+                # Per-expansion-battery refresh. Throttled to BATTERY_PACK_REFRESH_S
+                # since pack state moves slowly. Cached on state for the API,
+                # persisted to energy_db for the daily-learning job.
+                if dev_sn and ts - state.last_packs_ts >= BATTERY_PACK_REFRESH_S:
+                    rpc = getattr(state.client, "_rpc", None)
+                    if rpc is not None:
+                        try:
+                            result = await rpc("get_battery_packs", device_sn=dev_sn)
+                            packs = (result or {}).get("packs") or []
+                            state.battery_packs = packs
+                            state.last_packs_ts = ts
+                            if packs:
+                                state.energy.record_battery_packs(dev_sn, packs, int(ts))
+                        except Exception as e:
+                            log.debug("battery_packs refresh failed: %s", e)
+
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
                 # is independent and faster).
@@ -308,6 +334,30 @@ async def broadcast(message: dict[str, Any]) -> None:
             dead.append(ws)
     for ws in dead:
         state.ws_clients.discard(ws)
+
+
+def _total_capacity_wh(device_sn: str | None,
+                       model_code: int | None = None) -> int:
+    """Total system capacity for a device, including expansion packs.
+
+    Resolution order:
+      1. Manual override on the devices row (set via the Device tab).
+      2. Auto-derived from the cached battery_packs list when the device
+         is the active one — main + N x pack capacity. This is the new
+         hands-off path; users with packs no longer have to set the
+         override explicitly.
+      3. Spec capacity for the model (no expansion packs assumed).
+    """
+    if device_sn:
+        override = state.energy.get_capacity_override(device_sn)
+        if override:
+            return int(override)
+    main_wh = forecaster.battery_capacity_wh(model_code)
+    active_sn = state.device.device_sn if state.device else None
+    if device_sn and device_sn == active_sn and state.battery_packs:
+        pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
+        return main_wh + len(state.battery_packs) * pack_wh
+    return main_wh
 
 
 def _in_progress_savings_row() -> dict | None:
@@ -483,8 +533,8 @@ async def _smart_charge_evaluate(record: bool = True):
         return smart_charge.compute_plan(
             config=cfg, current_soc_pct=None,
             forecast={"forecast": []}, cost_plan=cost_module.get_plan(),
-            capacity_wh=forecaster.battery_capacity_wh(
-                getattr(state.device, "model_code", None)),
+            capacity_wh=_total_capacity_wh(
+                device_sn, getattr(state.device, "model_code", None)),
         )
     lat, lon = loc["latitude"], loc["longitude"]
     weather = await weather_client.fetch_irradiance(lat, lon)
@@ -492,9 +542,8 @@ async def _smart_charge_evaluate(record: bool = True):
         return None
     starting_soc = float((state.last_status or {}).get("battery_percent") or 50)
     energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
-    override = state.energy.get_capacity_override(device_sn)
-    capacity = override or forecaster.battery_capacity_wh(
-        getattr(state.device, "model_code", None))
+    capacity = _total_capacity_wh(
+        device_sn, getattr(state.device, "model_code", None))
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
@@ -810,10 +859,10 @@ async def api_forecast(device_sn: str | None = None):
         starting_soc = float(state.last_status["battery_percent"])
 
     model_code = getattr(state.device, "model_code", None) if state.device else None
-    # User-set capacity override takes priority over the model-code lookup.
-    # Used for setups with extension batteries stacked on the host unit.
-    override = state.energy.get_capacity_override(device_sn)
-    capacity = override if override else forecaster.battery_capacity_wh(model_code)
+    # _total_capacity_wh() auto-derives total capacity from the live
+    # battery_packs cache (main + N x pack), with the manual override
+    # winning if set and the spec capacity as the fallback.
+    capacity = _total_capacity_wh(device_sn, model_code)
 
     # 14 days of hourly-bucketed history is plenty for both the regression and
     # the load profile.
@@ -932,16 +981,26 @@ def api_devices_capacity():
     """List every recorded device with its current capacity (default vs
     user override). Used by the Device tab to render the capacity editor."""
     out = []
+    active_sn = state.device.device_sn if state.device else None
+    pack_count = len(state.battery_packs) if state.battery_packs else 0
     for d in state.energy.list_devices():
         default_wh = forecaster.battery_capacity_wh(d.get("model_code"))
         override = d.get("capacity_wh_override")
+        # Auto-derived from live battery_packs cache for the active device.
+        auto_wh: int | None = None
+        if pack_count and d["device_sn"] == active_sn:
+            pack_wh = forecaster.expansion_pack_capacity_wh(d.get("model_code"))
+            auto_wh = default_wh + pack_count * pack_wh
+        effective = override or auto_wh or default_wh
         out.append({
             "device_sn": d["device_sn"],
             "name": d.get("name"),
             "model_code": d.get("model_code"),
             "default_capacity_wh": default_wh,
             "capacity_wh_override": override,
-            "effective_capacity_wh": override if override else default_wh,
+            "auto_capacity_wh": auto_wh,
+            "pack_count": pack_count if d["device_sn"] == active_sn else 0,
+            "effective_capacity_wh": effective,
         })
     return {"devices": out}
 
@@ -998,6 +1057,44 @@ async def api_debug_raw_props(device_sn: str | None = None):
     except Exception as e:
         return {"error": str(e), "props": {}}
     return {"device_sn": device_sn, "props": (result or {}).get("props", {})}
+
+
+@app.get("/api/devices/battery_packs")
+async def api_devices_battery_packs(device_sn: str | None = None,
+                                    fresh: bool = False):
+    """Per-expansion-battery state. Defaults to the poll-loop cache (refreshed
+    every BATTERY_PACK_REFRESH_S). Pass fresh=true to force a live RPC fetch
+    — useful for a manual refresh button in the UI."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"error": "no device", "packs": []}
+    active_sn = state.device.device_sn if state.device else None
+    if not fresh and device_sn == active_sn and state.battery_packs:
+        return {"device_sn": device_sn,
+                "packs": state.battery_packs,
+                "fetched_at": state.last_packs_ts,
+                "cached": True}
+    rpc = getattr(state.client, "_rpc", None)
+    if rpc is None:
+        return {"error": "bridge not available", "packs": []}
+    try:
+        result = await rpc("get_battery_packs", device_sn=device_sn)
+    except Exception as e:
+        return {"error": str(e), "packs": []}
+    packs = (result or {}).get("packs", [])
+    if device_sn == active_sn and packs:
+        state.battery_packs = packs
+        state.last_packs_ts = time.time()
+        try:
+            state.energy.record_battery_packs(device_sn, packs)
+        except Exception as e:
+            log.debug("record_battery_packs failed: %s", e)
+    return {"device_sn": device_sn,
+            "packs": packs,
+            "fetched_at": time.time(),
+            "cached": False,
+            "error": (result or {}).get("error")}
 
 
 @app.get("/api/location")

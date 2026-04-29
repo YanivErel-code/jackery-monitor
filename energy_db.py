@@ -25,6 +25,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("energy_db")
 
@@ -137,6 +138,22 @@ CREATE TABLE IF NOT EXISTS daily_solar_summary (
     updated_at     INTEGER NOT NULL,
     PRIMARY KEY (date, device_sn)
 );
+
+CREATE TABLE IF NOT EXISTS battery_packs (
+    ts              INTEGER NOT NULL,     -- unix epoch when sampled
+    parent_sn       TEXT NOT NULL,        -- main device SN
+    pack_sn         TEXT NOT NULL,        -- expansion battery SN
+    device_order    INTEGER,              -- position in iOS app (0..N)
+    soc_pct         REAL,                 -- rb
+    input_w         REAL,                 -- ip
+    output_w        REAL,                 -- op
+    internal_temp_c REAL,                 -- it
+    error_code      INTEGER,              -- ec
+    PRIMARY KEY (ts, parent_sn, pack_sn)
+);
+
+CREATE INDEX IF NOT EXISTS idx_battery_packs_parent_ts
+    ON battery_packs(parent_sn, ts);
 """
 
 
@@ -449,6 +466,69 @@ class EnergyDB:
             for r in rows
         ]
 
+    # ---------- per-expansion-battery state ----------
+    def record_battery_packs(self, parent_sn: str, packs: list[dict],
+                             ts: int | None = None) -> int:
+        """Persist a snapshot of every expansion battery for the daily
+        learning job. Each pack dict comes from cloud_client.fetch_battery_packs
+        (raw cloud field names: rb=SOC, ip=input W, op=output W, it=temp,
+        ec=error). Returns count of rows written."""
+        if not parent_sn or not packs:
+            return 0
+        ts = int(ts if ts is not None else time.time())
+        prepared: list[tuple] = []
+        for p in packs:
+            pack_sn = str(p.get("deviceSn") or "").strip()
+            if not pack_sn:
+                continue
+            prepared.append((
+                ts, parent_sn, pack_sn,
+                int(p.get("deviceOrder") or 0),
+                _nullable_float(p.get("rb")),
+                _nullable_float(p.get("ip")),
+                _nullable_float(p.get("op")),
+                _nullable_float(p.get("it")),
+                int(p.get("ec") or 0),
+            ))
+        if not prepared:
+            return 0
+        with self._conn() as c:
+            c.executemany(
+                """INSERT OR REPLACE INTO battery_packs
+                       (ts, parent_sn, pack_sn, device_order,
+                        soc_pct, input_w, output_w, internal_temp_c, error_code)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                prepared,
+            )
+        return len(prepared)
+
+    def latest_battery_packs(self, parent_sn: str) -> list[dict]:
+        """Most recent snapshot of all packs for a given main device. Returns
+        rows ordered by device_order so the UI renders them in app order."""
+        if not parent_sn:
+            return []
+        with self._conn() as c:
+            latest_ts_row = c.execute(
+                "SELECT MAX(ts) FROM battery_packs WHERE parent_sn = ?",
+                (parent_sn,),
+            ).fetchone()
+            if not latest_ts_row or latest_ts_row[0] is None:
+                return []
+            rows = c.execute(
+                """SELECT ts, pack_sn, device_order, soc_pct, input_w,
+                          output_w, internal_temp_c, error_code
+                     FROM battery_packs
+                    WHERE parent_sn = ? AND ts = ?
+                    ORDER BY device_order""",
+                (parent_sn, int(latest_ts_row[0])),
+            ).fetchall()
+        return [
+            {"ts": r[0], "pack_sn": r[1], "device_order": r[2],
+             "soc_pct": r[3], "input_w": r[4], "output_w": r[5],
+             "internal_temp_c": r[6], "error_code": r[7]}
+            for r in rows
+        ]
+
     # ---------- daily solar summary (sunset/sunrise predicted vs actual) ----------
     def upsert_daily_summary(self, *, device_sn: str, local_date: str,
                              sunset_ts: int | None,
@@ -698,6 +778,18 @@ class EnergyDB:
              "battery_pct": int(r[9]) if r[9] is not None else None}
             for r in rows
         ]
+
+
+def _nullable_float(v: Any) -> float | None:
+    """float(v) but pass None / unparseable through as None so SQLite stores
+    NULL rather than 0.0. Used by battery_packs ingestion where the cloud
+    sometimes omits a field instead of returning 0."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _start_of_day(now_ts: int) -> int:

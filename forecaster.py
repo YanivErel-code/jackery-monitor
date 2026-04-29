@@ -88,6 +88,14 @@ def battery_capacity_wh(model_code: int | None) -> int:
     return BATTERY_CAPACITY_WH.get(model_code, DEFAULT_BATTERY_CAPACITY_WH)
 
 
+def expansion_pack_capacity_wh(model_code: int | None) -> int:
+    """Per-pack capacity for a given main-unit model. The 5000 Plus uses
+    5040 Wh expansion packs (same as the main unit); older 1500/2000-class
+    units use 2042 Wh packs. Unknown models default to the main capacity
+    since stacked packs of a different size are uncommon."""
+    return battery_capacity_wh(model_code)
+
+
 # ---------- solar regression ----------
 def fit_solar_coefficient(
     energy_history: list[dict[str, Any]],
