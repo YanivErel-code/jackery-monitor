@@ -13,7 +13,11 @@ Designed to run on a Synology NAS in Docker. Works anywhere with Docker
 Compose. Multi-device — handles multiple Jackery devices on the same account
 (e.g. Explorer 5000 Plus + HomePower 3000) and per-device automation rules.
 
-![Dashboard preview — Live tab with smooth gradient charts and accent-colored KPI cards.](web/icon.svg)
+It connects through the **Jackery cloud account** (the same one the official app uses). On first launch the dashboard prompts you to sign in; credentials are encrypted on disk (AES-256-GCM on Linux/Synology, macOS Keychain on Mac) and never leave your host.
+
+![Dashboard — Live tab with state of charge, power flow, today's energy, output toggles, and 6-hour history chart](docs/screenshots/dashboard-live.png)
+
+*Live tab: state of charge, power flow (output / input / solar), today's kWh and dollar value, output toggles, and the 6-hour battery + power chart.*
 
 ---
 
