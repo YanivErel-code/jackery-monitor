@@ -62,9 +62,10 @@ LIVE_CHART_HOURS = 6
 LIVE_CHART_INTERVAL_S = 60
 HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
 # Per-expansion-battery refresh cadence. The cloud's `updateTime` field
-# moves at roughly 30s resolution so anything sub-minute is wasted; 5 min
-# is plenty for a daily-learning trace + UI freshness.
-BATTERY_PACK_REFRESH_S = 300
+# moves at roughly 30-60s resolution so anything faster is wasted; aligned
+# with the main property poll cadence so each per-device poll iteration
+# refreshes packs alongside main telemetry.
+BATTERY_PACK_REFRESH_S = 60
 
 
 # ---------- app state ----------
