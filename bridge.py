@@ -405,6 +405,10 @@ class State:
         self.props_raw_by_sn: dict[str, dict] = {}
         self.telemetry_by_sn: dict[str, dict] = {}
         self.ts_by_sn: dict[str, float] = {}
+        # Per-expansion-battery state, keyed by parent (host) device SN.
+        # Updated in real-time from MQTT SubDevicePropertyChange pushes.
+        self.battery_packs_by_sn: dict[str, list[dict]] = {}
+        self.packs_ts_by_sn: dict[str, float] = {}
         self.cloud_telemetry: dict | None = None
         self.cloud_props_raw: dict = {}
         self.cloud_ts: float | None = None
@@ -499,6 +503,26 @@ async def cloud_loop() -> None:
             state.cloud_state = "connected"
         event("info", "mqtt", f"Realtime update ({len(props)} keys) [{device_sn[-6:]}]",
               keys=sorted(props.keys())[:8], device_sn=device_sn)
+
+    async def _on_pack_push(packs: list, parent_sn: str):
+        """MQTT SubDevicePropertyChange handler. The cloud pushes the
+        same shape as /v1/device/battery/pack/list in real time, so we
+        can stop polling once the broker delivers an update. Updates
+        both the bridge's per-device cache and the cloud_client's
+        push cache so any subsequent fetch_battery_packs short-circuits
+        to the realtime value."""
+        if not parent_sn or not isinstance(packs, list):
+            return
+        cleaned = [p for p in packs
+                   if isinstance(p, dict) and not p.get("isDelete")]
+        cleaned.sort(key=lambda p: p.get("deviceOrder") or 0)
+        state.battery_packs_by_sn[parent_sn] = cleaned
+        state.packs_ts_by_sn[parent_sn] = time.time()
+        if state.cloud_client:
+            state.cloud_client.pack_cache_by_sn[parent_sn] = cleaned
+        event("info", "mqtt",
+              f"Realtime pack update ({len(cleaned)} packs) [{parent_sn[-6:]}]",
+              pack_count=len(cleaned), parent_sn=parent_sn)
 
     realtime_subscribed = False
     while True:
@@ -600,7 +624,8 @@ async def cloud_loop() -> None:
             # on_connect.
             if not realtime_subscribed:
                 try:
-                    await c.subscribe_realtime(_on_property_push)
+                    await c.subscribe_realtime(_on_property_push,
+                                               on_pack_change=_on_pack_push)
                     realtime_subscribed = True
                     event("info", "mqtt", "Subscribed to realtime device topic")
                 except Exception as e:
@@ -883,22 +908,30 @@ async def handle(method: str, params: dict) -> dict:
                 "props": dict(state.props_raw_by_sn.get(device_sn, {}))}
 
     if method == "get_battery_packs":
-        # Per-expansion-battery state from /v1/device/battery/pack/list. The
-        # iOS app uses this to render the per-battery SOC list. Always polls
-        # fresh — packs only update every few minutes, and we want the UI to
-        # reflect a deliberate refresh rather than stale cached data.
+        # Per-expansion-battery state. The cloud pushes updates over MQTT
+        # (SubDevicePropertyChange), so we serve from the in-memory cache
+        # whenever possible — the HTTP endpoint is the cold-start fallback.
         device_sn = (params.get("device_sn") or "").strip()
         if not device_sn:
             device_sn = (state.cloud_device or {}).get("device_sn", "")
         if not device_sn:
             return {"ok": False, "error": "no device_sn", "packs": []}
+        cached = state.battery_packs_by_sn.get(device_sn)
+        if cached is not None:
+            return {"ok": True, "device_sn": device_sn, "packs": cached,
+                    "fetched_at": state.packs_ts_by_sn.get(device_sn, 0.0),
+                    "source": "mqtt"}
         if not state.cloud_client:
             return {"ok": False, "error": "cloud client not initialised", "packs": []}
         try:
             packs = await state.cloud_client.fetch_battery_packs(device_sn)
         except Exception as e:
             return {"ok": False, "error": str(e), "packs": []}
-        return {"ok": True, "device_sn": device_sn, "packs": packs}
+        state.battery_packs_by_sn[device_sn] = packs
+        state.packs_ts_by_sn[device_sn] = time.time()
+        return {"ok": True, "device_sn": device_sn, "packs": packs,
+                "fetched_at": state.packs_ts_by_sn[device_sn],
+                "source": "http"}
 
     if method == "set_output":
         # Output toggles go over MQTT (emqx.jackeryapp.com). The cloud_client

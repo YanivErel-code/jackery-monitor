@@ -61,11 +61,11 @@ WEB_DIR = Path(__file__).parent / "web"
 LIVE_CHART_HOURS = 6
 LIVE_CHART_INTERVAL_S = 60
 HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
-# Per-expansion-battery refresh cadence. The cloud's `updateTime` field
-# moves at roughly 30-60s resolution so anything faster is wasted; aligned
-# with the main property poll cadence so each per-device poll iteration
-# refreshes packs alongside main telemetry.
-BATTERY_PACK_REFRESH_S = 60
+# Per-expansion-battery refresh cadence. The bridge subscribes to MQTT
+# SubDevicePropertyChange pushes and serves packs from memory, so the
+# server can poll the bridge every iteration cheaply — there's no cloud
+# HTTP cost. Setting this to 0 means "every poll iteration".
+BATTERY_PACK_REFRESH_S = 0
 
 
 # ---------- app state ----------

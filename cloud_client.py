@@ -110,6 +110,9 @@ class JackeryCloudClient:
         # Lazy-initialised MQTT publisher (paho-mqtt). Connects on first
         # publish_command and stays alive until the cloud client closes.
         self._mqtt = None  # type: ignore[var-annotated]
+        # Per-device pack cache populated from MQTT SubDevicePropertyChange
+        # pushes. Fresher than any HTTP call — short-circuits fetch_battery_packs.
+        self.pack_cache_by_sn: dict[str, list[dict[str, Any]]] = {}
 
     # ---- internals ----
     def _generate_mac_id(self) -> str:
@@ -337,7 +340,15 @@ class JackeryCloudClient:
             ot = output temp / 999 sentinel for "unknown"
         Returns the list sorted by deviceOrder so packs render in the same
         order the iOS app shows them.
+
+        Short-circuits to the MQTT push cache when available — MQTT
+        SubDevicePropertyChange messages carry the same shape in real
+        time, so once the broker has delivered at least one update,
+        the HTTP endpoint is redundant.
         """
+        cached = self.pack_cache_by_sn.get(device_sn)
+        if cached:
+            return cached
         data = await self._authed_get("/v1/device/battery/pack/list",
                                       {"deviceSn": device_sn})
         if data.get("code") != 0:
@@ -455,7 +466,8 @@ class JackeryCloudClient:
         log.info("MQTT connected to %s:%d as %s", self.BROKER_HOST, self.BROKER_PORT, client_id)
         return client
 
-    async def subscribe_realtime(self, on_property_change) -> None:
+    async def subscribe_realtime(self, on_property_change,
+                                 on_pack_change=None) -> None:
         """Subscribe to MQTT property-change pushes from the device.
 
         `on_property_change(body)` is an async callable; we schedule it on
@@ -490,6 +502,22 @@ class JackeryCloudClient:
                 log.warning("MQTT parse error on %s: %s", msg.topic, e)
                 return
             mt = payload.get("messageType")
+            # SubDevicePropertyChange pushes per-expansion-battery state
+            # (rb/ip/op/it/ec per pack) in the same shape as the HTTP
+            # /v1/device/battery/pack/list endpoint, but in real time.
+            # Forward to a separate callback so the bridge can update
+            # its pack cache without going back to HTTP.
+            if mt == "SubDevicePropertyChange" and on_pack_change is not None:
+                body = payload.get("body") or {}
+                packs = body.get("subDevices") if isinstance(body, dict) else None
+                parent_sn = payload.get("deviceSn")
+                if isinstance(packs, list) and parent_sn:
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            on_pack_change(packs, parent_sn), loop)
+                    except RuntimeError:
+                        pass
+                return
             if mt != "DevicePropertyChange":
                 return  # ignore notices/alerts/online-changes — telemetry only
             body = payload.get("body")
