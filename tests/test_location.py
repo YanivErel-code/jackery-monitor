@@ -59,3 +59,22 @@ def test_clear_removes_stored_location(tmp_path, monkeypatch):
     assert loc.get() is None
     # idempotent — calling clear again should still report success
     assert loc.clear() is True
+
+
+def test_update_timezone_merges_offset(tmp_path, monkeypatch):
+    loc = _fresh_location(monkeypatch, tmp_path)
+    loc.set(37.7749, -122.4194)
+    # Open-Meteo would return -25200 for PDT (UTC-7).
+    assert loc.update_timezone(-25200, "America/Los_Angeles") is True
+    got = loc.get()
+    assert got["utc_offset_seconds"] == -25200
+    assert got["timezone"] == "America/Los_Angeles"
+    # lat/lon untouched
+    assert abs(got["latitude"] - 37.7749) < 1e-6
+
+
+def test_update_timezone_noop_when_no_location(tmp_path, monkeypatch):
+    loc = _fresh_location(monkeypatch, tmp_path)
+    # No prior set() — nothing to merge into.
+    assert loc.update_timezone(-25200, "America/Los_Angeles") is False
+    assert loc.get() is None
