@@ -989,7 +989,7 @@ async def api_forecast(device_sn: str | None = None):
         "low_battery_threshold": user_settings.get("low_battery_threshold"),
         "main_soc_pct": main_soc,
         "system_soc_pct": starting_soc,
-        "pack_count": len(state.battery_packs or []),
+        "pack_count": len(state.battery_packs_by_sn.get(device_sn, [])),
         **result,
         "configured": True,
     }
@@ -1219,13 +1219,21 @@ async def api_devices_battery_packs(device_sn: str | None = None,
     rpc_err = (result or {}).get("error")
     if rpc_err:
         log.warning("battery_packs API RPC returned error: %s", rpc_err)
-    if device_sn == active_sn and packs:
-        state.battery_packs = packs
-        state.last_packs_ts = time.time()
+    # Cache the result regardless of which device — switching back later
+    # should hit the cache instantly. Only record empty results explicitly
+    # (no_packs sentinel) so the cache doesn't claim a device has no packs
+    # just because the RPC failed.
+    if packs:
+        state.battery_packs_by_sn[device_sn] = packs
+        state.last_packs_ts_by_sn[device_sn] = time.time()
         try:
             state.energy.record_battery_packs(device_sn, packs)
         except Exception as e:
             log.debug("record_battery_packs failed: %s", e)
+    elif not rpc_err:
+        # Successful RPC with empty packs = device has no expansion packs.
+        state.battery_packs_by_sn[device_sn] = []
+        state.last_packs_ts_by_sn[device_sn] = time.time()
     return {"device_sn": device_sn,
             "packs": packs,
             "main_soc_pct": main_pct,

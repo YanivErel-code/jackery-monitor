@@ -1488,8 +1488,21 @@ function applyStatus(s) {
   // Telemetry
   const t = s.telemetry || {};
   if (t.battery_percent != null) {
-    animateNumber($('battery-pct'), t.battery_percent);
-    $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
+    // Prefer the server-computed system SOC when packs are attached,
+    // so the SOC card lands on the right number on the very first
+    // paint (no main → system flash). Falls back to the raw main %
+    // for single-unit devices where system_soc_pct is absent.
+    const headlineSoc = t.system_soc_pct != null
+      ? t.system_soc_pct
+      : t.battery_percent;
+    animateNumber($('battery-pct'), headlineSoc);
+    $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, headlineSoc))}%`;
+    // Single source of truth for the temp segment in the SOC card meta:
+    // hide it whenever the telemetry tells us packs are present (the
+    // host unit's temp moves to the Main row in the pack card). Show
+    // it on single-unit devices where system_soc_pct is absent.
+    const tempGroup = $('battery-temp-group');
+    if (tempGroup) tempGroup.hidden = t.system_soc_pct != null;
     // EOD pill follows live SOC drift so it doesn't go stale between refreshes.
     maybeRefitEodOnDrift(t.battery_percent);
     // Re-render the pack card with the live main % — pack values lag
@@ -2396,17 +2409,14 @@ function renderBatteryPacks() {
   const err = window._cachedPacksError;
   const isNoPackDevice = window._cachedNoPacks === true;
 
-  const tempGroup = $('battery-temp-group');
-
   // Device with no expansion packs (e.g. HomePower 3000): hide the
   // card cleanly and clear any system-SOC overlay so the SOC card
-  // shows the main reading directly. The temp segment in the SOC
-  // meta is the only place the temp is shown for these devices.
+  // shows the main reading directly. Temp segment visibility is
+  // managed centrally in applyStatus().
   if (isNoPackDevice && !packs.length && !err) {
     window._systemSoc = null;
     window._mainSoc = null;
     card.hidden = true;
-    if (tempGroup) tempGroup.hidden = false;
     return;
   }
 
@@ -2417,7 +2427,6 @@ function renderBatteryPacks() {
       card.hidden = false;
     } else {
       card.hidden = true;
-      if (tempGroup) tempGroup.hidden = false;
     }
     return;
   }
@@ -2434,11 +2443,6 @@ function renderBatteryPacks() {
   window._mainSoc = mainPct;
   applySystemSocOverlay();
 
-  // The Main unit's temp is shown in the Main row here, so hide the
-  // duplicate from the SOC card meta line. Single-unit devices (no
-  // packs) keep their temp in the SOC card — handled by the no-packs
-  // branch above which un-hides the segment.
-  if (tempGroup) tempGroup.hidden = true;
 
   const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
   const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
