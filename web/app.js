@@ -2396,13 +2396,17 @@ function renderBatteryPacks() {
   const err = window._cachedPacksError;
   const isNoPackDevice = window._cachedNoPacks === true;
 
+  const tempGroup = $('battery-temp-group');
+
   // Device with no expansion packs (e.g. HomePower 3000): hide the
   // card cleanly and clear any system-SOC overlay so the SOC card
-  // shows the main reading directly.
+  // shows the main reading directly. The temp segment in the SOC
+  // meta is the only place the temp is shown for these devices.
   if (isNoPackDevice && !packs.length && !err) {
     window._systemSoc = null;
     window._mainSoc = null;
     card.hidden = true;
+    if (tempGroup) tempGroup.hidden = false;
     return;
   }
 
@@ -2413,6 +2417,7 @@ function renderBatteryPacks() {
       card.hidden = false;
     } else {
       card.hidden = true;
+      if (tempGroup) tempGroup.hidden = false;
     }
     return;
   }
@@ -2421,12 +2426,19 @@ function renderBatteryPacks() {
     window._lastStatus?.battery_percent ??
     window._cachedPacksMainSoc ??
     null;
+  const mainTempC = window._lastStatus?.battery_temp_c ?? null;
   const mainWh = window._capacityOverrideWh || MAIN_DEFAULT_WH;
   const systemSoc = computeSystemSoc(mainPct, packs, mainWh);
   window._mainWh = mainWh;
   window._systemSoc = systemSoc;
   window._mainSoc = mainPct;
   applySystemSocOverlay();
+
+  // The Main unit's temp is shown in the Main row here, so hide the
+  // duplicate from the SOC card meta line. Single-unit devices (no
+  // packs) keep their temp in the SOC card — handled by the no-packs
+  // branch above which un-hides the segment.
+  if (tempGroup) tempGroup.hidden = true;
 
   const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
   const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
@@ -2440,7 +2452,7 @@ function renderBatteryPacks() {
       soc: mainPct,
       flow: '',
       flowClass: 'flow-idle',
-      temp: '',
+      temp: mainTempC != null ? `${Math.round(mainTempC)}°C` : '',
       label: 'Main',
       snTitle: 'Host unit (cloud-reported SOC)',
       isMain: true,
