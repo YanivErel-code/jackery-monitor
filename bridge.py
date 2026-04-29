@@ -853,6 +853,19 @@ async def handle(method: str, params: dict) -> dict:
             limit, since = 100, 0.0
         return {"ok": True, "events": get_events(limit=limit, since=since)}
 
+    if method == "get_raw_props":
+        # Diagnostic dump of the raw cloud-property dict for a device.
+        # Returns whatever keys the cloud has pushed/polled — useful for
+        # identifying fields we don't yet parse (extension batteries,
+        # per-PV solar, etc.).
+        device_sn = (params.get("device_sn") or "").strip()
+        if not device_sn:
+            device_sn = (state.cloud_device or {}).get("device_sn", "")
+        if not device_sn:
+            return {"ok": False, "error": "no device_sn", "props": {}}
+        return {"ok": True, "device_sn": device_sn,
+                "props": dict(state.props_raw_by_sn.get(device_sn, {}))}
+
     if method == "set_output":
         # Output toggles go over MQTT (emqx.jackeryapp.com). The cloud_client
         # publishes the command and waits for the broker PUBACK; the actual

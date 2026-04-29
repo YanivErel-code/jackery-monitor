@@ -42,6 +42,30 @@ def test_record_works_without_solar_arg_for_back_compat(db):
     assert all(r["solar_w"] == 0 for r in rows)
 
 
+def test_capacity_override_round_trip(db):
+    sn = "TEST-CAP"
+    db.upsert_device(sn, "Test 5000+B5000", 13, "Explorer 5000 Plus")
+    assert db.get_capacity_override(sn) is None
+    assert db.set_capacity_override(sn, 10080) is True
+    assert db.get_capacity_override(sn) == 10080
+    # Override surfaces in list_devices()
+    devs = db.list_devices()
+    me = next(d for d in devs if d["device_sn"] == sn)
+    assert me["capacity_wh_override"] == 10080
+    # Clear via None
+    assert db.set_capacity_override(sn, None) is True
+    assert db.get_capacity_override(sn) is None
+
+
+def test_capacity_override_rejects_out_of_range(db):
+    sn = "TEST-CAP-RANGE"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    assert db.set_capacity_override(sn, 100) is False     # too small
+    assert db.set_capacity_override(sn, 500_000) is False  # too large
+    assert db.set_capacity_override(sn, "abc") is False    # not a number
+    assert db.get_capacity_override(sn) is None
+
+
 def test_migration_adds_columns_to_pre_v0_1_db(tmp_path):
     """A DB created without solar_wh/last_solar_w should ALTER on open."""
     path = str(tmp_path / "old.db")

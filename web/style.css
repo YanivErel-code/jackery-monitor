@@ -522,6 +522,23 @@ main {
   letter-spacing: 0.05em;
 }
 
+/* Raw cloud-properties dump on the Device tab. Shown collapsed by
+   default; clicking "Show" expands it. */
+.raw-props {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ============== Switches ============== */
 .switches {
   display: grid;

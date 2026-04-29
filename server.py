@@ -632,7 +632,10 @@ async def api_forecast(device_sn: str | None = None):
         starting_soc = float(state.last_status["battery_percent"])
 
     model_code = getattr(state.device, "model_code", None) if state.device else None
-    capacity = forecaster.battery_capacity_wh(model_code)
+    # User-set capacity override takes priority over the model-code lookup.
+    # Used for setups with extension batteries stacked on the host unit.
+    override = state.energy.get_capacity_override(device_sn)
+    capacity = override if override else forecaster.battery_capacity_wh(model_code)
 
     # 14 days of hourly-bucketed history is plenty for both the regression and
     # the load profile.
@@ -681,6 +684,64 @@ def api_forecast_accuracy(device_sn: str | None = None):
         b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
         del b["sum_err"]
     return {"device_sn": device_sn, "samples": samples, "summary": summary}
+
+
+@app.get("/api/devices/capacity")
+def api_devices_capacity():
+    """List every recorded device with its current capacity (default vs
+    user override). Used by the Device tab to render the capacity editor."""
+    out = []
+    for d in state.energy.list_devices():
+        default_wh = forecaster.battery_capacity_wh(d.get("model_code"))
+        override = d.get("capacity_wh_override")
+        out.append({
+            "device_sn": d["device_sn"],
+            "name": d.get("name"),
+            "model_code": d.get("model_code"),
+            "default_capacity_wh": default_wh,
+            "capacity_wh_override": override,
+            "effective_capacity_wh": override if override else default_wh,
+        })
+    return {"devices": out}
+
+
+@app.post("/api/devices/capacity")
+async def api_devices_capacity_set(req: Request):
+    """Set or clear the manual total-capacity override for a device. Pass
+    `capacity_wh: null` (or omit) to clear; the forecast then falls back
+    to the model-default capacity."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    device_sn = (body or {}).get("device_sn")
+    if not device_sn:
+        raise HTTPException(status_code=400, detail="device_sn required")
+    raw = (body or {}).get("capacity_wh")
+    capacity_wh = None if raw in (None, "", 0) else raw
+    if not state.energy.set_capacity_override(device_sn, capacity_wh):
+        raise HTTPException(status_code=400, detail="capacity_wh out of range (500..200000) or device unknown")
+    return {"ok": True, "device_sn": device_sn,
+            "capacity_wh_override": state.energy.get_capacity_override(device_sn)}
+
+
+@app.get("/api/debug/raw_props")
+async def api_debug_raw_props(device_sn: str | None = None):
+    """Diagnostic dump of the raw cloud properties dict for a device.
+    Used to identify property keys we don't currently parse — extension-
+    battery state, per-PV-port solar, etc. Goes through the bridge RPC."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"error": "no device", "props": {}}
+    rpc = getattr(state.client, "_rpc", None)
+    if rpc is None:
+        return {"error": "bridge not available", "props": {}}
+    try:
+        result = await rpc("get_raw_props", device_sn=device_sn)
+    except Exception as e:
+        return {"error": str(e), "props": {}}
+    return {"device_sn": device_sn, "props": (result or {}).get("props", {})}
 
 
 @app.get("/api/location")

@@ -353,7 +353,96 @@ function switchTab(name) {
   if (name === 'settings') { loadSettings(); loadCostPlan(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') { loadAutomation(); }
+  if (name === 'device')   { loadDeviceCapacity(); }
 }
+
+// ============================================================
+// DEVICE TAB: capacity override + raw props viewer
+// ============================================================
+async function loadDeviceCapacity() {
+  try {
+    const r = await fetch('/api/devices/capacity');
+    if (!r.ok) return;
+    const j = await r.json();
+    const active = activeJackeryDevice();
+    const sn = active?.device_sn;
+    const dev = (j.devices || []).find(d => d.device_sn === sn) || (j.devices || [])[0];
+    if (!dev) return;
+    const inp = $('capacity-input');
+    const def = $('capacity-default');
+    if (def) def.textContent = `(device default: ${dev.default_capacity_wh} Wh)`;
+    if (inp) inp.value = dev.capacity_wh_override ?? '';
+    inp.dataset.deviceSn = dev.device_sn;
+  } catch (e) {
+    console.warn('capacity load failed', e);
+  }
+}
+
+document.getElementById('capacity-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const inp = $('capacity-input');
+  const status = $('capacity-status');
+  const sn = inp.dataset.deviceSn;
+  if (!sn) return;
+  const raw = inp.value.trim();
+  const capacity_wh = raw ? parseInt(raw, 10) : null;
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/devices/capacity', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_sn: sn, capacity_wh }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || ('HTTP ' + r.status));
+    }
+    status.textContent = 'Saved.';
+    setTimeout(() => { status.hidden = true; }, 2500);
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message || err}`;
+  }
+});
+
+$('capacity-clear')?.addEventListener('click', async () => {
+  const inp = $('capacity-input');
+  inp.value = '';
+  // Trigger the form's submit logic so the override gets cleared on the
+  // server side.
+  $('capacity-form').dispatchEvent(new Event('submit', { cancelable: true }));
+});
+
+$('raw-props-toggle')?.addEventListener('click', async () => {
+  const dump = $('raw-props-dump');
+  const btn  = $('raw-props-toggle');
+  if (!dump.hidden) {
+    dump.hidden = true;
+    btn.textContent = 'Show';
+    return;
+  }
+  dump.hidden = false;
+  btn.textContent = 'Refresh';
+  dump.textContent = 'Loading…';
+  try {
+    const r = await fetch('/api/debug/raw_props');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    if (j.error) {
+      dump.textContent = `Error: ${j.error}`;
+      return;
+    }
+    const props = j.props || {};
+    const keys = Object.keys(props).sort();
+    if (!keys.length) {
+      dump.textContent = '(no properties yet — wait for the bridge to poll)';
+      return;
+    }
+    dump.textContent = keys.map(k => `${k.padEnd(12)} = ${JSON.stringify(props[k])}`).join('\n');
+  } catch (e) {
+    dump.textContent = `Failed: ${e.message || e}`;
+  }
+});
 
 // ============================================================
 // AUTOMATION TAB

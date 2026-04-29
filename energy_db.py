@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS devices (
     model_code  INTEGER,
     model_name  TEXT,
     first_seen  INTEGER,
-    last_seen   INTEGER
+    last_seen   INTEGER,
+    capacity_wh_override INTEGER  -- user-set total capacity (e.g. with extension batteries); NULL = use model default
 );
 
 CREATE TABLE IF NOT EXISTS samples (
@@ -122,6 +123,12 @@ class EnergyDB:
                 c.execute("ALTER TABLE samples ADD COLUMN ac_input_wh REAL NOT NULL DEFAULT 0")
             if "last_ac_input_w" not in existing:
                 c.execute("ALTER TABLE samples ADD COLUMN last_ac_input_w INTEGER")
+            # devices table: capacity override (added in v0.2.0+ for users with
+            # extension batteries stacked on the 5000 Plus / etc.).
+            existing_dev = {row[1] for row in c.execute(
+                "PRAGMA table_info(devices)").fetchall()}
+            if "capacity_wh_override" not in existing_dev:
+                c.execute("ALTER TABLE devices ADD COLUMN capacity_wh_override INTEGER")
 
     # ---------- ingestion ----------
     def upsert_device(self, device_sn: str, name: str | None,
@@ -201,14 +208,46 @@ class EnergyDB:
         with self._conn() as c:
             rows = c.execute(
                 """SELECT device_sn, name, model_code, model_name,
-                          first_seen, last_seen
+                          first_seen, last_seen, capacity_wh_override
                    FROM devices ORDER BY last_seen DESC"""
             ).fetchall()
         return [
             {"device_sn": r[0], "name": r[1], "model_code": r[2],
-             "model_name": r[3], "first_seen": r[4], "last_seen": r[5]}
+             "model_name": r[3], "first_seen": r[4], "last_seen": r[5],
+             "capacity_wh_override": r[6]}
             for r in rows
         ]
+
+    def get_capacity_override(self, device_sn: str) -> int | None:
+        if not device_sn:
+            return None
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT capacity_wh_override FROM devices WHERE device_sn = ?",
+                (device_sn,),
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def set_capacity_override(self, device_sn: str,
+                              capacity_wh: int | None) -> bool:
+        """Set or clear the user's manual total-capacity override. Pass None
+        to clear (forecast falls back to the model-code default). Sanity
+        bounds: 500..200000 Wh — anything outside is rejected."""
+        if not device_sn:
+            return False
+        if capacity_wh is not None:
+            try:
+                capacity_wh = int(capacity_wh)
+            except (TypeError, ValueError):
+                return False
+            if not 500 <= capacity_wh <= 200_000:
+                return False
+        with self._conn() as c:
+            c.execute(
+                "UPDATE devices SET capacity_wh_override = ? WHERE device_sn = ?",
+                (capacity_wh, device_sn),
+            )
+        return True
 
     def totals(self, device_sn: str) -> dict:
         """Lifetime + windowed totals for a single device."""

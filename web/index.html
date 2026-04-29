@@ -322,6 +322,35 @@
 
       <section class="card device-card">
         <div class="card-header">
+          <h2>Battery capacity</h2>
+          <span id="capacity-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Override the total Wh capacity for this device — set this if you have <strong>extension batteries</strong> stacked on the host unit (e.g. 5000 Plus + 1× B5000+ = 10080 Wh). Used by the forecast SOC math; affects nothing the device itself reports.
+        </p>
+        <form id="capacity-form" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <label class="hint" for="capacity-input">Total capacity</label>
+          <input id="capacity-input" type="number" min="500" max="200000" step="1" placeholder="e.g. 10080" class="device-select" style="width:140px" />
+          <small class="hint">Wh</small>
+          <span class="hint" id="capacity-default">(device default: —)</span>
+          <button class="btn btn-primary" type="submit">Save</button>
+          <button id="capacity-clear" class="btn btn-ghost" type="button">Clear override</button>
+        </form>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>Cloud properties (debug)</h2>
+          <button id="raw-props-toggle" class="btn btn-ghost" type="button">Show</button>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Raw key/value dump from the Jackery cloud for the active device. Useful to spot keys we don't yet parse — extension-battery state, per-PV-port solar, etc.
+        </p>
+        <pre id="raw-props-dump" class="raw-props" hidden>—</pre>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
           <h2>Polling</h2>
         </div>
         <p class="hint" style="margin:6px 0 12px">
