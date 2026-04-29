@@ -1155,22 +1155,34 @@ async def api_devices_battery_packs(device_sn: str | None = None,
     — useful for a manual refresh button in the UI."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
+    diag = {
+        "active_sn": state.device.device_sn if state.device else None,
+        "cached_count": len(state.battery_packs or []),
+        "last_packs_ts": state.last_packs_ts,
+        "backend": state.backend,
+    }
     if not device_sn:
-        return {"error": "no device", "packs": []}
-    active_sn = state.device.device_sn if state.device else None
+        return {"error": "no device", "packs": [], "_diag": diag}
+    active_sn = diag["active_sn"]
     if not fresh and device_sn == active_sn and state.battery_packs:
         return {"device_sn": device_sn,
                 "packs": state.battery_packs,
                 "fetched_at": state.last_packs_ts,
-                "cached": True}
+                "cached": True,
+                "_diag": diag}
     rpc = getattr(state.client, "_rpc", None)
     if rpc is None:
-        return {"error": "bridge not available", "packs": []}
+        return {"error": "bridge not available (backend=" + state.backend + ")",
+                "packs": [], "_diag": diag}
     try:
         result = await rpc("get_battery_packs", device_sn=device_sn)
     except Exception as e:
-        return {"error": str(e), "packs": []}
+        log.warning("battery_packs API RPC failed: %s", e)
+        return {"error": f"rpc failed: {e}", "packs": [], "_diag": diag}
     packs = (result or {}).get("packs", [])
+    rpc_err = (result or {}).get("error")
+    if rpc_err:
+        log.warning("battery_packs API RPC returned error: %s", rpc_err)
     if device_sn == active_sn and packs:
         state.battery_packs = packs
         state.last_packs_ts = time.time()
@@ -1182,7 +1194,8 @@ async def api_devices_battery_packs(device_sn: str | None = None,
             "packs": packs,
             "fetched_at": time.time(),
             "cached": False,
-            "error": (result or {}).get("error")}
+            "error": rpc_err,
+            "_diag": diag}
 
 
 @app.get("/api/location")

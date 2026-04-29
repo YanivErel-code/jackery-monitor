@@ -2363,15 +2363,22 @@ async function fetchBatteryPacks() {
   if (!card || !list) return;
   try {
     const r = await fetch('/api/devices/battery_packs');
-    if (!r.ok) { card.hidden = true; return; }
-    const j = await r.json();
+    const j = r.ok ? await r.json() : { error: `HTTP ${r.status}` };
     const packs = Array.isArray(j.packs) ? j.packs : [];
+    // Log every response for diagnosis. If the card stays empty, this
+    // shows up in the browser console with the full payload.
+    console.debug('battery_packs response', j);
     if (!packs.length) {
-      // Reveal the card with a status line if the cloud returned an
-      // error — invisible failure is the worst kind. Hide it cleanly
-      // when we know there are no packs (single-unit setup).
-      if (j.error) {
-        if (summary) summary.textContent = `error: ${j.error}`;
+      // Always reveal the card so silent failures aren't invisible.
+      // Single-unit setups (no packs ever recorded) are the only case
+      // where it's safe to hide — the server signals this by returning
+      // packs: [] with no error AND no recorded snapshot ever.
+      const hasEverHadPacks = j.cached === true || j.fetched_at;
+      if (j.error || hasEverHadPacks) {
+        const reason = j.error
+          ? `error: ${j.error}`
+          : 'awaiting first cloud fetch…';
+        if (summary) summary.textContent = reason;
         list.innerHTML = '';
         card.hidden = false;
       } else {
