@@ -392,7 +392,13 @@ main {
 .battery-card.charging::after    { --bat-glow: rgba(74,222,128,.20); }
 .battery-card.discharging::after { --bat-glow: rgba(56,189,248,.16); }
 .battery-card.low::after         { --bat-glow: rgba(239,68,68,.22); }
-.battery-card > *:not(.grab-handle) { position: relative; z-index: 1; }
+.battery-card > * { position: relative; z-index: 1; }
+/* Targeted overrides for the children that MUST stay absolutely
+   positioned. Each `.battery-card > .X` selector beats the generic
+   `> *` rule on specificity (0,0,2,0 vs 0,0,1,0), and z-index keeps
+   them above the radial-glow ::after. */
+.battery-card > .grab-handle  { position: absolute; z-index: 5; }
+.battery-card > .eod-forecast { position: absolute; z-index: 2; }
 
 .battery-pct {
   font-family: var(--font-mono);
