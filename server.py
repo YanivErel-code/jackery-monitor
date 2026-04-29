@@ -66,6 +66,10 @@ HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
 # server can poll the bridge every iteration cheaply — there's no cloud
 # HTTP cost. Setting this to 0 means "every poll iteration".
 BATTERY_PACK_REFRESH_S = 0
+# DB persistence cadence — writing every iteration would be 4 rows/min
+# for no analytical gain; daily-learning queries only need ~minute
+# resolution. Cache stays fresh; only the DB write is throttled.
+BATTERY_PACK_DB_PERSIST_S = 300
 
 
 # ---------- app state ----------
@@ -100,6 +104,8 @@ class AppState:
         # to hide the card for them.
         self.battery_packs_by_sn: dict[str, list[dict]] = {}
         self.last_packs_ts_by_sn: dict[str, float] = {}
+        # Last DB-persist timestamp, separate from in-memory cache refresh.
+        self.last_packs_db_ts_by_sn: dict[str, float] = {}
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
@@ -263,7 +269,13 @@ async def poll_loop() -> None:
                             elif packs:
                                 state.battery_packs_by_sn[dev_sn] = packs
                                 state.last_packs_ts_by_sn[dev_sn] = ts
-                                state.energy.record_battery_packs(dev_sn, packs, int(ts))
+                                # DB persist throttled separately — the cache
+                                # is fresh on every iteration but the daily-
+                                # learning trace only needs minute-resolution.
+                                last_db = state.last_packs_db_ts_by_sn.get(dev_sn, 0.0)
+                                if ts - last_db >= BATTERY_PACK_DB_PERSIST_S:
+                                    state.energy.record_battery_packs(dev_sn, packs, int(ts))
+                                    state.last_packs_db_ts_by_sn[dev_sn] = ts
                             else:
                                 # Empty list with no error means the device
                                 # has no expansion packs (e.g. HomePower 3000).
@@ -491,6 +503,10 @@ def serialize_status() -> dict[str, Any]:
         "device": device_info,
         "last_update_ts": state.last_update_ts,
         "telemetry": telemetry,
+        # Piggy-back packs on the WS broadcast so per-pack rows update at
+        # the same cadence as the SOC card. Empty list for devices without
+        # packs (e.g. HomePower 3000) — UI hides the card on empty.
+        "battery_packs": active_packs,
         "history": list(state.history),
         "mock_mode": state.backend == "mock",
         "backend": state.backend,

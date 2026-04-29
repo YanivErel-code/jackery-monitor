@@ -1453,6 +1453,7 @@ function applyStatus(s) {
     fetchEodForecast();
     // Pack list is per-device — drop the previous device's cache so we
     // don't briefly show the old packs while the new fetch is in flight.
+    // The next WS tick will populate cachedPacks from s.battery_packs.
     window._cachedPacks = [];
     window._cachedPackDeviceSn = null;
     window._cachedPacksMainSoc = null;
@@ -1461,7 +1462,16 @@ function applyStatus(s) {
     window._systemSoc = null;
     window._mainSoc = null;
     renderBatteryPacks();
-    fetchBatteryPacks();
+  }
+
+  // Pack data piggy-backs on the WS payload — the bridge has it pushed
+  // from MQTT in real time, so this updates per-pack rows at the same
+  // cadence as the SOC card (no separate HTTP polling needed).
+  if (Array.isArray(s.battery_packs)) {
+    window._cachedPacks = s.battery_packs;
+    window._cachedPacksMainSoc = s.telemetry?.main_soc_pct ?? null;
+    window._cachedPacksError = null;
+    window._cachedNoPacks = s.battery_packs.length === 0;
   }
 
   // Connection pill
