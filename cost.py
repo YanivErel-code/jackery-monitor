@@ -7,11 +7,17 @@ Plan storage: /data/cost.json. Two shapes supported:
   - Flat: {"type": "flat", "rate_per_kwh": 0.30, "currency": "USD"}
   - TOU:  {"type": "tou", "currency": "USD",
            "tou_rates": [{"start_hour": 16, "end_hour": 21,
-                          "rate": 0.62, "label": "peak"}, ...]}
+                          "rate": 0.62, "label": "peak",
+                          "months": [6, 7, 8, 9]}, ...]}
 
 TOU slots are inclusive of start_hour, exclusive of end_hour, evaluated
 in the device's local timezone (from /data/location.json). Slots may
 wrap midnight (e.g. start=23, end=7 means 23:00-07:00).
+
+The optional `months` field is a list of 1-12 month numbers; the slot
+only applies during those months. Omitting `months` (or empty list)
+means year-round. Used to model summer/winter seasons on plans like
+PG&E EV2-A where peak rates roughly halve in winter.
 
 Savings model — output-based ("displaced grid"):
   saved      = output_kWh * rate(at_time)   # what grid would have cost
@@ -60,13 +66,33 @@ PRESETS: dict[str, dict[str, Any]] = {
             "type": "tou",
             "currency": "USD",
             "tou_rates": [
-                # Peak: 4pm-9pm, ~$0.61/kWh
-                {"start_hour": 16, "end_hour": 21, "rate": 0.61, "label": "peak"},
-                # Partial-peak: 3pm-4pm and 9pm-12am, ~$0.51/kWh
-                {"start_hour": 15, "end_hour": 16, "rate": 0.51, "label": "partial-peak"},
-                {"start_hour": 21, "end_hour": 24, "rate": 0.51, "label": "partial-peak"},
-                # Off-peak: 12am-3pm, ~$0.31/kWh
-                {"start_hour": 0, "end_hour": 15, "rate": 0.31, "label": "off-peak"},
+                # SUMMER (Jun-Sep): peak rates much higher. All values
+                # approximate; user must edit to match their actual bill.
+                {"start_hour": 16, "end_hour": 21, "rate": 0.61,
+                 "label": "summer peak",
+                 "months": [6, 7, 8, 9]},
+                {"start_hour": 15, "end_hour": 16, "rate": 0.51,
+                 "label": "summer partial-peak",
+                 "months": [6, 7, 8, 9]},
+                {"start_hour": 21, "end_hour": 24, "rate": 0.51,
+                 "label": "summer partial-peak",
+                 "months": [6, 7, 8, 9]},
+                {"start_hour": 0, "end_hour": 15, "rate": 0.31,
+                 "label": "summer off-peak",
+                 "months": [6, 7, 8, 9]},
+                # WINTER (Oct-May): same windows, lower peak/partial-peak.
+                {"start_hour": 16, "end_hour": 21, "rate": 0.49,
+                 "label": "winter peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 15, "end_hour": 16, "rate": 0.46,
+                 "label": "winter partial-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 21, "end_hour": 24, "rate": 0.46,
+                 "label": "winter partial-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 0, "end_hour": 15, "rate": 0.31,
+                 "label": "winter off-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
             ],
         },
     },
@@ -76,9 +102,23 @@ PRESETS: dict[str, dict[str, Any]] = {
             "type": "tou",
             "currency": "USD",
             "tou_rates": [
-                {"start_hour": 16, "end_hour": 21, "rate": 0.49, "label": "peak"},
-                {"start_hour": 0, "end_hour": 16, "rate": 0.40, "label": "off-peak"},
-                {"start_hour": 21, "end_hour": 24, "rate": 0.40, "label": "off-peak"},
+                # Summer (Jun-Sep): higher peak.
+                {"start_hour": 16, "end_hour": 21, "rate": 0.55,
+                 "label": "summer peak", "months": [6, 7, 8, 9]},
+                {"start_hour": 0, "end_hour": 16, "rate": 0.42,
+                 "label": "summer off-peak", "months": [6, 7, 8, 9]},
+                {"start_hour": 21, "end_hour": 24, "rate": 0.42,
+                 "label": "summer off-peak", "months": [6, 7, 8, 9]},
+                # Winter (Oct-May).
+                {"start_hour": 16, "end_hour": 21, "rate": 0.45,
+                 "label": "winter peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 0, "end_hour": 16, "rate": 0.40,
+                 "label": "winter off-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 21, "end_hour": 24, "rate": 0.40,
+                 "label": "winter off-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
             ],
         },
     },
@@ -88,9 +128,23 @@ PRESETS: dict[str, dict[str, Any]] = {
             "type": "tou",
             "currency": "USD",
             "tou_rates": [
-                {"start_hour": 16, "end_hour": 21, "rate": 0.55, "label": "peak"},
-                {"start_hour": 0, "end_hour": 16, "rate": 0.30, "label": "off-peak"},
-                {"start_hour": 21, "end_hour": 24, "rate": 0.30, "label": "off-peak"},
+                # Summer (Jun-Sep).
+                {"start_hour": 16, "end_hour": 21, "rate": 0.55,
+                 "label": "summer peak", "months": [6, 7, 8, 9]},
+                {"start_hour": 0, "end_hour": 16, "rate": 0.30,
+                 "label": "summer off-peak", "months": [6, 7, 8, 9]},
+                {"start_hour": 21, "end_hour": 24, "rate": 0.30,
+                 "label": "summer off-peak", "months": [6, 7, 8, 9]},
+                # Winter (Oct-May): cheaper everything.
+                {"start_hour": 16, "end_hour": 21, "rate": 0.42,
+                 "label": "winter peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 0, "end_hour": 16, "rate": 0.27,
+                 "label": "winter off-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+                {"start_hour": 21, "end_hour": 24, "rate": 0.27,
+                 "label": "winter off-peak",
+                 "months": [1, 2, 3, 4, 5, 10, 11, 12]},
             ],
         },
     },
@@ -131,9 +185,31 @@ def _validate(plan: dict[str, Any]) -> dict[str, Any] | None:
                 return None
             if not 0 <= rate <= 5.0:
                 return None
-            label = str(raw.get("label") or "")[:32]
-            slots_out.append({"start_hour": s, "end_hour": e,
-                              "rate": rate, "label": label})
+            label = str(raw.get("label") or "")[:48]
+            # Optional `months` filter — list of 1-12. None / empty
+            # means year-round.
+            months_raw = raw.get("months")
+            months: list[int] | None = None
+            if months_raw:
+                if not isinstance(months_raw, list):
+                    return None
+                cleaned = []
+                for m in months_raw:
+                    try:
+                        mi = int(m)
+                    except (TypeError, ValueError):
+                        return None
+                    if not 1 <= mi <= 12:
+                        return None
+                    cleaned.append(mi)
+                months = sorted(set(cleaned))
+            slot_out: dict[str, Any] = {
+                "start_hour": s, "end_hour": e,
+                "rate": rate, "label": label,
+            }
+            if months:
+                slot_out["months"] = months
+            slots_out.append(slot_out)
         return {"type": "tou", "currency": currency, "tou_rates": slots_out}
     return None
 
@@ -193,7 +269,11 @@ def rate_at(plan: dict[str, Any], ts: float,
     if plan.get("type") == "tou":
         local = datetime.fromtimestamp(ts + tz_offset_seconds, tz=timezone.utc)
         hour = local.hour
+        month = local.month
         for slot in plan.get("tou_rates") or []:
+            slot_months = slot.get("months")
+            if slot_months and month not in slot_months:
+                continue  # different season
             if _hour_in_slot(hour, int(slot["start_hour"]),
                              int(slot["end_hour"])):
                 return float(slot["rate"])

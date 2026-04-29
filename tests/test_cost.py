@@ -101,6 +101,45 @@ def test_rate_at_tou_with_timezone_shift(tmp_path, monkeypatch):
     assert cost.rate_at(plan, ts_midnight_utc, tz_offset_seconds=-7 * 3600) == 0.61
 
 
+def test_rate_at_tou_seasonal_picks_summer_or_winter(tmp_path, monkeypatch):
+    """A slot with `months: [6,7,8,9]` only applies in summer; the
+    matching winter slot covers the rest of the year. PG&E EV2-A has
+    distinct rates per season — a Jul peak hour costs more than a Jan
+    peak hour."""
+    cost = _fresh_cost(tmp_path, monkeypatch)
+    plan = {
+        "type": "tou", "currency": "USD",
+        "tou_rates": [
+            {"start_hour": 16, "end_hour": 21, "rate": 0.61,
+             "label": "summer peak", "months": [6, 7, 8, 9]},
+            {"start_hour": 16, "end_hour": 21, "rate": 0.45,
+             "label": "winter peak", "months": [1, 2, 3, 4, 5, 10, 11, 12]},
+        ],
+    }
+    # 2024-07-15 17:00 UTC — Jul, peak hour → summer peak
+    import calendar
+    summer_ts = calendar.timegm((2024, 7, 15, 17, 0, 0, 0, 0, 0))
+    assert cost.rate_at(plan, summer_ts) == 0.61
+    # 2024-01-15 17:00 UTC — Jan, peak hour → winter peak
+    winter_ts = calendar.timegm((2024, 1, 15, 17, 0, 0, 0, 0, 0))
+    assert cost.rate_at(plan, winter_ts) == 0.45
+
+
+def test_rate_at_tou_year_round_slot_falls_through(tmp_path, monkeypatch):
+    """A slot without `months` applies in any month."""
+    cost = _fresh_cost(tmp_path, monkeypatch)
+    plan = {
+        "type": "tou", "currency": "USD",
+        "tou_rates": [
+            {"start_hour": 0, "end_hour": 24, "rate": 0.30, "label": "anytime"},
+        ],
+    }
+    import calendar
+    for month in (1, 5, 7, 11):
+        ts = calendar.timegm((2024, month, 1, 12, 0, 0, 0, 0, 0))
+        assert cost.rate_at(plan, ts) == 0.30
+
+
 def test_rate_at_tou_wraparound_slot(tmp_path, monkeypatch):
     """A slot like 22-06 wraps midnight; both 23:00 and 03:00 should match."""
     cost = _fresh_cost(tmp_path, monkeypatch)
