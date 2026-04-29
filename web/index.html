@@ -144,6 +144,13 @@
           <div class="kpi-sub">
             <span id="today-in-kwh">—</span><small>kWh charged</small>
           </div>
+          <div class="savings-row" id="today-savings-row" hidden>
+            <span class="sav-pos" title="Solar production valued at retail rate"><span id="today-solar-savings">—</span></span>
+            <span class="sav-sep">·</span>
+            <span class="sav-neg" title="Grid charging cost"><span id="today-grid-cost">—</span></span>
+            <span class="sav-sep">·</span>
+            <span class="sav-net" title="Net = solar saved - grid cost"><span id="today-net-savings">—</span></span>
+          </div>
         </section>
       </div>
 
@@ -204,6 +211,13 @@
           <div class="kpi-row">
             <div><div class="kpi-value"><span id="e-life-out">—</span><small>kWh</small></div><div class="kpi-sub">consumed</div></div>
             <div><div class="kpi-value alt"><span id="e-life-in">—</span><small>kWh</small></div><div class="kpi-sub">charged</div></div>
+          </div>
+          <div class="savings-row" id="lifetime-savings-row" hidden>
+            <span class="sav-pos"><span id="life-solar-savings">—</span></span>
+            <span class="sav-sep">·</span>
+            <span class="sav-neg"><span id="life-grid-cost">—</span></span>
+            <span class="sav-sep">·</span>
+            <span class="sav-net"><span id="life-net-savings">—</span></span>
           </div>
         </section>
       </div>
@@ -543,6 +557,48 @@
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center">
             <button class="btn btn-primary" type="submit">Save</button>
             <button id="settings-reload" class="btn btn-ghost" type="button">Reload</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>Electricity rates</h2>
+          <span id="cost-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 16px">
+          Used to convert kWh into dollar savings on the dashboard. Pick a preset or enter a flat rate.
+        </p>
+        <form id="cost-form">
+          <div class="settings-row">
+            <label class="settings-label" for="cost-preset">
+              <span class="settings-label-text">Plan</span>
+              <span class="settings-hint">Pick a built-in preset; choose Custom to enter your own rate(s).</span>
+            </label>
+            <div class="settings-control">
+              <select id="cost-preset"></select>
+            </div>
+          </div>
+          <div class="settings-row" id="cost-flat-row">
+            <label class="settings-label" for="cost-flat-rate">
+              <span class="settings-label-text">$/kWh (flat)</span>
+              <span class="settings-hint">A single rate that applies all day.</span>
+            </label>
+            <div class="settings-control">
+              <input id="cost-flat-rate" type="number" step="0.01" min="0" max="5" value="0.30" />
+            </div>
+          </div>
+          <div class="settings-row" id="cost-tou-row" hidden>
+            <label class="settings-label" for="cost-tou-summary">
+              <span class="settings-label-text">TOU schedule</span>
+              <span class="settings-hint">Read-only summary of the active TOU rate slots.</span>
+            </label>
+            <div class="settings-control">
+              <pre id="cost-tou-summary" class="cost-tou-summary"></pre>
+            </div>
+          </div>
+          <div style="margin-top:16px; display:flex; gap:8px; align-items:center">
+            <button class="btn btn-primary" type="submit">Save</button>
           </div>
         </form>
       </section>

@@ -48,6 +48,10 @@ ignore = [
     # Storing the asyncio.create_task return value — fire-and-forget
     # is intentional in our poll loops.
     "RUF006",
+    # `from datetime import UTC` is py311+ only. The container runs 3.11
+    # but local pytest runs whatever the dev box has (often 3.9). Stick
+    # to the broadly-compatible `timezone.utc` form.
+    "UP017",
 ]
 
 [tool.ruff.lint.per-file-ignores]
