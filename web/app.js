@@ -1106,6 +1106,8 @@ function applyStatus(s) {
   if (t.battery_percent != null) {
     animateNumber($('battery-pct'), t.battery_percent);
     $('battery-bar-fill').style.width = `${Math.max(0, Math.min(100, t.battery_percent))}%`;
+    // EOD pill follows live SOC drift so it doesn't go stale between refreshes.
+    maybeRefitEodOnDrift(t.battery_percent);
   }
   // Battery time label. The Jackery cloud sends two fields:
   //   time_to_full_h     -> ETA to 100% when the unit is charging
@@ -1804,13 +1806,24 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-// "At sunrise" badge on the battery card — predicted SOC at the moment
-// just before solar kicks in tomorrow morning (the overnight low).
-// Refit hourly. Hidden if location is unset or forecast otherwise
-// unavailable.
+// EOD-pill: predicted SOC at the next sun phase boundary.
+//   • During daytime (solar > 0 right now)  → "At sunset" — the SOC at
+//     the last daylight hour today (just before solar drops to 0).
+//   • During nighttime (solar = 0 right now) → "At sunrise" — the SOC at
+//     the last dark hour tonight (just before solar returns).
+// Refit every 30 min via setInterval, OR opportunistically when the live
+// telemetry shows the actual SOC has drifted >1pp from the value the
+// last forecast was anchored on. Drift refits are rate-limited to 5 min
+// minimum spacing so we don't hammer /api/forecast on every WS tick.
+let _eodAnchorSOC = null;
+let _eodLastFetchAt = 0;
+const EOD_DRIFT_THRESHOLD_PCT = 1.0;
+const EOD_MIN_REFRESH_INTERVAL_MS = 5 * 60_000;
+
 async function fetchEodForecast() {
   const el = $('eod-forecast');
   if (!el) return;
+  _eodLastFetchAt = Date.now();
   try {
     const r = await fetch('/api/forecast');
     if (!r.ok) { el.hidden = true; return; }
@@ -1819,13 +1832,23 @@ async function fetchEodForecast() {
       el.hidden = true;
       return;
     }
-    // Walk forward through the forecast: skip any current daylight, then
-    // skip the night hours, then take the entry RIGHT BEFORE solar
-    // returns. That entry's predicted_soc is the overnight low.
     const fc = j.forecast;
+    // The first forecast hour represents "now-ish"; its solar tells us
+    // whether we're currently in daylight or darkness.
+    const isDayNow = (fc[0]?.solar_w || 0) > 0;
     let i = 0;
-    while (i < fc.length && (fc[i].solar_w || 0) > 0) i++;     // skip today's sun
-    while (i < fc.length && (fc[i].solar_w || 0) <= 0) i++;    // skip the night
+    let label;
+    if (isDayNow) {
+      // Walk forward to the first night hour. fc[i-1] is the last
+      // daylight hour = SOC at sunset.
+      while (i < fc.length && (fc[i].solar_w || 0) > 0) i++;
+      label = 'At sunset';
+    } else {
+      // Walk forward to the next daylight hour. fc[i-1] is the last
+      // dark hour = SOC at sunrise (overnight low).
+      while (i < fc.length && (fc[i].solar_w || 0) <= 0) i++;
+      label = 'At sunrise';
+    }
     if (i === 0 || i >= fc.length) {
       el.hidden = true;
       return;
@@ -1835,10 +1858,14 @@ async function fetchEodForecast() {
       el.hidden = true;
       return;
     }
+    const labelEl = el.querySelector('.eod-label');
+    if (labelEl) labelEl.textContent = label;
+
     const pct = $('eod-pct');
     const trend = $('eod-trend');
     pct.textContent = Math.round(best.predicted_soc);
     const start = j.starting_soc_pct ?? best.predicted_soc;
+    _eodAnchorSOC = start;
     const delta = best.predicted_soc - start;
     trend.classList.remove('up', 'down');
     if (Math.abs(delta) < 1) {
@@ -1856,6 +1883,16 @@ async function fetchEodForecast() {
   } catch (e) {
     console.warn('EOD forecast fetch failed:', e);
   }
+}
+
+// Called from applyStatus() on every WS telemetry tick. If the actual
+// SOC has drifted enough from the last forecast's anchor, refit so the
+// pill stays meaningful between scheduled refreshes.
+function maybeRefitEodOnDrift(currentSocPct) {
+  if (_eodAnchorSOC == null || currentSocPct == null) return;
+  if (Date.now() - _eodLastFetchAt < EOD_MIN_REFRESH_INTERVAL_MS) return;
+  if (Math.abs(currentSocPct - _eodAnchorSOC) < EOD_DRIFT_THRESHOLD_PCT) return;
+  fetchEodForecast();
 }
 
 function drawForecastChart(j) {
@@ -1987,7 +2024,7 @@ function drawForecastChart(j) {
   // EOD forecast badge on the battery card: populate once on boot, then
   // refit hourly (weather forecast itself only updates ~hourly).
   if (ok) fetchEodForecast();
-  setInterval(fetchEodForecast, 60 * 60_000);
+  setInterval(fetchEodForecast, 30 * 60_000);
 
   // Poll /api/status every 2s as a safety net in case the WebSocket lags
   // or drops a frame. The WS still pushes telemetry as it arrives — this
