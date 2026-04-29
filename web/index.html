@@ -89,9 +89,11 @@
 
     <!-- ============== LIVE TAB ============== -->
     <section id="tab-live" class="tab-panel">
-      <!-- Hero: battery + key KPIs -->
-      <div class="grid hero-grid">
-        <section id="battery-card" class="card battery-card has-accent">
+      <!-- Hero: battery + key KPIs. Cards are drag-reorderable on
+           desktop; the order persists per-browser via localStorage. -->
+      <div id="hero-grid" class="grid hero-grid">
+        <section id="battery-card" class="card battery-card has-accent" data-card="battery">
+          <span class="grab-handle" aria-label="Drag to reorder" title="Drag to reorder"></span>
           <div class="card-eyebrow">
             <span>State of charge</span>
             <span id="source-badge" class="pill pill-source">—</span>
@@ -116,7 +118,8 @@
           </div>
         </section>
 
-        <section class="card kpi-card power-flow has-accent">
+        <section class="card kpi-card power-flow has-accent" data-card="power-flow">
+          <span class="grab-handle" aria-label="Drag to reorder" title="Drag to reorder"></span>
           <div class="card-eyebrow"><span>Power flow</span></div>
           <div class="power-flow-grid">
             <div class="pf-side pf-out">
@@ -141,7 +144,8 @@
           </div>
         </section>
 
-        <section class="card kpi-card today has-accent">
+        <section class="card kpi-card today has-accent" data-card="today">
+          <span class="grab-handle" aria-label="Drag to reorder" title="Drag to reorder"></span>
           <div class="card-eyebrow"><span>Today</span></div>
           <div class="kpi-value">
             <span id="today-out-kwh">—</span><small>kWh consumed</small>
@@ -645,6 +649,7 @@
     Energy persisted in SQLite
   </footer>
 
+  <script src="/static/sortable.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -2382,10 +2382,53 @@ function drawForecastChart(j) {
 // ============================================================
 // BOOT
 // ============================================================
+// ============================================================
+// HERO CARD REORDER (drag-and-drop, persisted per-browser)
+// ============================================================
+const HERO_ORDER_KEY = 'jackery-hero-order';
+
+function applyHeroOrder() {
+  const grid = $('hero-grid');
+  if (!grid) return;
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(HERO_ORDER_KEY) || '[]'); }
+  catch { return; }
+  if (!Array.isArray(saved) || !saved.length) return;
+  // Reorder DOM children to match saved order. Unknown card IDs are
+  // skipped; new cards we haven't seen before fall to the end.
+  for (const id of saved) {
+    const el = grid.querySelector(`[data-card="${id}"]`);
+    if (el) grid.appendChild(el);
+  }
+}
+
+function initHeroSortable() {
+  const grid = $('hero-grid');
+  if (!grid || typeof Sortable === 'undefined') return;
+  Sortable.create(grid, {
+    handle: '.grab-handle',  // drag only via the handle so card content stays interactive
+    animation: 180,
+    ghostClass: 'sortable-ghost',
+    dragClass: 'sortable-drag',
+    delay: 100,              // long-press delay on touch
+    delayOnTouchOnly: true,  // mouse drags fire instantly; touch needs a brief hold
+    touchStartThreshold: 5,
+    onEnd: () => {
+      const ids = [...grid.querySelectorAll('[data-card]')].map(c => c.dataset.card);
+      try { localStorage.setItem(HERO_ORDER_KEY, JSON.stringify(ids)); } catch {}
+    },
+  });
+}
+
 (async function boot() {
+  // Restore card order BEFORE first paint so the user doesn't see a flash
+  // of the default arrangement.
+  applyHeroOrder();
+
   const ok = await checkAuth();
   // Always start the WS — server returns whatever it has, even if cloud is logging in
   connectWs();
+  initHeroSortable();
 
   // Pre-load history so the Live chart and Energy tab have data immediately
   // (otherwise the user has to switch tabs once before history populates).
