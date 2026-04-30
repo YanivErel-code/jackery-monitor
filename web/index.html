@@ -439,6 +439,24 @@
         </form>
       </section>
 
+      <!-- AI INSIGHTS: daily Claude review of forecast/control performance -->
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>AI insights <span id="alg-pending-badge" class="alg-badge" hidden>0</span></h2>
+          <span id="alg-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Claude Opus reviews yesterday's forecast accuracy + smart-charge decisions every morning at 8 AM and proposes specific config tweaks. Each suggestion needs your one-click approval before anything changes — nothing applies automatically.
+        </p>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px">
+          <button id="alg-review-now" class="btn btn-primary" type="button">Run review now</button>
+          <button id="alg-show-history" class="btn btn-ghost" type="button">Show change history</button>
+        </div>
+        <div id="alg-summary" class="alg-summary" hidden></div>
+        <div id="alg-suggestions" class="alg-suggestions"></div>
+        <div id="alg-changes" class="alg-changes" hidden></div>
+      </section>
+
       <!-- SMART CHARGE: per-device, decides when to enable a grid plug -->
       <section class="card device-card">
         <div class="card-header">

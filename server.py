@@ -70,6 +70,10 @@ BATTERY_PACK_REFRESH_S = 0
 # for no analytical gain; daily-learning queries only need ~minute
 # resolution. Cache stays fresh; only the DB write is throttled.
 BATTERY_PACK_DB_PERSIST_S = 300
+# Local hour-of-day to fire the daily Claude advisor review. 8 = 8am
+# in the user's tz (resolved via location.get_tz_offset). Override with
+# JACKERY_ADVISOR_HOUR env var if you want the review at a different time.
+ADVISOR_TRIGGER_HOUR = int(os.environ.get("JACKERY_ADVISOR_HOUR", "8"))
 
 
 # ---------- app state ----------
@@ -106,6 +110,10 @@ class AppState:
         self.last_packs_ts_by_sn: dict[str, float] = {}
         # Last DB-persist timestamp, separate from in-memory cache refresh.
         self.last_packs_db_ts_by_sn: dict[str, float] = {}
+        # Last advisor-review timestamp per device, so the daily loop
+        # doesn't re-fire on container restart within the same window.
+        self.last_advisor_run_by_sn: dict[str, float] = {}
+        self.advisor_task: asyncio.Task | None = None
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
@@ -793,6 +801,225 @@ def _hydrate_battery_packs_from_db() -> None:
         log.debug("battery pack hydration skipped: %s", e)
 
 
+async def _build_advisor_bundle(device_sn: str) -> dict:
+    """Gather the data Claude needs to review yesterday's algorithm
+    performance for one device. Plain JSON-serialisable dict — see
+    claude_advisor._format_data_bundle for the rendering."""
+    from datetime import datetime, timezone
+    def _iso(ts: int | float | None) -> str:
+        if ts is None:
+            return "—"
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+
+    dev_meta = next(
+        (d for d in state.energy.list_devices()
+         if d.get("device_sn") == device_sn),
+        {},
+    )
+    main_soc = (state.last_status or {}).get("battery_percent") if state.device and state.device.device_sn == device_sn else None
+    model_code = dev_meta.get("model_code")
+    capacity = _total_capacity_wh(device_sn, model_code)
+    sys_soc = _system_soc_pct(float(main_soc), device_sn, model_code) if main_soc is not None else None
+    pack_count = len(state.battery_packs_by_sn.get(device_sn, []))
+
+    cfg = smart_charge.get_config(device_sn)
+
+    accuracy_summary = {}
+    try:
+        samples_acc = state.energy.prediction_accuracy(device_sn)
+        for s in samples_acc:
+            h = s["lead_time_h"]
+            bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
+            b = accuracy_summary.setdefault(bucket, {"n": 0, "sum_err": 0.0})
+            b["n"] += 1
+            b["sum_err"] += s["error"]
+        for b in accuracy_summary.values():
+            b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
+            del b["sum_err"]
+    except Exception as e:
+        log.debug("advisor: accuracy summary failed: %s", e)
+
+    # Last 24h hourly history (energy_db.history with 1h buckets).
+    recent_samples = []
+    try:
+        for h in state.energy.history(device_sn, hours=24, bucket_s=3600):
+            recent_samples.append({
+                "hour": _iso(h["ts"]),
+                "soc": h.get("battery_pct"),
+                "input_w": h.get("input_w"),
+                "output_w": h.get("output_w"),
+                "solar_w": h.get("solar_w"),
+                "ac_input_w": h.get("ac_input_w"),
+            })
+    except Exception as e:
+        log.debug("advisor: samples bundle failed: %s", e)
+
+    # Last 24h weather observations.
+    recent_weather = []
+    try:
+        since = int(time.time()) - 24 * 3600
+        for w in state.energy.list_weather_observations(since_ts=since, limit=48):
+            recent_weather.append({
+                "hour": _iso(w["ts"]),
+                "ghi_w_m2": w.get("ghi_w_m2"),
+                "cloud_cover_pct": w.get("cloud_cover_pct"),
+            })
+    except Exception as e:
+        log.debug("advisor: weather bundle failed: %s", e)
+
+    # Predicted-vs-actual pairs from the last 48h target window — the
+    # raw signal Claude needs to diagnose where the model is missing.
+    recent_predictions = []
+    try:
+        cutoff = time.time() - 48 * 3600
+        for p in state.energy.prediction_accuracy(device_sn):
+            if p.get("target", 0) < cutoff:
+                continue
+            recent_predictions.append({
+                "target_iso": _iso(p["target"]),
+                "lead_h": p["lead_time_h"],
+                "predicted_soc": round(p["predicted_soc"], 1),
+                "actual_soc": round(p["actual_soc"], 1),
+                "error": round(p["error"], 1),
+            })
+        # Cap at most 60 rows so we don't blow the prompt budget.
+        recent_predictions = recent_predictions[:60]
+    except Exception as e:
+        log.debug("advisor: predictions bundle failed: %s", e)
+
+    # Smart-charge decisions joined to actuals.
+    recent_decisions = []
+    try:
+        for d in state.energy.smart_charge_analytics(device_sn, days=7):
+            recent_decisions.append({
+                "decided_iso": _iso(d.get("decided_at")),
+                "action": d.get("action"),
+                "mode": d.get("mode"),
+                "predicted_sunrise_soc_pct": d.get("predicted_sunrise_soc_pct"),
+                "actual_sunrise_soc_pct": d.get("actual_sunrise_soc_pct"),
+                "target_sunrise_soc_pct": d.get("target_sunrise_soc_pct"),
+                "reason": d.get("reason"),
+            })
+    except Exception as e:
+        log.debug("advisor: decisions bundle failed: %s", e)
+
+    return {
+        "window_label": f"last 48h ending {datetime.now().isoformat(timespec='minutes')}",
+        "device_label": dev_meta.get("name") or "Jackery",
+        "device_sn": device_sn,
+        "capacity_wh": capacity,
+        "pack_count": pack_count,
+        "main_soc_pct": main_soc,
+        "system_soc_pct": round(sys_soc, 1) if sys_soc is not None else None,
+        "smart_charge_config": cfg,
+        "forecast_accuracy_summary": accuracy_summary,
+        "recent_samples": recent_samples,
+        "recent_weather": recent_weather,
+        "recent_predictions": recent_predictions,
+        "recent_decisions": recent_decisions,
+    }
+
+
+async def _run_advisor_review(device_sn: str) -> dict:
+    """Build the data bundle, hand it to Claude, persist whatever
+    suggestions and anomalies come back. Returns a small status dict
+    the caller can surface (count of new suggestions, summary text)."""
+    import claude_advisor
+    if not claude_advisor.has_usable_key():
+        return {"ok": False, "reason": "no_api_key"}
+    bundle = await _build_advisor_bundle(device_sn)
+    result = await claude_advisor.review(bundle)
+    if result.get("skipped_reason"):
+        return {"ok": False, "reason": result["skipped_reason"]}
+
+    # Auto-expire stale pending suggestions before adding new ones, so
+    # the user's pending list doesn't grow unboundedly.
+    state.energy.expire_old_suggestions()
+
+    new_ids: list[int] = []
+    for s in result.get("config_suggestions", []):
+        try:
+            sid = state.energy.insert_suggestion(
+                device_sn=device_sn,
+                kind="config",
+                target=s["target"],
+                current_value=s["current_value"],
+                proposed_value=s["proposed_value"],
+                reasoning=s["reasoning"],
+                confidence=s["confidence"],
+                severity=None,
+            )
+            new_ids.append(sid)
+        except Exception as e:
+            log.warning("advisor: failed to persist suggestion %s: %s", s, e)
+
+    for a in result.get("anomalies", []):
+        try:
+            sid = state.energy.insert_suggestion(
+                device_sn=device_sn,
+                kind="anomaly",
+                target=None,
+                current_value=None,
+                proposed_value=None,
+                reasoning=a.get("description", ""),
+                confidence=None,
+                severity=a.get("severity"),
+            )
+            new_ids.append(sid)
+        except Exception as e:
+            log.warning("advisor: failed to persist anomaly %s: %s", a, e)
+
+    log.info("advisor: %s — %d suggestions, %d anomalies (review took model=%s)",
+             device_sn, len(result.get("config_suggestions", [])),
+             len(result.get("anomalies", [])), result.get("model"))
+    return {
+        "ok": True,
+        "summary": result.get("summary", ""),
+        "new_suggestion_ids": new_ids,
+        "model": result.get("model"),
+    }
+
+
+async def advisor_loop():
+    """Run the advisor once per device per day. Anchored to ~8am local
+    time when location info is available, otherwise just every 24h
+    from the first tick. Skipping is cheap (no key / no SDK) so we
+    iterate every hour to keep the wake-up logic simple."""
+    while True:
+        try:
+            await asyncio.sleep(60)  # warm-up — let credentials load
+            try:
+                import claude_advisor
+            except Exception:
+                claude_advisor = None
+            if claude_advisor is None or not claude_advisor.has_usable_key():
+                # Try again in an hour — user may save a key later.
+                await asyncio.sleep(3600)
+                continue
+            now = time.time()
+            tz_off = device_location.get_tz_offset() or 0
+            local_hour = (int(now + tz_off) // 3600) % 24
+            # Run once when local hour first equals our trigger hour.
+            if local_hour == ADVISOR_TRIGGER_HOUR:
+                for d in state.energy.list_devices():
+                    sn = d.get("device_sn")
+                    if not sn:
+                        continue
+                    last = state.last_advisor_run_by_sn.get(sn, 0.0)
+                    if now - last < 23 * 3600:
+                        continue
+                    try:
+                        await _run_advisor_review(sn)
+                    except Exception as e:
+                        log.warning("advisor loop: %s failed: %s", sn, e)
+                    state.last_advisor_run_by_sn[sn] = now
+        except Exception as e:
+            log.warning("advisor loop iteration failed: %s", e)
+        # Tick every hour. The local-time gate inside ensures we only
+        # actually run reviews once per device per day.
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting Jackery monitor on backend=%s", state.backend)
@@ -803,11 +1030,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(connect_device())
     state.poll_task = asyncio.create_task(poll_loop())
     state.smart_charge_task = asyncio.create_task(smart_charge_loop())
+    state.advisor_task = asyncio.create_task(advisor_loop())
     yield
     if state.poll_task:
         state.poll_task.cancel()
     if getattr(state, "smart_charge_task", None):
         state.smart_charge_task.cancel()
+    if getattr(state, "advisor_task", None):
+        state.advisor_task.cancel()
     try:
         await state.client.disconnect()
     except Exception:
@@ -1212,6 +1442,112 @@ async def api_smart_charge_evaluate_now(device_sn: str | None = None):
             except Exception as e:
                 log.debug("evaluate_now narration failed: %s", e)
     return {"plan": plan.to_dict(), "narration": narration or None}
+
+
+# ---- Algorithm advisor (Claude Opus + extended thinking) ----
+@app.get("/api/algorithm/suggestions")
+def api_alg_suggestions(device_sn: str | None = None,
+                        status: str | None = "pending"):
+    """List algorithm suggestions. Defaults to status=pending so the UI
+    shows what's awaiting the user's decision; pass status='applied' /
+    'dismissed' / null (all) to see history."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    return {
+        "device_sn": device_sn,
+        "status_filter": status,
+        "suggestions": state.energy.list_suggestions(
+            device_sn=device_sn, status=status, limit=100,
+        ),
+    }
+
+
+@app.post("/api/algorithm/review_now")
+async def api_alg_review_now(device_sn: str | None = None):
+    """Manually trigger a Claude review for one device (default: active).
+    Useful for the user's "I want to see suggestions right now" button
+    instead of waiting until tomorrow's 8am tick."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    result = await _run_advisor_review(device_sn)
+    if not result.get("ok"):
+        raise HTTPException(503, f"advisor review failed: {result.get('reason')}")
+    return result
+
+
+@app.post("/api/algorithm/suggestions/{suggestion_id}/apply")
+async def api_alg_suggestion_apply(suggestion_id: int):
+    """Apply a single pending suggestion. Re-validates against the
+    advisor's whitelist + safety floors at apply time so a config tweak
+    that was valid at suggestion time but isn't now (e.g. user lowered
+    capacity_wh override) gets rejected. Writes an audit row."""
+    import claude_advisor
+    s = state.energy.get_suggestion(suggestion_id)
+    if not s:
+        raise HTTPException(404, "suggestion not found")
+    if s["status"] != "pending":
+        raise HTTPException(400, f"suggestion is {s['status']}, not pending")
+    if s["kind"] != "config":
+        raise HTTPException(400, "anomalies are not directly applicable; use dismiss/acknowledge")
+
+    target = s["target"]
+    rules = claude_advisor.ALLOWED_TARGETS.get(target)
+    if not rules:
+        raise HTTPException(400, f"target {target!r} no longer in whitelist")
+    proposed = s["proposed_value"]
+    try:
+        proposed_n = float(proposed)
+    except Exception:
+        raise HTTPException(400, "proposed_value not numeric") from None
+    if proposed_n < rules["min"] or proposed_n > rules["max"]:
+        raise HTTPException(400, f"proposed value out of safe range [{rules['min']}, {rules['max']}]")
+
+    # Per-device smart-charge config tweaks are the only kind we
+    # currently apply. Forecaster-global params would need a
+    # runtime-config layer that we haven't built yet; advisor can
+    # surface them as anomalies, but we won't auto-apply them here.
+    if not target.startswith("smart_charge."):
+        raise HTTPException(400, f"applying {target!r} is not yet supported")
+    if rules.get("scope") == "device" and not s.get("device_sn"):
+        raise HTTPException(400, "device-scoped suggestion missing device_sn")
+
+    field = target.split(".", 1)[1]
+    cfg = smart_charge.get_config(s["device_sn"])
+    old = cfg.get(field)
+    cfg[field] = int(proposed_n) if isinstance(old, int) else proposed_n
+    smart_charge.set_config(cfg, device_sn=s["device_sn"])
+
+    # Persist the audit row + flip suggestion to applied.
+    state.energy.record_change(
+        suggestion_id=suggestion_id, device_sn=s["device_sn"],
+        target=target, old_value=old, new_value=cfg[field],
+        reasoning=s.get("reasoning"),
+    )
+    state.energy.update_suggestion_status(suggestion_id, "applied")
+    return {"ok": True, "applied": {target: cfg[field]}, "previous": old}
+
+
+@app.post("/api/algorithm/suggestions/{suggestion_id}/dismiss")
+def api_alg_suggestion_dismiss(suggestion_id: int):
+    s = state.energy.get_suggestion(suggestion_id)
+    if not s:
+        raise HTTPException(404, "suggestion not found")
+    if s["status"] != "pending":
+        return {"ok": True, "already": s["status"]}
+    state.energy.update_suggestion_status(suggestion_id, "dismissed")
+    return {"ok": True}
+
+
+@app.get("/api/algorithm/changes")
+def api_alg_changes(device_sn: str | None = None):
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    return {
+        "device_sn": device_sn,
+        "changes": state.energy.list_changes(device_sn, limit=50),
+    }
 
 
 @app.get("/api/devices/capacity")

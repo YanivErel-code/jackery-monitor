@@ -719,6 +719,98 @@ main {
   margin: 0;
 }
 
+/* AI insights / Claude advisor panel on Automation tab */
+.alg-badge {
+  display: inline-block;
+  background: var(--accent-2);
+  color: #0c111c;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.alg-summary {
+  font-size: 13px;
+  margin: 8px 0 14px;
+  padding: 10px 12px;
+  background: rgba(56, 189, 248, .07);
+  border-left: 3px solid var(--accent-2);
+  border-radius: 4px;
+}
+.alg-suggestions { display: flex; flex-direction: column; gap: 10px; }
+.alg-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .02);
+}
+.alg-card.alg-anomaly { border-color: rgba(245, 158, 11, .35); }
+.alg-card.alg-sev-warn { background: rgba(245, 158, 11, .06); }
+.alg-card-head {
+  display: flex; gap: 10px; align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.alg-target {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text);
+}
+.alg-when { color: var(--text-mute); margin-left: auto; }
+.alg-conf {
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.alg-conf-high { background: rgba(74, 222, 128, .15); color: var(--accent); }
+.alg-conf-medium { background: rgba(251, 191, 36, .15); color: #fbbf24; }
+.alg-conf-low { background: rgba(148, 163, 184, .15); color: var(--text-mute); }
+.alg-sev-tag {
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: rgba(245, 158, 11, .15);
+  color: #fbbf24;
+  text-transform: uppercase;
+}
+.alg-change-line {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  margin: 6px 0 10px;
+  display: flex; gap: 12px; align-items: baseline;
+}
+.alg-num-old { color: var(--text-mute); text-decoration: line-through; }
+.alg-arrow { color: var(--text-mute); }
+.alg-num-new { color: var(--accent); font-weight: 700; }
+.alg-reasoning {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin-bottom: 10px;
+}
+.alg-actions { display: flex; gap: 8px; }
+
+.alg-changes { margin-top: 14px; }
+.alg-change-row {
+  display: grid;
+  grid-template-columns: 160px 200px 80px 20px 80px 1fr;
+  gap: 10px;
+  padding: 6px 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.alg-change-row .alg-when { color: var(--text-mute); margin-left: 0; }
+.alg-change-row .alg-reasoning {
+  margin: 0; color: var(--text-mute); font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* TOU rate slot editor in Settings. One row per slot, with the
    start-end window read-only (utility-defined) and the rate editable. */
 .cost-tou-slots {

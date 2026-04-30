@@ -154,6 +154,39 @@ CREATE TABLE IF NOT EXISTS battery_packs (
 
 CREATE INDEX IF NOT EXISTS idx_battery_packs_parent_ts
     ON battery_packs(parent_sn, ts);
+
+CREATE TABLE IF NOT EXISTS algorithm_suggestions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      INTEGER NOT NULL,
+    device_sn       TEXT,                  -- NULL = global (forecaster const)
+    kind            TEXT NOT NULL,         -- 'config' | 'anomaly'
+    target          TEXT,                  -- e.g. 'smart_charge.max_charge_w'
+    current_value   TEXT,                  -- JSON-encoded
+    proposed_value  TEXT,                  -- JSON-encoded
+    reasoning       TEXT,
+    confidence      TEXT,                  -- 'high' | 'medium' | 'low'
+    severity        TEXT,                  -- 'info' | 'warn' (anomalies only)
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending|applied|dismissed
+    decided_at      INTEGER,
+    decided_by      TEXT                   -- 'user' | 'auto-expired'
+);
+
+CREATE INDEX IF NOT EXISTS idx_alg_sugg_device_status
+    ON algorithm_suggestions(device_sn, status, created_at);
+
+CREATE TABLE IF NOT EXISTS algorithm_changes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    suggestion_id   INTEGER REFERENCES algorithm_suggestions(id),
+    applied_at      INTEGER NOT NULL,
+    device_sn       TEXT,
+    target          TEXT NOT NULL,
+    old_value       TEXT,
+    new_value       TEXT,
+    reasoning       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_alg_changes_device_ts
+    ON algorithm_changes(device_sn, applied_at);
 """
 
 
@@ -745,6 +778,155 @@ class EnergyDB:
                               if r[4] is not None else None,
             })
         return out
+
+    # ---------- algorithm suggestions (Claude advisor) ----------
+    def insert_suggestion(self, *, device_sn: str | None, kind: str,
+                          target: str | None, current_value: Any,
+                          proposed_value: Any, reasoning: str,
+                          confidence: str | None,
+                          severity: str | None) -> int:
+        """Persist a new advisor-generated suggestion. Returns the row id
+        so the API can hand it back for apply/dismiss actions. Suggestions
+        always start as `pending`; the user (or an expiry sweeper) flips
+        them to applied/dismissed."""
+        import json as _json
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO algorithm_suggestions
+                       (created_at, device_sn, kind, target,
+                        current_value, proposed_value, reasoning,
+                        confidence, severity, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (int(time.time()), device_sn, kind, target,
+                 _json.dumps(current_value) if current_value is not None else None,
+                 _json.dumps(proposed_value) if proposed_value is not None else None,
+                 reasoning, confidence, severity),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_suggestions(self, *, device_sn: str | None = None,
+                         status: str | None = None,
+                         limit: int = 50) -> list[dict]:
+        """Return suggestions ordered newest-first. Filters by device_sn
+        if provided (NULL device_sn = global suggestions are always
+        included regardless of filter), and by status if provided."""
+        import json as _json
+        clauses: list[str] = []
+        params: list = []
+        if device_sn:
+            clauses.append("(device_sn = ? OR device_sn IS NULL)")
+            params.append(device_sn)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._conn() as c:
+            rows = c.execute(
+                f"""SELECT id, created_at, device_sn, kind, target,
+                          current_value, proposed_value, reasoning,
+                          confidence, severity, status, decided_at, decided_by
+                     FROM algorithm_suggestions
+                     {where}
+                     ORDER BY created_at DESC
+                     LIMIT ?""",
+                params,
+            ).fetchall()
+
+        def _decode(v):
+            if v is None:
+                return None
+            try:
+                return _json.loads(v)
+            except Exception:
+                return v
+        return [
+            {"id": r[0], "created_at": r[1], "device_sn": r[2],
+             "kind": r[3], "target": r[4],
+             "current_value": _decode(r[5]),
+             "proposed_value": _decode(r[6]),
+             "reasoning": r[7], "confidence": r[8], "severity": r[9],
+             "status": r[10], "decided_at": r[11], "decided_by": r[12]}
+            for r in rows
+        ]
+
+    def get_suggestion(self, suggestion_id: int) -> dict | None:
+        rows = self.list_suggestions(limit=10000)
+        return next((r for r in rows if r["id"] == suggestion_id), None)
+
+    def update_suggestion_status(self, suggestion_id: int, status: str,
+                                 decided_by: str = "user") -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                """UPDATE algorithm_suggestions
+                      SET status = ?, decided_at = ?, decided_by = ?
+                    WHERE id = ?""",
+                (status, int(time.time()), decided_by, suggestion_id),
+            )
+            return cur.rowcount > 0
+
+    def record_change(self, *, suggestion_id: int | None, device_sn: str | None,
+                      target: str, old_value: Any, new_value: Any,
+                      reasoning: str | None = None) -> int:
+        import json as _json
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO algorithm_changes
+                       (suggestion_id, applied_at, device_sn, target,
+                        old_value, new_value, reasoning)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (suggestion_id, int(time.time()), device_sn, target,
+                 _json.dumps(old_value) if old_value is not None else None,
+                 _json.dumps(new_value) if new_value is not None else None,
+                 reasoning),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_changes(self, device_sn: str | None = None,
+                     limit: int = 50) -> list[dict]:
+        import json as _json
+        params: list = []
+        where = ""
+        if device_sn:
+            where = " WHERE (device_sn = ? OR device_sn IS NULL)"
+            params.append(device_sn)
+        params.append(limit)
+        with self._conn() as c:
+            rows = c.execute(
+                f"""SELECT id, suggestion_id, applied_at, device_sn,
+                          target, old_value, new_value, reasoning
+                     FROM algorithm_changes{where}
+                     ORDER BY applied_at DESC
+                     LIMIT ?""",
+                params,
+            ).fetchall()
+        def _decode(v):
+            if v is None:
+                return None
+            try:
+                return _json.loads(v)
+            except Exception:
+                return v
+        return [
+            {"id": r[0], "suggestion_id": r[1], "applied_at": r[2],
+             "device_sn": r[3], "target": r[4],
+             "old_value": _decode(r[5]), "new_value": _decode(r[6]),
+             "reasoning": r[7]}
+            for r in rows
+        ]
+
+    def expire_old_suggestions(self, max_age_s: int = 7 * 86400) -> int:
+        """Auto-dismiss pending suggestions older than max_age_s. Run
+        from the daily review job so stale advice doesn't pile up."""
+        cutoff = int(time.time()) - max_age_s
+        with self._conn() as c:
+            cur = c.execute(
+                """UPDATE algorithm_suggestions
+                      SET status = 'dismissed', decided_at = ?, decided_by = 'auto-expired'
+                    WHERE status = 'pending' AND created_at < ?""",
+                (int(time.time()), cutoff),
+            )
+            return cur.rowcount
 
     def history(self, device_sn: str, hours: int = 24,
                 bucket_s: int = 600) -> list[dict]:

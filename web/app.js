@@ -352,7 +352,7 @@ function switchTab(name) {
   if (name === 'forecast') { fetchForecast(); }
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); }
   if (name === 'logs')     { loadLogs(); }
-  if (name === 'automation') { loadAutomation(); loadSmartCharge(); }
+  if (name === 'automation') { loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); }
   if (name === 'device')   { loadDeviceCapacity(); }
 }
 
@@ -1962,8 +1962,9 @@ function applyStatus(s) {
   const newDeviceSn = activeJackeryDevice()?.device_sn;
   if (activeTab === 'automation' && prevDeviceSn !== newDeviceSn) {
     if (_allRules.length) renderRulesWithFilter();
-    // Smart-charge config is per-device — reload for the new selection.
+    // Smart-charge config + AI insights are per-device — reload both.
     loadSmartCharge();
+    loadAlgorithmAdvisor();
   }
   // Same idea for the Forecast tab: forecast is per-device (battery
   // capacity, solar regression, load profile all differ), so re-fetch on
@@ -3222,6 +3223,200 @@ document.addEventListener('change', async (e) => {
     setKeepAwakeStatus('');
   }
 });
+
+// ============================================================
+// AI INSIGHTS — daily Claude advisor review
+// ============================================================
+// Shows pending suggestions on the Automation tab. Each suggestion
+// has Apply / Dismiss buttons; nothing auto-applies. Anomalies show
+// without an Apply button (purely informational).
+
+async function loadAlgorithmAdvisor() {
+  const wrap = $('alg-suggestions');
+  if (!wrap) return;
+  const dev = activeJackeryDevice();
+  const deviceSn = dev?.device_sn;
+  const params = deviceSn ? `?device_sn=${encodeURIComponent(deviceSn)}` : '';
+  try {
+    const r = await fetch(`/api/algorithm/suggestions${params}&status=pending`.replace(/^&/, '?'));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    renderAlgorithmSuggestions(j.suggestions || []);
+  } catch (e) {
+    wrap.innerHTML = `<div class="hint">Failed to load suggestions: ${String(e.message || e)}</div>`;
+  }
+}
+
+function renderAlgorithmSuggestions(rows) {
+  const wrap = $('alg-suggestions');
+  const summaryEl = $('alg-summary');
+  const badge = $('alg-pending-badge');
+  if (!wrap) return;
+  // Latest pending of kind=config has its summary surfaced; we
+  // currently store it implicitly in the DB as the most recent
+  // suggestion's reasoning. For now, show the count + any anomaly hints.
+  const config = rows.filter(r => r.kind === 'config');
+  const anomalies = rows.filter(r => r.kind === 'anomaly');
+
+  if (badge) {
+    if (rows.length) {
+      badge.hidden = false;
+      badge.textContent = String(rows.length);
+    } else {
+      badge.hidden = true;
+    }
+  }
+  if (summaryEl) summaryEl.hidden = true;  // populated by review_now response
+
+  if (!rows.length) {
+    wrap.innerHTML = '<div class="hint">No pending suggestions. ' +
+      'Click "Run review now" to ask Claude for a fresh analysis.</div>';
+    return;
+  }
+
+  const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+
+  const renderConfig = (s) => {
+    const conf = s.confidence || 'medium';
+    const confCls = `alg-conf alg-conf-${conf}`;
+    return `
+      <div class="alg-card" data-id="${s.id}">
+        <div class="alg-card-head">
+          <span class="alg-target">${safe(s.target)}</span>
+          <span class="${confCls}">${conf}</span>
+          <span class="alg-when">${new Date((s.created_at || 0) * 1000).toLocaleString()}</span>
+        </div>
+        <div class="alg-change-line">
+          <span class="alg-num-old">${safe(s.current_value)}</span>
+          <span class="alg-arrow">→</span>
+          <span class="alg-num-new">${safe(s.proposed_value)}</span>
+        </div>
+        <div class="alg-reasoning">${safe(s.reasoning || '')}</div>
+        <div class="alg-actions">
+          <button class="btn btn-primary" data-alg-apply="${s.id}" type="button">Apply</button>
+          <button class="btn btn-ghost" data-alg-dismiss="${s.id}" type="button">Dismiss</button>
+        </div>
+      </div>`;
+  };
+  const renderAnomaly = (s) => {
+    const sev = s.severity || 'info';
+    return `
+      <div class="alg-card alg-anomaly alg-sev-${sev}" data-id="${s.id}">
+        <div class="alg-card-head">
+          <span class="alg-target">⚠ Anomaly</span>
+          <span class="alg-sev-tag">${sev}</span>
+          <span class="alg-when">${new Date((s.created_at || 0) * 1000).toLocaleString()}</span>
+        </div>
+        <div class="alg-reasoning">${safe(s.reasoning || '')}</div>
+        <div class="alg-actions">
+          <button class="btn btn-ghost" data-alg-dismiss="${s.id}" type="button">Acknowledge</button>
+        </div>
+      </div>`;
+  };
+
+  wrap.innerHTML = [
+    ...config.map(renderConfig),
+    ...anomalies.map(renderAnomaly),
+  ].join('');
+
+  wrap.querySelectorAll('[data-alg-apply]').forEach((btn) => {
+    btn.addEventListener('click', () => applyAlgSuggestion(btn.dataset.algApply));
+  });
+  wrap.querySelectorAll('[data-alg-dismiss]').forEach((btn) => {
+    btn.addEventListener('click', () => dismissAlgSuggestion(btn.dataset.algDismiss));
+  });
+}
+
+async function applyAlgSuggestion(id) {
+  const status = $('alg-status');
+  status.hidden = false;
+  status.textContent = 'Applying…';
+  try {
+    const r = await fetch(`/api/algorithm/suggestions/${id}/apply`, { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    status.textContent = 'Applied.';
+    setTimeout(() => { status.hidden = true; }, 2500);
+    loadAlgorithmAdvisor();
+    // If the change touched smart_charge config, refresh that panel too.
+    loadSmartCharge();
+  } catch (e) {
+    status.textContent = `Apply failed: ${e.message || e}`;
+  }
+}
+
+async function dismissAlgSuggestion(id) {
+  try {
+    await fetch(`/api/algorithm/suggestions/${id}/dismiss`, { method: 'POST' });
+    loadAlgorithmAdvisor();
+  } catch (e) {
+    console.warn('dismiss failed', e);
+  }
+}
+
+document.getElementById('alg-review-now')?.addEventListener('click', async () => {
+  const status = $('alg-status');
+  const summaryEl = $('alg-summary');
+  status.hidden = false;
+  status.textContent = 'Running Claude review (Opus + extended thinking, 30-60s)…';
+  try {
+    const dev = activeJackeryDevice();
+    const params = dev?.device_sn
+      ? `?device_sn=${encodeURIComponent(dev.device_sn)}` : '';
+    const r = await fetch(`/api/algorithm/review_now${params}`, { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    if (summaryEl && j.summary) {
+      summaryEl.textContent = j.summary;
+      summaryEl.hidden = false;
+    }
+    status.textContent = `Review complete (${(j.new_suggestion_ids || []).length} new).`;
+    setTimeout(() => { status.hidden = true; }, 4000);
+    loadAlgorithmAdvisor();
+  } catch (e) {
+    status.textContent = `Review failed: ${e.message || e}`;
+  }
+});
+
+document.getElementById('alg-show-history')?.addEventListener('click', async () => {
+  const wrap = $('alg-changes');
+  if (!wrap) return;
+  if (!wrap.hidden) { wrap.hidden = true; return; }
+  try {
+    const dev = activeJackeryDevice();
+    const params = dev?.device_sn
+      ? `?device_sn=${encodeURIComponent(dev.device_sn)}` : '';
+    const r = await fetch(`/api/algorithm/changes${params}`);
+    const j = await r.json();
+    const rows = j.changes || [];
+    if (!rows.length) {
+      wrap.innerHTML = '<div class="hint">No applied changes yet.</div>';
+    } else {
+      const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+        ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+      wrap.innerHTML = '<h3 style="margin:0 0 8px;font-size:14px">Applied changes</h3>' +
+        rows.map(c => `
+          <div class="alg-change-row">
+            <span class="alg-when">${new Date((c.applied_at || 0) * 1000).toLocaleString()}</span>
+            <span class="alg-target">${safe(c.target)}</span>
+            <span class="alg-num-old">${safe(c.old_value)}</span>
+            <span class="alg-arrow">→</span>
+            <span class="alg-num-new">${safe(c.new_value)}</span>
+            <span class="alg-reasoning">${safe(c.reasoning || '')}</span>
+          </div>`).join('');
+    }
+    wrap.hidden = false;
+  } catch (e) {
+    wrap.innerHTML = `<div class="hint">Failed: ${e.message || e}</div>`;
+    wrap.hidden = false;
+  }
+});
+
+// Reload AI insights on device switch (per-device suggestions).
+function _reloadAdvisorOnDeviceSwitch() {
+  if (activeTab === 'automation') loadAlgorithmAdvisor();
+}
 
 // ============================================================
 // ANTHROPIC API KEY (Settings → enables Claude narration)
