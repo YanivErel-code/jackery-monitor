@@ -1117,14 +1117,14 @@ def api_daily_summary(device_sn: str | None = None, days: int = 7):
 
 @app.get("/api/smart_charge/config")
 def api_smart_charge_get(device_sn: str | None = None):
-    """Per-device smart-charge config + saved Kasa devices for the picker.
-    Defaults to the active device when device_sn is omitted."""
+    """Per-device smart-charge config. Defaults to the active device
+    when device_sn is omitted. Kasa devices are fetched separately via
+    /api/kasa/saved so the UI can filter by Jackery assignment."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     return {
         "device_sn": device_sn,
         "config": smart_charge.get_config(device_sn),
-        "kasa_devices": state.kasa.list(),
     }
 
 
@@ -1532,10 +1532,13 @@ async def api_kasa_status(host: str):
 
 # ---- saved Kasa device registry (separate from rules) ----
 @app.get("/api/kasa/saved")
-async def api_kasa_saved_list(refresh: bool = False):
-    """Return all saved Kasa devices. If `refresh=true`, also probe each
-       one in parallel so the UI can display current on/off state."""
-    devices = state.kasa.list_devices()
+async def api_kasa_saved_list(refresh: bool = False,
+                              jackery_sn: str | None = None):
+    """Return saved Kasa devices. If `jackery_sn` is provided, restrict
+    to plugs assigned to that Jackery (or unassigned legacy entries).
+    If `refresh=true`, also probe each device in parallel so the UI can
+    display current on/off state."""
+    devices = state.kasa.list_devices(jackery_device_sn=jackery_sn)
     if not refresh or not devices:
         return {"devices": [{**d, "is_on": None, "online": None} for d in devices]}
 
@@ -1555,9 +1558,12 @@ async def api_kasa_saved_list(refresh: bool = False):
 
 @app.post("/api/kasa/saved")
 async def api_kasa_saved_upsert(body: dict):
-    """Add or update a saved Kasa device. We probe the device first so the
-       saved record always has accurate model/alias and `last_tested`
-       reflects a real successful contact."""
+    """Add or update a saved Kasa device. Probes the device first so the
+    saved record always has accurate model/alias and `last_tested`
+    reflects a real successful contact. Pass `jackery_device_sn` to
+    assign the plug to a specific Jackery (smart-charge / per-device
+    rule pickers filter by this); empty string explicitly unassigns;
+    omitting the field leaves the existing assignment alone."""
     host = ((body or {}).get("host") or "").strip()
     requested_alias = ((body or {}).get("alias") or "").strip()
     if not host:
@@ -1566,12 +1572,15 @@ async def api_kasa_saved_upsert(body: dict):
         info = await kasa_client.status(host)
     except kasa_client.KasaError as e:
         raise HTTPException(400, str(e)) from e
+    # Distinguish "not provided" (None) from "explicit unassign" ("").
+    j_sn = body.get("jackery_device_sn", None) if isinstance(body, dict) else None
     saved = state.kasa.upsert(
         host=host,
         alias=requested_alias or info.get("alias") or "",
         model=info.get("model"),
         type_=info.get("type"),
         mark_tested=True,
+        jackery_device_sn=j_sn,
     )
     return {"ok": True, "device": {**saved, "is_on": info.get("is_on")}}
 

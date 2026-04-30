@@ -571,11 +571,17 @@ function renderSavedKasa(devices) {
     const stateClass = d.online === false ? 'offline' : (d.is_on === true ? 'on' : (d.is_on === false ? 'off' : 'offline'));
     const stateText = d.online === false ? 'OFFLINE' : (d.is_on === true ? 'ON' : (d.is_on === false ? 'OFF' : '—'));
     const meta = [d.model, d.host].filter(Boolean).map((s, i) => i === 0 ? safe(s) : `<span class="host">${safe(s)}</span>`).join(' · ');
+    // Resolve the assigned Jackery (if any) to a human label.
+    let assignmentLabel = 'unassigned';
+    if (d.jackery_device_sn) {
+      const j = (lastDevices || []).find(x => x.device_sn === d.jackery_device_sn);
+      assignmentLabel = j?.name || `…${d.jackery_device_sn.slice(-6)}`;
+    }
     return `<div class="kasa-row" data-host="${safe(d.host)}">
       <span class="kr-state ${stateClass}">${stateText}</span>
       <div class="kr-name">
         <div class="kr-alias">${safe(d.alias)}</div>
-        <div class="kr-meta">${meta}</div>
+        <div class="kr-meta">${meta} · <span class="kr-assignment">→ ${safe(assignmentLabel)}</span></div>
       </div>
       <div class="kasa-row-actions">
         <button class="btn btn-ghost" data-toggle="${safe(d.host)}" data-onstate="${d.is_on ? '1' : '0'}" type="button">${d.is_on ? 'Turn off' : 'Turn on'}</button>
@@ -632,6 +638,24 @@ function openKasaEditor(device) {
   $('kasa-host').value  = device?.host  || '';
   $('kasa-host').disabled = !!device;   // host is the primary key — locked when editing
   $('kasa-alias').value = device?.alias || '';
+  // Populate the Jackery-assignment dropdown from the device picker.
+  const sel = $('kasa-jackery-sn');
+  if (sel) {
+    sel.innerHTML = '<option value="">— unassigned (visible to all) —</option>';
+    const jackerys = (lastDevices || []);
+    for (const d of jackerys) {
+      const opt = document.createElement('option');
+      opt.value = d.device_sn || '';
+      opt.textContent = `${d.name || d.device_sn} (…${(d.device_sn || '').slice(-6)})`;
+      sel.appendChild(opt);
+    }
+    // Default: existing assignment, else the active Jackery on Add.
+    if (device) {
+      sel.value = device.jackery_device_sn || '';
+    } else {
+      sel.value = activeJackeryDevice()?.device_sn || '';
+    }
+  }
   $('kasa-test-result').hidden = true;
   ed.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -667,6 +691,9 @@ document.getElementById('kasa-form')?.addEventListener('submit', async (e) => {
   const body = {
     host:  $('kasa-host').value.trim(),
     alias: $('kasa-alias').value.trim(),
+    // Empty string explicitly unassigns the plug; non-empty assigns it
+    // to that Jackery's smart-charge / per-device rule pickers.
+    jackery_device_sn: $('kasa-jackery-sn')?.value ?? '',
   };
   if (!body.host) return;
   const result = $('kasa-test-result');
@@ -1631,9 +1658,11 @@ async function loadSmartCharge() {
   }
   try {
     const q = `?device_sn=${encodeURIComponent(deviceSn)}`;
+    const kasaQ = `?jackery_sn=${encodeURIComponent(deviceSn)}`;
     const [cfgRes, kasaRes, statusRes, anaRes] = await Promise.all([
       fetch(`/api/smart_charge/config${q}`),
-      fetch('/api/kasa/saved'),
+      // Only show Kasa plugs assigned to THIS Jackery (or legacy unassigned).
+      fetch(`/api/kasa/saved${kasaQ}`),
       fetch(`/api/smart_charge/status${q}`),
       fetch(`/api/smart_charge/analytics?days=14&device_sn=${encodeURIComponent(deviceSn)}`),
     ]);
