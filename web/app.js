@@ -3371,8 +3371,12 @@ document.getElementById('alg-review-now')?.addEventListener('click', async () =>
       summaryEl.textContent = j.summary;
       summaryEl.hidden = false;
     }
-    status.textContent = `Review complete (${(j.new_suggestion_ids || []).length} new).`;
-    setTimeout(() => { status.hidden = true; }, 4000);
+    const newCount = (j.new_suggestion_ids || []).length;
+    const turns = j.turns || 0;
+    const toolCalls = j.tool_calls || 0;
+    status.textContent = `Review complete: ${newCount} new ` +
+      `(${turns} turns, ${toolCalls} DB queries).`;
+    setTimeout(() => { status.hidden = true; }, 6000);
     loadAlgorithmAdvisor();
   } catch (e) {
     status.textContent = `Review failed: ${e.message || e}`;

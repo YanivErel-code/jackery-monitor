@@ -1,59 +1,87 @@
 """
-Daily algorithm advisor — Claude Opus + extended thinking.
+Daily algorithm advisor — Claude Opus 4.7 (1M context) + extended thinking,
+agentic with DB-query tools.
 
-What I do every morning right now manually (look at predicted-vs-actual,
-diagnose patterns, propose tweaks) is exactly what this module automates.
+Instead of pre-bundling all the data we think Claude might need, we send
+a compact starter context (current config + accuracy summary by lead-time
+bucket) and expose DB-query tools. Claude reads the summary, hypothesizes
+about residuals, and *itself* requests the specific data it wants to
+inspect — like a human analyst running ad-hoc SQL.
 
-Per-device daily flow:
-  1. Bundle last 48h of forecasts, samples, weather, decisions, config
-  2. Call Opus with extended thinking enabled — it's a hard reasoning
-     task with multi-step diagnosis (cause → mechanism → tweak), so we
-     trade cost for quality vs the Haiku narrator
-  3. Force a structured response via the tools API (schema-validated
-     JSON, no parsing failures)
-  4. Validate against a whitelist of tunable parameters + hard safety
-     floors before persisting any suggestion
-  5. Persist to algorithm_suggestions; user approves/dismisses in UI
+Multi-turn flow:
+  1. Server gives Claude a compact initial bundle.
+  2. Claude reasons (extended thinking).
+  3. Claude calls one of the query tools with a specific window/resolution.
+  4. Server runs the query, returns results.
+  5. Loop until Claude calls submit_algorithm_review (or the turn cap
+     forces a final review pass).
 
-Cost: ~one Opus call per device per day. Expensive vs Haiku ($0.20-0.30
-per call rough order) but daily cadence keeps monthly cost small AND
-the whole point is high-quality diagnosis. Run-on-demand button gives
-the user a way to trigger reviews without waiting for the daily tick.
+This is meaningfully more useful than a static bundle because:
+  - Claude drills into anomalies it actually spots (not what we anticipated)
+  - Picks resolution per question (1-min for sub-hour drains, daily for
+    longer-term trends)
+  - Doesn't burn context on rows it doesn't end up reading
+
+Cost: more tool turns = more API calls. With Opus 4.7's 1M context window
+we can run 20+ turns comfortably; expect $0.40-0.80 per review (vs
+$0.20-0.30 single-call). The depth of analysis is dramatically better.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anthropic_creds
 
 log = logging.getLogger("claude_advisor")
 
-# Latest Claude Opus. Override via env var if Anthropic releases a
-# newer one before this codebase ships an update.
-MODEL = os.environ.get("JACKERY_ADVISOR_MODEL", "claude-opus-4-5")
+# Latest Claude Opus model. The 1M-context capability is opted into via
+# the anthropic-beta header below — for models that don't support it the
+# header is ignored. Override via env var if Anthropic ships a newer
+# point release before this codebase updates.
+MODEL = os.environ.get("JACKERY_ADVISOR_MODEL", "claude-opus-4-7")
 
-# Extended thinking budget — large enough for the model to walk through
-# the data systematically (errors at each lead time, hypothesize cause,
-# pick a single high-confidence tweak), small enough to keep cost in line.
-THINKING_BUDGET = 8000
+# Beta header to opt into the 1M-token context window. The advisor's
+# multi-turn agent loop with tool results can grow context fast on a
+# data-rich review; 1M gives plenty of headroom. Header value tracks
+# Anthropic's published beta name; override via env var if it rotates.
+CONTEXT_1M_HEADER = os.environ.get(
+    "JACKERY_ADVISOR_BETA", "context-1m-2025-08-07")
 
-# Final-response token cap. Most reviews fit easily in 1-2K; allow more
-# for days where multiple anomalies need explaining.
-MAX_TOKENS = 16000
+# Extended thinking budget. The 1M context lets us be generous; bigger
+# budget gives the model more headroom to systematically walk forecast
+# residuals → hypothesis → tool query → diagnosis.
+THINKING_BUDGET = int(os.environ.get("JACKERY_ADVISOR_THINKING", "16000"))
+
+# Output token cap per turn. Tool-call turns are usually short; the final
+# submit_algorithm_review turn can be longer if many anomalies need
+# explaining.
+MAX_TOKENS = int(os.environ.get("JACKERY_ADVISOR_MAX_TOKENS", "32000"))
+
+# Maximum number of agent turns (Claude → tool → Claude → tool → …) per
+# review. Each turn is one API round-trip. Cap exists so a buggy prompt
+# can't loop forever.
+MAX_TURNS = int(os.environ.get("JACKERY_ADVISOR_MAX_TURNS", "20"))
+
+# Per-query row cap returned to Claude. Keeps single tool results in
+# manageable size; if Claude needs more it can paginate via narrower
+# windows or coarser bucket_s.
+MAX_QUERY_ROWS = 500
 
 # Whitelist of parameters Claude is allowed to propose changes to.
 # Anything outside this falls back to an anomaly callout (no auto-apply).
 ALLOWED_TARGETS: dict[str, dict[str, Any]] = {
     "smart_charge.max_charge_w": {
-        "scope": "device",  # per-device
+        "scope": "device",
         "min": 50, "max": 3000,
     },
     "smart_charge.target_sunrise_soc_pct": {
         "scope": "device",
-        "min": 15, "max": 60,  # hard floor at 15 — never let Claude lower it more
+        "min": 15, "max": 60,
     },
     "smart_charge.max_on_duration_minutes": {
         "scope": "device",
@@ -66,82 +94,60 @@ def _resolve_key() -> str | None:
     return anthropic_creds.load() or os.environ.get("ANTHROPIC_API_KEY") or None
 
 
-def _format_data_bundle(bundle: dict) -> str:
-    """Render the data bundle as a compact, copy-paste-friendly text
-    block. Claude sees this as the user-message body. Keeps numeric
-    precision low — full precision would just inflate token count
-    without improving reasoning quality."""
+def has_usable_key() -> bool:
+    return _resolve_key() is not None
+
+
+def _format_starter_bundle(bundle: dict) -> str:
+    """Compact opener — current state + 14d accuracy summary + smart-charge
+    history. Claude uses query tools to drill into specifics."""
     lines: list[str] = []
-    lines.append(f"Review window: {bundle['window_label']}")
+    lines.append("# Algorithm review")
+    lines.append("")
+    lines.append(f"Window: {bundle['window_label']}")
     lines.append(f"Device: {bundle['device_label']} (SN tail …{bundle['device_sn'][-6:]})")
     lines.append(f"Capacity: {bundle['capacity_wh']} Wh "
                  f"({bundle.get('pack_count', 0)} expansion packs)")
-    lines.append(f"Current SOC: main {bundle['main_soc_pct']}%, "
-                 f"system {bundle['system_soc_pct']}%")
+    if bundle.get("system_soc_pct") is not None:
+        lines.append(f"Current SOC: main {bundle['main_soc_pct']}%, "
+                     f"system {bundle['system_soc_pct']}%")
     lines.append("")
-    lines.append("Current smart-charge config:")
+    lines.append("## Current smart-charge config")
     for k, v in (bundle.get("smart_charge_config") or {}).items():
-        lines.append(f"  {k}: {v}")
+        lines.append(f"- {k}: {v}")
     lines.append("")
 
     accuracy = bundle.get("forecast_accuracy_summary") or {}
     if accuracy:
-        lines.append("Forecast accuracy by lead time (last 14d):")
+        lines.append("## Forecast accuracy by lead time (last 14d)")
         for bucket, stats in accuracy.items():
-            lines.append(f"  {bucket}: n={stats.get('n')}, MAE {stats.get('mae')} pp")
-        lines.append("")
-
-    samples = bundle.get("recent_samples") or []
-    if samples:
-        lines.append("Last 24h hourly samples. Each row shows the *time-")
-        lines.append("integrated* average power (Wh / 1h = avg W) which")
-        lines.append("reconciles with SOC drain — NOT the instantaneous")
-        lines.append("sample at poll time. Format: hour | soc | in_avg |")
-        lines.append("out_avg | solar_avg | ac_in_avg | (in_inst, out_inst):")
-        for s in samples:
-            lines.append(
-                f"  {s['hour']}  soc={s.get('soc')}%  "
-                f"in={s.get('input_w_avg')}W  out={s.get('output_w_avg')}W  "
-                f"solar={s.get('solar_w_avg')}W  "
-                f"ac_in={s.get('ac_input_w_avg')}W  "
-                f"(inst: in={s.get('input_w_instant')}W, "
-                f"out={s.get('output_w_instant')}W)"
-            )
-        lines.append("")
-
-    weather = bundle.get("recent_weather") or []
-    if weather:
-        lines.append("Last 24h weather (ts ISO, GHI, cloud %):")
-        for w in weather:
-            lines.append(f"  {w['hour']}  GHI {w.get('ghi_w_m2')} W/m²  "
-                         f"cloud {w.get('cloud_cover_pct')}%")
-        lines.append("")
-
-    pred_pairs = bundle.get("recent_predictions") or []
-    if pred_pairs:
-        lines.append("Recent predicted-vs-actual SOC pairs:")
-        for p in pred_pairs:
-            lines.append(
-                f"  target {p['target_iso']}  lead {p.get('lead_h')}h  "
-                f"predicted {p.get('predicted_soc')}%  "
-                f"actual {p.get('actual_soc')}%  "
-                f"err {p.get('error')}pp"
-            )
+            lines.append(f"- {bucket}: n={stats.get('n')}, MAE {stats.get('mae')} pp")
         lines.append("")
 
     decisions = bundle.get("recent_decisions") or []
     if decisions:
-        lines.append("Smart-charge decisions (last 14d):")
+        lines.append("## Recent smart-charge decisions (last 7d)")
         for d in decisions:
             lines.append(
-                f"  {d.get('decided_iso')} {d.get('action', '?').upper()} "
+                f"- {d.get('decided_iso')} {d.get('action', '?').upper()} "
                 f"[{d.get('mode')}] "
-                f"pred_sunrise {d.get('predicted_sunrise_soc_pct')}% → "
-                f"actual {d.get('actual_sunrise_soc_pct')}% "
-                f"target {d.get('target_sunrise_soc_pct')}% "
+                f"pred_sunrise={d.get('predicted_sunrise_soc_pct')}% → "
+                f"actual={d.get('actual_sunrise_soc_pct')}% "
+                f"target={d.get('target_sunrise_soc_pct')}% "
                 f"reason: {d.get('reason')}"
             )
         lines.append("")
+
+    lines.append("## Your tools")
+    lines.append("Use the query_* tools to investigate specific windows at "
+                 "the resolution you choose. Then call submit_algorithm_review "
+                 "when you have a final diagnosis.")
+    lines.append("")
+    lines.append("Reasonable starting points if you want hints:")
+    lines.append("- query_predictions on the last 48h to see error patterns")
+    lines.append("- query_samples on overnight windows where SOC drained "
+                 "(use bucket_s=300 for 5-min, 60 for 1-min)")
+    lines.append("- query_weather to correlate solar misses with cloud cover")
 
     return "\n".join(lines)
 
@@ -150,41 +156,140 @@ def _system_prompt() -> str:
     return (
         "You are a careful, honest algorithm advisor for a residential "
         "solar-battery dashboard. The user runs a deterministic forecaster "
-        "+ smart-charge controller against real telemetry, and you review "
+        "+ smart-charge controller against real telemetry; you review "
         "yesterday's results to suggest tunable improvements.\n\n"
-        "Hard rules:\n"
-        " - Only suggest changes to the explicit whitelist of parameters "
-        "in the tool schema. If the symptom looks like a code bug or "
-        "model-structure issue, surface it as an anomaly with severity "
-        "'warn' — do NOT propose a config tweak as a workaround.\n"
-        " - Be specific. Each suggestion needs a numeric current value, "
-        "a numeric proposed value, and a reasoning that cites the data.\n"
-        " - High confidence: the data clearly supports the change "
-        "(systematic miss across multiple days, clear cause). Medium: "
-        "plausible signal but only a few data points. Low: speculative.\n"
-        " - It is FINE to return zero suggestions. If the system is "
-        "tracking well, say so in the summary and return empty arrays.\n"
-        " - It is BAD to propose target_sunrise_soc_pct < 15 or > 60.\n"
-        " - Anomalies are observations the user should know about even "
-        "if no config change applies (e.g. 'main inverter pulled 3 kW "
-        "between 2-4 am yesterday — unusual, possibly a defrost cycle').\n"
+        "How to investigate:\n"
+        " - You have query_* tools to fetch any window of data at any "
+        "resolution. Use them — the starter context is intentionally a "
+        "summary, not the full dataset. Drill into anomalies, "
+        "predicted-vs-actual gaps, and overnight drain patterns.\n"
+        " - Combine queries: when prediction error is high at a specific "
+        "target hour, query the actual samples + weather for that window "
+        "to diagnose the cause (load model wrong? solar regression "
+        "off? brief spike vs sustained drain?).\n"
+        " - Reconcile SOC drain with reported power. SOC change x capacity "
+        "should match the integrated power delta. Big mismatches = "
+        "measurement gap (inverter overhead, SOC drift, unmeasured loads).\n"
         "\n"
-        "Use extended thinking to walk through the data systematically "
-        "before deciding. Don't skip directly to suggestions; first "
-        "diagnose the residual error pattern."
+        "Hard rules for output:\n"
+        " - Only suggest changes to parameters in the submit tool's enum. "
+        "Code/model bugs go in `anomalies` with severity 'warn'.\n"
+        " - Each suggestion: numeric current_value + numeric proposed_value "
+        "+ reasoning citing specific data + confidence (high/medium/low).\n"
+        " - High confidence = systematic, multi-day, clear cause. "
+        "Medium = plausible signal but few datapoints. Low = speculative.\n"
+        " - Returning zero suggestions is FINE if the system is tracking "
+        "well. Say so in `summary`.\n"
+        " - target_sunrise_soc_pct must be in [15, 60].\n"
+        " - When done, call submit_algorithm_review. Don't keep querying "
+        "indefinitely; commit to a diagnosis once the data supports one.\n"
     )
+
+
+# ---- query tools (executed server-side via the dispatcher) ----
+
+QUERY_TOOLS: list[dict] = [
+    {
+        "name": "query_samples",
+        "description": (
+            "Time-bucketed power flow + SOC samples. Returns one row per "
+            "bucket: ts (ISO), soc, in_w_avg (integrated W during the "
+            "bucket = true average power), out_w_avg, solar_w_avg, "
+            "ac_input_w_avg, plus _instant fields (last sample seen, "
+            "useful for spotting spikes the average smooths out)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso": {"type": "string",
+                              "description": "ISO 8601 UTC. e.g. '2026-04-29T06:00:00'"},
+                "end_iso": {"type": "string"},
+                "bucket_s": {
+                    "type": "integer",
+                    "enum": [60, 300, 900, 3600, 86400],
+                    "description": "60=1min, 300=5min, 900=15min, 3600=1h, 86400=daily",
+                },
+            },
+            "required": ["start_iso", "end_iso", "bucket_s"],
+        },
+    },
+    {
+        "name": "query_predictions",
+        "description": (
+            "Predicted-vs-actual SOC pairs for past forecast targets. Each "
+            "row: made_at (when prediction was made), target (when it "
+            "was for), lead_time_h, predicted_soc, actual_soc, error pp."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso": {"type": "string",
+                              "description": "Filter: target time >= this"},
+                "end_iso": {"type": "string"},
+                "max_lead_h": {"type": "integer",
+                               "description": "Optional: only include "
+                                              "predictions with lead time ≤ this"},
+            },
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "query_decisions",
+        "description": (
+            "Smart-charge decision history joined to actual sunrise SOC. "
+            "Each row: decided_at, action (on/off/skip), mode, "
+            "predicted_sunrise_soc_pct, actual_sunrise_soc_pct, "
+            "target_sunrise_soc_pct, reason."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso": {"type": "string"},
+                "end_iso": {"type": "string"},
+            },
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "query_weather",
+        "description": (
+            "Hourly weather observations (Open-Meteo). Each row: hour, "
+            "ghi_w_m2, cloud_cover_pct."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_iso": {"type": "string"},
+                "end_iso": {"type": "string"},
+            },
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "query_battery_packs",
+        "description": (
+            "Latest per-expansion-battery snapshot (5000 Plus + packs). "
+            "Each row: pack_sn, soc_pct, input_w, output_w, "
+            "internal_temp_c."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+]
 
 
 def _review_tool() -> dict:
     return {
         "name": "submit_algorithm_review",
-        "description": "Submit your structured review of yesterday's algorithm performance.",
+        "description": "Submit your final review. Call this exactly once when you have a diagnosis.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "1-2 sentence plain-English overview of how the system did.",
+                    "description": "1-3 sentence plain-English overview of what the data shows.",
                 },
                 "config_suggestions": {
                     "type": "array",
@@ -242,12 +347,16 @@ def _validate_suggestion(s: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-async def review(bundle: dict) -> dict:
-    """Run the daily review against a pre-built data bundle. Returns
-    the parsed tool-call payload (summary, config_suggestions filtered
-    to validated entries, anomalies). Empty/skipped on missing key or
-    SDK-not-installed; the caller is responsible for skipping the
-    persistence step in those cases."""
+# Type alias: the query callback the server passes in.
+# Signature: query_fn(tool_name, tool_input) -> dict (JSON-serializable result).
+QueryFn = Callable[[str, dict], Awaitable[dict]]
+
+
+async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
+    """Multi-turn agent loop. The server provides a compact starter
+    bundle and a query_fn that executes Claude's tool calls against the
+    DB. Returns the final review payload (summary, suggestions,
+    anomalies) plus diagnostic metadata (turn count, tool calls)."""
     api_key = _resolve_key()
     if not api_key:
         log.info("advisor: no Anthropic key — skipping review")
@@ -261,58 +370,111 @@ async def review(bundle: dict) -> dict:
                 "skipped_reason": "sdk_missing"}
 
     client = AsyncAnthropic(api_key=api_key)
-    user_msg = _format_data_bundle(bundle)
-    try:
-        resp = await client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            # Extended thinking gives the model headroom to walk through
-            # the data systematically before deciding. Constrains: with
-            # thinking enabled, tool_choice MUST be "auto" — forcing a
-            # specific tool ({"type": "tool", "name": ...}) returns
-            # BadRequestError. We trust the system prompt + lone tool
-            # to make the model call our schema unprompted.
-            thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
-            tools=[_review_tool()],
-            tool_choice={"type": "auto"},
-            system=_system_prompt(),
-            messages=[{"role": "user", "content": user_msg}],
-        )
-    except Exception as e:
-        # Surface the API's actual message — bare "BadRequestError" is
-        # impossible to debug. Truncate to 300 chars so the UI can show
-        # it inline without wrapping.
-        msg = str(e)
-        if len(msg) > 300:
-            msg = msg[:300] + "…"
-        log.warning("advisor: Claude call failed: %s: %s",
-                    type(e).__name__, msg)
-        return {"summary": "", "config_suggestions": [], "anomalies": [],
-                "skipped_reason": f"api_error: {type(e).__name__}: {msg}"}
+    tools = [*QUERY_TOOLS, _review_tool()]
+    messages: list[dict] = [
+        {"role": "user", "content": _format_starter_bundle(bundle)},
+    ]
+    tool_calls_made = 0
+    turn = 0
+    final_payload: dict | None = None
+    last_text = ""
 
-    payload: dict | None = None
-    text_fallback = ""
-    for block in (resp.content or []):
-        btype = getattr(block, "type", None)
-        # Skip thinking blocks — they're for the model's internal use.
-        if btype == "tool_use" and block.name == "submit_algorithm_review":
-            payload = dict(block.input or {})
+    while turn < MAX_TURNS:
+        turn += 1
+        log.info("advisor turn %d/%d (tool calls so far: %d)",
+                 turn, MAX_TURNS, tool_calls_made)
+        try:
+            resp = await client.messages.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
+                tools=tools,
+                tool_choice={"type": "auto"},
+                system=_system_prompt(),
+                messages=messages,
+                # 1M context window opt-in — ignored on models that don't
+                # support it. Lets the multi-turn loop accumulate plenty
+                # of tool results without truncation.
+                extra_headers={"anthropic-beta": CONTEXT_1M_HEADER},
+            )
+        except Exception as e:
+            msg = str(e)
+            if len(msg) > 300:
+                msg = msg[:300] + "…"
+            log.warning("advisor: Claude call failed at turn %d: %s: %s",
+                        turn, type(e).__name__, msg)
+            return {"summary": last_text or "", "config_suggestions": [],
+                    "anomalies": [],
+                    "skipped_reason": f"api_error: {type(e).__name__}: {msg}",
+                    "turns": turn, "tool_calls": tool_calls_made}
+
+        # Capture text + tool_use blocks. Thinking blocks pass through
+        # unchanged in the messages list (required for follow-up turns).
+        tool_calls_in_turn: list = []
+        text_blocks: list[str] = []
+        for block in (resp.content or []):
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text = getattr(block, "text", "")
+                if text:
+                    text_blocks.append(text)
+            elif btype == "tool_use":
+                if block.name == "submit_algorithm_review":
+                    final_payload = dict(block.input or {})
+                    break
+                tool_calls_in_turn.append(block)
+        if text_blocks:
+            last_text = " ".join(text_blocks).strip()
+
+        if final_payload is not None:
+            log.info("advisor: submit_algorithm_review called at turn %d", turn)
             break
-        if btype == "text":
-            text_fallback += getattr(block, "text", "") or ""
-    if payload is None:
-        # No tool_use — model returned only text. Surface that text in
-        # the summary so the user at least sees Claude's diagnosis even
-        # if no structured suggestions came through. (Common in the
-        # first review on a quiet system.)
-        log.info("advisor: no tool_use in response, falling back to text")
-        return {"summary": text_fallback.strip()[:1000],
-                "config_suggestions": [], "anomalies": [],
-                "skipped_reason": "no_tool_call"}
 
-    # Whitelist + range-check each suggestion. Drop invalid ones rather
-    # than rejecting the whole review — partial output is still useful.
-    raw_suggestions = payload.get("config_suggestions") or []
+        if not tool_calls_in_turn:
+            # No tools called and no submit — model decided to stop.
+            # We'll treat the last text as the summary.
+            log.info("advisor: model stopped without submit at turn %d "
+                     "(stop_reason=%s)", turn,
+                     getattr(resp, "stop_reason", "?"))
+            break
+
+        # Execute each tool call and accumulate results.
+        tool_results = []
+        for tc in tool_calls_in_turn:
+            tool_calls_made += 1
+            try:
+                result = await query_fn(tc.name, dict(tc.input or {}))
+            except Exception as e:
+                log.warning("advisor: tool %s failed: %s: %s",
+                            tc.name, type(e).__name__, e)
+                result = {"error": f"{type(e).__name__}: {e}"}
+            # Compact the result if oversized — Claude will see it
+            # truncated and can request a narrower window.
+            content = json.dumps(result, default=str)
+            if len(content) > 80000:
+                content = content[:80000] + "…(truncated; narrow your query)"
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tc.id,
+                "content": content,
+            })
+
+        # Append assistant turn (must include thinking blocks unchanged)
+        # and the user turn carrying tool_results.
+        messages.append({"role": "assistant", "content": resp.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    if final_payload is None:
+        # Hit MAX_TURNS without commit. Surface whatever text we got.
+        log.warning("advisor: hit MAX_TURNS=%d without submit; "
+                    "tool_calls=%d", MAX_TURNS, tool_calls_made)
+        return {"summary": last_text[:1000] if last_text else
+                "Review hit turn cap without final commit.",
+                "config_suggestions": [], "anomalies": [],
+                "skipped_reason": "turn_cap_reached",
+                "turns": turn, "tool_calls": tool_calls_made}
+
+    raw_suggestions = final_payload.get("config_suggestions") or []
     valid: list[dict] = []
     for s in raw_suggestions:
         ok, why = _validate_suggestion(s)
@@ -322,18 +484,15 @@ async def review(bundle: dict) -> dict:
             log.info("advisor: rejected suggestion %s: %s", s, why)
 
     return {
-        "summary": payload.get("summary") or "",
+        "summary": final_payload.get("summary") or "",
         "config_suggestions": valid,
-        "anomalies": payload.get("anomalies") or [],
+        "anomalies": final_payload.get("anomalies") or [],
         "model": MODEL,
         "thinking_used": True,
+        "turns": turn,
+        "tool_calls": tool_calls_made,
     }
 
 
-def has_usable_key() -> bool:
-    return _resolve_key() is not None
-
-
-# Re-export the whitelist so server.py can validate apply requests
-# against the same source of truth without duplicating constants.
-__all__ = ["ALLOWED_TARGETS", "has_usable_key", "review"]
+# Re-export the whitelist for server-side validation symmetry.
+__all__ = ["ALLOWED_TARGETS", "QueryFn", "has_usable_key", "review"]

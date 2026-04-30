@@ -932,20 +932,149 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
     }
 
 
+def _parse_iso(s: str | None) -> int | None:
+    """Loose ISO-8601 → unix-seconds parser for the advisor's tool args.
+    Accepts trailing Z, offsetless naive datetimes (treated as UTC), or
+    anything Python's fromisoformat understands."""
+    if not s:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _make_advisor_query_fn(device_sn: str):
+    """Build a closure that runs Claude's tool calls against the local
+    DB. Each tool returns a JSON-serialisable dict; on bad inputs we
+    return an `error` field rather than raising — Claude can then
+    re-issue the call with corrected args."""
+    from datetime import datetime, timezone
+
+    def _iso(ts: float | int | None) -> str | None:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+
+    async def query(name: str, args: dict) -> dict:
+        if name == "query_samples":
+            start = _parse_iso(args.get("start_iso"))
+            end = _parse_iso(args.get("end_iso"))
+            bucket_s = int(args.get("bucket_s") or 3600)
+            if not start or not end:
+                return {"error": "start_iso/end_iso required (ISO 8601)"}
+            hours = max(1, (end - start) // 3600 + 1)
+            rows = state.energy.history(device_sn, hours=hours, bucket_s=bucket_s)
+            # Filter to the requested window (history() goes back N hours
+            # from now; we then clip).
+            out = []
+            for r in rows:
+                if r["ts"] < start or r["ts"] >= end:
+                    continue
+                out.append({
+                    "ts": _iso(r["ts"]),
+                    "soc": r.get("battery_pct"),
+                    "in_w_avg": int(r.get("input_wh") or 0)
+                              if bucket_s == 3600 else None,
+                    "out_w_avg": int(r.get("output_wh") or 0)
+                               if bucket_s == 3600 else None,
+                    "solar_w_avg": int(r.get("solar_wh") or 0)
+                                 if bucket_s == 3600 else None,
+                    "ac_input_w_avg": int(r.get("ac_input_wh") or 0)
+                                    if bucket_s == 3600 else None,
+                    "in_w_instant": r.get("input_w"),
+                    "out_w_instant": r.get("output_w"),
+                    "solar_w_instant": r.get("solar_w"),
+                })
+            return {"rows": out[:500], "row_count": len(out),
+                    "truncated": len(out) > 500}
+
+        if name == "query_predictions":
+            start = _parse_iso(args.get("start_iso"))
+            end = _parse_iso(args.get("end_iso"))
+            max_lead = args.get("max_lead_h")
+            samples = state.energy.prediction_accuracy(device_sn)
+            out = []
+            for p in samples:
+                if start and p.get("target", 0) < start:
+                    continue
+                if end and p.get("target", 0) >= end:
+                    continue
+                if max_lead is not None and p.get("lead_time_h", 0) > max_lead:
+                    continue
+                out.append({
+                    "made_at": _iso(p.get("made_at")),
+                    "target": _iso(p.get("target")),
+                    "lead_time_h": p.get("lead_time_h"),
+                    "predicted_soc": round(p.get("predicted_soc", 0), 1),
+                    "actual_soc": round(p.get("actual_soc", 0), 1),
+                    "error_pp": round(p.get("error", 0), 1),
+                })
+            return {"rows": out[:500], "row_count": len(out),
+                    "truncated": len(out) > 500}
+
+        if name == "query_decisions":
+            start = _parse_iso(args.get("start_iso"))
+            end = _parse_iso(args.get("end_iso"))
+            samples = state.energy.smart_charge_analytics(device_sn, days=90)
+            out = []
+            for d in samples:
+                if start and (d.get("decided_at") or 0) < start:
+                    continue
+                if end and (d.get("decided_at") or 0) >= end:
+                    continue
+                out.append({
+                    "decided_at": _iso(d.get("decided_at")),
+                    "action": d.get("action"),
+                    "mode": d.get("mode"),
+                    "predicted_sunrise_soc_pct": d.get("predicted_sunrise_soc_pct"),
+                    "actual_sunrise_soc_pct": d.get("actual_sunrise_soc_pct"),
+                    "target_sunrise_soc_pct": d.get("target_sunrise_soc_pct"),
+                    "reason": d.get("reason"),
+                })
+            return {"rows": out[:500], "row_count": len(out),
+                    "truncated": len(out) > 500}
+
+        if name == "query_weather":
+            start = _parse_iso(args.get("start_iso")) or 0
+            end = _parse_iso(args.get("end_iso")) or int(time.time())
+            obs = state.energy.list_weather_observations(since_ts=start, limit=2000)
+            out = []
+            for w in obs:
+                if w["ts"] >= end:
+                    continue
+                out.append({
+                    "hour": _iso(w["ts"]),
+                    "ghi_w_m2": w.get("ghi_w_m2"),
+                    "cloud_cover_pct": w.get("cloud_cover_pct"),
+                })
+            return {"rows": out[:500], "row_count": len(out),
+                    "truncated": len(out) > 500}
+
+        if name == "query_battery_packs":
+            packs = state.energy.latest_battery_packs(device_sn)
+            return {"rows": packs, "row_count": len(packs)}
+
+        return {"error": f"unknown tool: {name}"}
+
+    return query
+
+
 async def _run_advisor_review(device_sn: str) -> dict:
-    """Build the data bundle, hand it to Claude, persist whatever
-    suggestions and anomalies come back. Returns a small status dict
-    the caller can surface (count of new suggestions, summary text)."""
+    """Build the starter bundle, run Claude through the agentic
+    multi-turn loop with DB-query tools, persist whatever suggestions
+    and anomalies come back."""
     import claude_advisor
     if not claude_advisor.has_usable_key():
         return {"ok": False, "reason": "no_api_key"}
     bundle = await _build_advisor_bundle(device_sn)
-    result = await claude_advisor.review(bundle)
-    # If the call failed entirely, surface the reason (which now
-    # includes the actual Anthropic error message). If it succeeded
-    # in text-only mode (no_tool_call), still persist the summary so
-    # the user sees what Claude said.
-    if result.get("skipped_reason") and result["skipped_reason"] != "no_tool_call":
+    query_fn = _make_advisor_query_fn(device_sn)
+    result = await claude_advisor.review(bundle, query_fn=query_fn)
+    if result.get("skipped_reason") and result["skipped_reason"] not in ("no_tool_call", "turn_cap_reached"):
         return {"ok": False, "reason": result["skipped_reason"]}
 
     # Auto-expire stale pending suggestions before adding new ones, so
@@ -985,14 +1114,21 @@ async def _run_advisor_review(device_sn: str) -> dict:
         except Exception as e:
             log.warning("advisor: failed to persist anomaly %s: %s", a, e)
 
-    log.info("advisor: %s — %d suggestions, %d anomalies (review took model=%s)",
-             device_sn, len(result.get("config_suggestions", [])),
-             len(result.get("anomalies", [])), result.get("model"))
+    log.info("advisor: %s — %d suggestions, %d anomalies in %d turns "
+             "(%d tool calls, model=%s)",
+             device_sn,
+             len(result.get("config_suggestions", [])),
+             len(result.get("anomalies", [])),
+             result.get("turns", 0),
+             result.get("tool_calls", 0),
+             result.get("model"))
     return {
         "ok": True,
         "summary": result.get("summary", ""),
         "new_suggestion_ids": new_ids,
         "model": result.get("model"),
+        "turns": result.get("turns", 0),
+        "tool_calls": result.get("tool_calls", 0),
     }
 
 
