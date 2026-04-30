@@ -70,10 +70,10 @@ BATTERY_PACK_REFRESH_S = 0
 # for no analytical gain; daily-learning queries only need ~minute
 # resolution. Cache stays fresh; only the DB write is throttled.
 BATTERY_PACK_DB_PERSIST_S = 300
-# Local hour-of-day to fire the daily Claude advisor review. 8 = 8am
-# in the user's tz (resolved via location.get_tz_offset). Override with
-# JACKERY_ADVISOR_HOUR env var if you want the review at a different time.
-ADVISOR_TRIGGER_HOUR = int(os.environ.get("JACKERY_ADVISOR_HOUR", "8"))
+# Local hour-of-day for the daily Claude advisor review. Lives in
+# user_settings ("advisor_trigger_hour") so it's editable from the
+# Settings page without a container restart. Env-var fallback
+# (JACKERY_ADVISOR_HOUR) handled automatically by settings.py.
 
 
 # ---------- app state ----------
@@ -1152,7 +1152,7 @@ async def advisor_loop():
             tz_off = device_location.get_tz_offset() or 0
             local_hour = (int(now + tz_off) // 3600) % 24
             # Run once when local hour first equals our trigger hour.
-            if local_hour == ADVISOR_TRIGGER_HOUR:
+            if local_hour == user_settings.get("advisor_trigger_hour"):
                 for d in state.energy.list_devices():
                     sn = d.get("device_sn")
                     if not sn:

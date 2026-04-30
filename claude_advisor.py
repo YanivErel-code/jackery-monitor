@@ -52,10 +52,16 @@ MODEL = os.environ.get("JACKERY_ADVISOR_MODEL", "claude-opus-4-7")
 CONTEXT_1M_HEADER = os.environ.get(
     "JACKERY_ADVISOR_BETA", "context-1m-2025-08-07")
 
-# Extended thinking budget. The 1M context lets us be generous; bigger
-# budget gives the model more headroom to systematically walk forecast
-# residuals → hypothesis → tool query → diagnosis.
+# Extended thinking effort level for adaptive-thinking models (Opus 4.7+).
+# Valid: "low" | "medium" | "high". Higher = the model will think longer
+# when the task warrants it. The model self-allocates the budget.
+# (Older models use a fixed token budget instead — see THINKING_BUDGET.)
+THINKING_EFFORT = os.environ.get("JACKERY_ADVISOR_THINKING_EFFORT", "high")
+
+# Legacy fixed-budget thinking, used only if JACKERY_ADVISOR_THINKING_MODE
+# is set to "budget" (for older models that don't accept adaptive).
 THINKING_BUDGET = int(os.environ.get("JACKERY_ADVISOR_THINKING", "16000"))
+THINKING_MODE = os.environ.get("JACKERY_ADVISOR_THINKING_MODE", "adaptive")
 
 # Output token cap per turn. Tool-call turns are usually short; the final
 # submit_algorithm_review turn can be longer if many anomalies need
@@ -384,28 +390,39 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
         log.info("advisor turn %d/%d (tool calls so far: %d)",
                  turn, MAX_TURNS, tool_calls_made)
         try:
-            # MUST use streaming for long-running requests. With 16k
-            # thinking + 32k max_tokens + tool use, the SDK will reject
-            # non-streaming calls with "Streaming is required for
-            # operations that may take longer than 10 minutes." The
-            # final message has the same shape as a create() return,
-            # we just consume the event stream first to get there.
-            async with client.messages.stream(
+            # MUST use streaming for long-running requests. The SDK
+            # rejects non-streaming calls that may exceed 10 min with
+            # a hard ValueError; with thinking + 32k max_tokens + tool
+            # use, every advisor turn trips that heuristic.
+            #
+            # Thinking API differs between model generations:
+            #   - Older Opus/Sonnet: {"type": "enabled", "budget_tokens": N}
+            #   - Opus 4.7+: {"type": "adaptive"} + extra_body output_config
+            # The model rejects the wrong shape. JACKERY_ADVISOR_THINKING_MODE
+            # selects between them; default "adaptive" matches Opus 4.7.
+            kwargs: dict = dict(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
-                thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
                 tools=tools,
                 tool_choice={"type": "auto"},
                 system=_system_prompt(),
                 messages=messages,
-                # 1M context window opt-in — ignored on models that don't
-                # support it. Lets the multi-turn loop accumulate plenty
-                # of tool results without truncation.
                 extra_headers={"anthropic-beta": CONTEXT_1M_HEADER},
-            ) as stream:
-                # We don't need to react to individual events for now —
-                # just drain the stream and pull the assembled message
-                # at the end. Could surface interim progress later.
+            )
+            if THINKING_MODE == "adaptive":
+                kwargs["thinking"] = {"type": "adaptive"}
+                # output_config is a top-level body field on newer models,
+                # not a kwarg on the SDK call — pass via extra_body so the
+                # SDK forwards it untouched.
+                kwargs["extra_body"] = {
+                    "output_config": {"effort": THINKING_EFFORT},
+                }
+            else:
+                kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": THINKING_BUDGET,
+                }
+            async with client.messages.stream(**kwargs) as stream:
                 async for _ in stream:
                     pass
                 resp = await stream.get_final_message()

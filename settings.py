@@ -66,6 +66,15 @@ SCHEMA: dict[str, dict[str, Any]] = {
         "label": "Low-battery alert threshold (%)",
         "hint": "Battery percentage below which the dashboard fires a low-battery alert.",
     },
+    "advisor_trigger_hour": {
+        "env": "JACKERY_ADVISOR_HOUR",
+        "default": 8,
+        "type": "int",
+        "min": 0,
+        "max": 23,
+        "label": "AI advisor daily-review hour",
+        "hint": "Local hour (0-23) when Claude reviews yesterday's data per device. 8 = 8 AM local. Requires an Anthropic API key on this page; runs once per device per day.",
+    },
 }
 
 
