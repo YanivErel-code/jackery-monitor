@@ -49,7 +49,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "off",                       # off | test | active
     "kasa_device_host": None,           # which saved Kasa plug = the grid input
     "target_sunrise_soc_pct": 25,        # SOC we want at sunrise
-    "max_charge_w": 800,                 # observed AC charging rate
+    # AC charging rate the unit will pull from the wall while the plug
+    # is on. 5000 Plus default "Fast" mode is ~1500W; Standard is ~600W;
+    # Super-fast on 240V split-phase up to ~2400W. Pick what the unit
+    # is actually set to in its app/UI.
+    "max_charge_w": 1500,
     "max_on_duration_minutes": 480,      # safety cap per dusk-dawn cycle
     "claude_enabled": False,             # optional decision narrator
 }

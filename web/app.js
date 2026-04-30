@@ -1698,7 +1698,7 @@ async function loadSmartCharge() {
     // Hydrate the form fields. Defaults match smart_charge.DEFAULT_CONFIG.
     $('sc-mode').value = cfg.mode || 'off';
     $('sc-target-soc').value = cfg.target_sunrise_soc_pct ?? 25;
-    $('sc-max-charge-w').value = cfg.max_charge_w ?? 800;
+    $('sc-max-charge-w').value = cfg.max_charge_w ?? 1500;
     $('sc-max-on-min').value = cfg.max_on_duration_minutes ?? 480;
     $('sc-claude-toggle').checked = !!cfg.claude_enabled;
 
@@ -1808,7 +1808,7 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
     mode: $('sc-mode').value,
     kasa_device_host: $('sc-kasa-host').value || null,
     target_sunrise_soc_pct: parseInt($('sc-target-soc').value, 10) || 25,
-    max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 800,
+    max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 1500,
     max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
     claude_enabled: $('sc-claude-toggle').checked,
   };
