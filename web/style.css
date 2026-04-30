@@ -629,19 +629,39 @@ main {
 .sc-act-skip { background: rgba(148,163,184,.15); color: var(--text-mute); }
 .sc-mode    { color: var(--text-mute); font-size: 12px; font-family: var(--font-mono); }
 .sc-reason  { color: var(--text); font-size: 13px; }
-.sc-history { display: flex; flex-direction: column; gap: 4px;
-              font-size: 12px; font-family: var(--font-mono); }
+.sc-history {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; font-family: var(--font-mono);
+  /* Cap height so a busy week of decisions doesn't push every other
+     panel off the screen; scroll inside the list instead. */
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+/* Slim scrollbar that matches the dark theme — full-width default scrollbars
+   are visually loud against the otherwise dense decision rows. */
+.sc-history::-webkit-scrollbar { width: 6px; }
+.sc-history::-webkit-scrollbar-thumb {
+  background: var(--bg-elev-2); border-radius: 3px;
+}
+.sc-history::-webkit-scrollbar-thumb:hover { background: var(--border); }
+
 .sc-row {
   display: grid;
-  grid-template-columns: 140px 56px 56px 1fr;
+  /* First column (timestamp) was 140px — wide enough for full datetimes
+     but they wrap on narrow screens. Now the formatter emits short
+     strings ("11:54 AM", "Yesterday 11:54 AM", "Apr 30, 11:54 AM") and
+     auto-sizes to whichever is widest in the current view. nowrap on
+     .sc-when keeps multi-line wrapping from re-introducing the issue. */
+  grid-template-columns: auto 56px 56px auto 1fr;
   align-items: center;
   gap: 8px;
   padding: 4px 6px;
   border-radius: 4px;
 }
 .sc-row:hover { background: rgba(255,255,255,.02); }
-.sc-row .sc-when   { color: var(--text-mute); }
-.sc-row .sc-pred   { color: var(--text-dim); }
+.sc-row .sc-when   { color: var(--text-mute); white-space: nowrap; }
+.sc-row .sc-pred   { color: var(--text-dim); white-space: nowrap; }
 .sc-row .sc-reason { color: var(--text-mute); white-space: nowrap;
                      overflow: hidden; text-overflow: ellipsis; }
 .sc-narration {

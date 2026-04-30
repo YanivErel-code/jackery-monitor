@@ -1770,6 +1770,28 @@ function renderSmartChargeAnalytics(j) {
   el.hidden = false;
 }
 
+// Compact decision timestamp. The full toLocaleString form
+// ("4/30/2026, 11:54:27 AM") wraps awkwardly in the 140px column and
+// the year/seconds add no value when scanning a list. Show:
+//   - Same day:  "11:54 AM"
+//   - Yesterday: "Yesterday 11:54 AM"
+//   - Earlier:   "Apr 30, 11:54 AM"  (year only when different year)
+function _formatDecisionTime(epochS) {
+  const d = new Date((epochS || 0) * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (sameDay) return time;
+  if (isYesterday) return `Yesterday ${time}`;
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const date = d.toLocaleDateString([], sameYear
+    ? { month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${date}, ${time}`;
+}
+
 function renderSmartChargeHistory(rows) {
   const block = $('sc-history-block');
   const list = $('sc-history');
@@ -1779,8 +1801,13 @@ function renderSmartChargeHistory(rows) {
     return;
   }
   block.hidden = false;
-  list.innerHTML = rows.slice(0, 20).map((r) => {
-    const when = new Date((r.decided_at || 0) * 1000).toLocaleString();
+  // Cap at 50 rows in the DOM — older ones live in the DB and the
+  // analytics block above the list summarizes them. With the new
+  // scrolling container this still lets the user review a full day's
+  // worth of decisions without the panel taking over the page.
+  list.innerHTML = rows.slice(0, 50).map((r) => {
+    const when = _formatDecisionTime(r.decided_at);
+    const fullWhen = new Date((r.decided_at || 0) * 1000).toLocaleString();
     const pred = r.predicted_sunrise_soc_pct != null
       ? `${Math.round(r.predicted_sunrise_soc_pct)}%` : '—';
     const actual = r.actual_sunrise_soc_pct != null
@@ -1797,7 +1824,7 @@ function renderSmartChargeHistory(rows) {
       : '';
     return `
       <div class="sc-row">
-        <span class="sc-when">${when}</span>
+        <span class="sc-when" title="${fullWhen}">${when}</span>
         <span class="sc-action ${actionCls}">${(r.action || '?').toUpperCase()}</span>
         <span class="sc-mode">[${r.mode || '?'}]</span>
         <span class="sc-pred">predicted ${pred} → actual ${actual} (target ${target})</span>
