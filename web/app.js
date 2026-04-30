@@ -3379,10 +3379,46 @@ document.getElementById('alg-review-now')?.addEventListener('click', async () =>
   }
 });
 
+document.getElementById('alg-show-context')?.addEventListener('click', async () => {
+  const wrap = $('alg-changes');
+  if (!wrap) return;
+  if (!wrap.hidden && wrap.dataset.mode === 'context') {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.dataset.mode = 'context';
+  wrap.innerHTML = '<div class="hint">Loading…</div>';
+  wrap.hidden = false;
+  try {
+    const dev = activeJackeryDevice();
+    const params = dev?.device_sn
+      ? `?device_sn=${encodeURIComponent(dev.device_sn)}` : '';
+    const r = await fetch(`/api/algorithm/preview${params}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    wrap.innerHTML = `
+      <h3 style="margin:0 0 4px;font-size:14px">Context sent to Claude</h3>
+      <p class="hint" style="margin:0 0 8px">
+        Model: <code>${safe(j.model)}</code> · thinking budget: <code>${j.thinking_budget}</code> tokens.
+        This is the exact text Claude reads as the user message — minus
+        the system prompt and tool schema.
+      </p>
+      <pre class="dbg-pre" style="max-height:520px">${safe(j.rendered)}</pre>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="hint">Failed: ${e.message || e}</div>`;
+  }
+});
+
 document.getElementById('alg-show-history')?.addEventListener('click', async () => {
   const wrap = $('alg-changes');
   if (!wrap) return;
-  if (!wrap.hidden) { wrap.hidden = true; return; }
+  if (!wrap.hidden && wrap.dataset.mode === 'history') {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.dataset.mode = 'history';
   try {
     const dev = activeJackeryDevice();
     const params = dev?.device_sn

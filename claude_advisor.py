@@ -93,13 +93,19 @@ def _format_data_bundle(bundle: dict) -> str:
 
     samples = bundle.get("recent_samples") or []
     if samples:
-        lines.append("Last 24h hourly samples (ts ISO, soc, "
-                     "input_w, output_w, solar_w, ac_in_w):")
+        lines.append("Last 24h hourly samples. Each row shows the *time-")
+        lines.append("integrated* average power (Wh / 1h = avg W) which")
+        lines.append("reconciles with SOC drain — NOT the instantaneous")
+        lines.append("sample at poll time. Format: hour | soc | in_avg |")
+        lines.append("out_avg | solar_avg | ac_in_avg | (in_inst, out_inst):")
         for s in samples:
             lines.append(
                 f"  {s['hour']}  soc={s.get('soc')}%  "
-                f"in={s.get('input_w')}W  out={s.get('output_w')}W  "
-                f"solar={s.get('solar_w')}W  ac_in={s.get('ac_input_w')}W"
+                f"in={s.get('input_w_avg')}W  out={s.get('output_w_avg')}W  "
+                f"solar={s.get('solar_w_avg')}W  "
+                f"ac_in={s.get('ac_input_w_avg')}W  "
+                f"(inst: in={s.get('input_w_instant')}W, "
+                f"out={s.get('output_w_instant')}W)"
             )
         lines.append("")
 

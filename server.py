@@ -840,16 +840,28 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
         log.debug("advisor: accuracy summary failed: %s", e)
 
     # Last 24h hourly history (energy_db.history with 1h buckets).
+    # IMPORTANT: report the *integrated* W = Wh-per-hour for power
+    # fields, not AVG(last_w) which is the average of instantaneous
+    # samples. The latter biases low when brief high-load spikes
+    # happen between polls (we'd see idle in most samples). The
+    # integrated value is the true average power for the hour and
+    # what reconciles with SOC drain.
     recent_samples = []
     try:
         for h in state.energy.history(device_sn, hours=24, bucket_s=3600):
             recent_samples.append({
                 "hour": _iso(h["ts"]),
                 "soc": h.get("battery_pct"),
-                "input_w": h.get("input_w"),
-                "output_w": h.get("output_w"),
-                "solar_w": h.get("solar_w"),
-                "ac_input_w": h.get("ac_input_w"),
+                # Wh accumulated per 1h bucket → average W during that hour.
+                "input_w_avg": int(h.get("input_wh") or 0),
+                "output_w_avg": int(h.get("output_wh") or 0),
+                "solar_w_avg": int(h.get("solar_wh") or 0),
+                "ac_input_w_avg": int(h.get("ac_input_wh") or 0),
+                # Also include instantaneous values for comparison —
+                # divergence between _avg and _instant reveals brief
+                # spikes the poller missed.
+                "input_w_instant": h.get("input_w"),
+                "output_w_instant": h.get("output_w"),
             })
     except Exception as e:
         log.debug("advisor: samples bundle failed: %s", e)
@@ -1544,6 +1556,27 @@ def api_alg_suggestion_dismiss(suggestion_id: int):
         return {"ok": True, "already": s["status"]}
     state.energy.update_suggestion_status(suggestion_id, "dismissed")
     return {"ok": True}
+
+
+@app.get("/api/algorithm/preview")
+async def api_alg_preview(device_sn: str | None = None):
+    """Return the exact text bundle the advisor sends to Claude — minus
+    the system prompt and the tool schema. Used by the UI's "Show what
+    Claude sees" button so the user can verify the data flow without
+    burning an API call."""
+    import claude_advisor
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    bundle = await _build_advisor_bundle(device_sn)
+    return {
+        "device_sn": device_sn,
+        "rendered": claude_advisor._format_data_bundle(bundle),
+        "model": claude_advisor.MODEL,
+        "thinking_budget": claude_advisor.THINKING_BUDGET,
+        "raw_bundle": bundle,
+    }
 
 
 @app.get("/api/algorithm/changes")
