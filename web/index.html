@@ -600,6 +600,27 @@
         </p>
         <div id="logs-list" class="logs-list"></div>
       </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Debug</h2>
+          <span id="debug-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Ad-hoc queries against the local data store — useful for verifying the forecast / smart-charge / per-pack pipelines without leaving the dashboard. Each button writes its results into the panel below.
+        </p>
+        <div class="debug-buttons">
+          <button id="dbg-forecast-24h" class="btn btn-ghost" type="button">Forecast vs actual (24h)</button>
+          <button id="dbg-forecast-buckets" class="btn btn-ghost" type="button">Forecast accuracy (by lead time)</button>
+          <button id="dbg-smart-charge" class="btn btn-ghost" type="button">Smart-charge analytics</button>
+          <button id="dbg-daily-summary" class="btn btn-ghost" type="button">Daily summary (last 7d)</button>
+          <button id="dbg-battery-packs" class="btn btn-ghost" type="button">Battery packs (live)</button>
+          <button id="dbg-raw-props" class="btn btn-ghost" type="button">Raw cloud props</button>
+          <button id="dbg-cloud-probe" class="btn btn-ghost" type="button">Cloud endpoint probe</button>
+          <button id="dbg-clear" class="btn btn-ghost" type="button" style="margin-left:auto">Clear</button>
+        </div>
+        <div id="debug-output" class="debug-output" hidden></div>
+      </section>
     </section>
 
     <!-- ============== SETTINGS TAB ============== -->

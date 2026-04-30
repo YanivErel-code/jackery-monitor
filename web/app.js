@@ -1032,6 +1032,199 @@ $('logs-filter')?.addEventListener('change', () => {
 $('logs-auto')?.addEventListener('change', loadLogs);
 
 // ============================================================
+// LOGS → DEBUG PANEL
+// ============================================================
+// Each button runs an ad-hoc query against the local data store,
+// formats the result as a table, and writes it to #debug-output.
+// Replaces the console.log / console.table workflow.
+
+function _dbgRender(title, rows, columns) {
+  const out = $('debug-output');
+  if (!out) return;
+  out.hidden = false;
+  if (!rows || !rows.length) {
+    out.innerHTML = `<div class="dbg-block"><h3>${title}</h3><p class="hint">No data.</p></div>` + out.innerHTML;
+    return;
+  }
+  const cols = columns || Object.keys(rows[0]);
+  const head = cols.map(c => `<th>${c}</th>`).join('');
+  const body = rows.map(r => `<tr>${cols.map(c => `<td>${_dbgFmt(r[c])}</td>`).join('')}</tr>`).join('');
+  const ts = new Date().toLocaleTimeString();
+  out.innerHTML = `
+    <div class="dbg-block">
+      <h3>${title} <small class="hint">(${ts})</small></h3>
+      <div class="dbg-table-wrap">
+        <table class="dbg-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+      </div>
+    </div>` + out.innerHTML;
+}
+
+function _dbgFmt(v) {
+  if (v == null) return '—';
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return Math.abs(v) < 1 && v !== 0 ? v.toFixed(3) : v.toString();
+  }
+  if (typeof v === 'object') return `<code>${JSON.stringify(v).slice(0,80)}</code>`;
+  return String(v);
+}
+
+function _dbgSummary(title, lines) {
+  const out = $('debug-output');
+  if (!out) return;
+  out.hidden = false;
+  const ts = new Date().toLocaleTimeString();
+  const items = lines.map(l => `<div>${l}</div>`).join('');
+  out.innerHTML = `
+    <div class="dbg-block">
+      <h3>${title} <small class="hint">(${ts})</small></h3>
+      <div class="dbg-summary">${items}</div>
+    </div>` + out.innerHTML;
+}
+
+async function _dbgFetch(url) {
+  const status = $('debug-status');
+  status.hidden = false;
+  status.textContent = `Fetching ${url}…`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    status.hidden = true;
+    return await r.json();
+  } catch (e) {
+    status.textContent = `Failed: ${e.message || e}`;
+    return null;
+  }
+}
+
+$('dbg-forecast-24h')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/forecast/accuracy');
+  if (!j) return;
+  const cutoff = Date.now()/1000 - 24*3600;
+  const recent = (j.samples || []).filter(s => s.target >= cutoff && s.actual_soc != null);
+  if (!recent.length) {
+    _dbgSummary('Forecast vs actual (last 24h)', ['No predictions with actuals in the last 24h.']);
+    return;
+  }
+  const errs = recent.map(s => Math.abs(s.predicted_soc - s.actual_soc));
+  const mae = errs.reduce((a,b)=>a+b,0) / errs.length;
+  const max = Math.max(...errs);
+  const overunder = recent.map(s => s.predicted_soc - s.actual_soc);
+  const meanBias = overunder.reduce((a,b)=>a+b,0) / overunder.length;
+  _dbgSummary(`Forecast vs actual (last 24h, ${recent.length} samples)`, [
+    `<strong>MAE:</strong> ${mae.toFixed(1)}pp`,
+    `<strong>Max error:</strong> ${max.toFixed(1)}pp`,
+    `<strong>Bias:</strong> ${meanBias > 0 ? '+' : ''}${meanBias.toFixed(1)}pp ${meanBias > 0 ? '(over-predicting)' : '(under-predicting)'}`,
+  ]);
+  const rows = recent.map(s => ({
+    target: new Date(s.target*1000).toLocaleString(),
+    lead_h: s.lead_time_h,
+    pred: Math.round(s.predicted_soc),
+    actual: Math.round(s.actual_soc),
+    err_pp: (s.predicted_soc - s.actual_soc).toFixed(1),
+  })).sort((a,b) => a.target.localeCompare(b.target));
+  _dbgRender('Predictions, sorted by target time', rows);
+});
+
+$('dbg-forecast-buckets')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/forecast/accuracy');
+  if (!j) return;
+  const buckets = j.summary || {};
+  const rows = Object.entries(buckets).map(([bucket, b]) => ({
+    lead_time: bucket,
+    samples: b.n,
+    mae_pp: b.mae,
+  }));
+  _dbgRender(`Forecast accuracy by lead time (${(j.samples||[]).length} samples total)`, rows);
+});
+
+$('dbg-smart-charge')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/smart_charge/analytics?days=14');
+  if (!j) return;
+  const s = j.summary || {};
+  const lines = [
+    `<strong>Window:</strong> ${j.days || 14} days`,
+    `<strong>Decisions:</strong> ${s.n || 0}`,
+    `<strong>Target hit rate:</strong> ${s.target_hit_rate != null ? Math.round(s.target_hit_rate * 100) + '%' : '—'}`,
+    `<strong>Mean abs error:</strong> ${s.mae_pp != null ? s.mae_pp.toFixed(1) + 'pp' : '—'}`,
+  ];
+  _dbgSummary('Smart-charge analytics', lines);
+  if (j.samples?.length) {
+    _dbgRender('Recent decisions',
+      j.samples.slice(0, 20).map(d => ({
+        when: new Date((d.decided_at || 0) * 1000).toLocaleString(),
+        action: d.action,
+        mode: d.mode,
+        pred_sunrise: d.predicted_sunrise_soc_pct != null ? Math.round(d.predicted_sunrise_soc_pct) : null,
+        actual_sunrise: d.actual_sunrise_soc_pct != null ? Math.round(d.actual_sunrise_soc_pct) : null,
+        target: d.target_sunrise_soc_pct,
+        err_pp: d.prediction_error_pp != null ? d.prediction_error_pp.toFixed(1) : null,
+      })));
+  }
+});
+
+$('dbg-daily-summary')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/daily_summary?days=7');
+  if (!j || !j.rows?.length) {
+    _dbgSummary('Daily summary', ['No rows yet.']);
+    return;
+  }
+  const rows = j.rows.map(r => ({
+    date: r.date,
+    sunset_pred: r.predicted_sunset_soc_pct != null ? Math.round(r.predicted_sunset_soc_pct) : null,
+    sunset_actual: r.actual_sunset_soc_pct != null ? Math.round(r.actual_sunset_soc_pct) : null,
+    sunrise_pred: r.predicted_sunrise_soc_pct != null ? Math.round(r.predicted_sunrise_soc_pct) : null,
+    sunrise_actual: r.actual_sunrise_soc_pct != null ? Math.round(r.actual_sunrise_soc_pct) : null,
+  }));
+  _dbgRender(`Daily sunset/sunrise predicted vs actual (${rows.length} days)`, rows);
+});
+
+$('dbg-battery-packs')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/devices/battery_packs');
+  if (!j) return;
+  const rows = (j.packs || []).map(p => ({
+    order: p.deviceOrder,
+    sn_tail: String(p.deviceSn || '').slice(-7),
+    soc: p.rb,
+    input_w: p.ip,
+    output_w: p.op,
+    temp_c: p.it === 999 ? '—' : p.it,
+    err: p.ec,
+  }));
+  _dbgRender(
+    `Battery packs (${rows.length}, fetched_at: ${new Date((j.fetched_at || 0) * 1000).toLocaleString()})`,
+    rows,
+  );
+});
+
+$('dbg-raw-props')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/debug/raw_props');
+  if (!j) return;
+  const props = j.props || {};
+  const rows = Object.keys(props).sort().map(k => ({ key: k, value: props[k] }));
+  _dbgRender(`Raw cloud properties (${j.device_sn || ''})`, rows);
+});
+
+$('dbg-cloud-probe')?.addEventListener('click', async () => {
+  const j = await _dbgFetch('/api/debug/cloud_probe');
+  if (!j) return;
+  const out = $('debug-output');
+  out.hidden = false;
+  const ts = new Date().toLocaleTimeString();
+  out.innerHTML = `
+    <div class="dbg-block">
+      <h3>Cloud probe <small class="hint">(${ts})</small></h3>
+      <pre class="dbg-pre">${JSON.stringify(j.results || j, null, 2)}</pre>
+    </div>` + out.innerHTML;
+});
+
+$('dbg-clear')?.addEventListener('click', () => {
+  const out = $('debug-output');
+  out.innerHTML = '';
+  out.hidden = true;
+  $('debug-status').hidden = true;
+});
+
+// ============================================================
 // SETTINGS TAB
 // ============================================================
 async function loadSettings() {

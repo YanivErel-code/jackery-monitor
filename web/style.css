@@ -654,6 +654,61 @@ main {
   display: flex; justify-content: space-between; gap: 8px;
 }
 
+/* Logs → Debug panel: compact tables for ad-hoc data inspection */
+.debug-buttons {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 12px;
+}
+.debug-output {
+  display: flex; flex-direction: column; gap: 16px;
+  margin-top: 12px;
+}
+.dbg-block {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .02);
+}
+.dbg-block h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.dbg-block h3 small { font-weight: 400; margin-left: 6px; }
+.dbg-summary {
+  display: flex; flex-direction: column; gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.dbg-table-wrap { overflow-x: auto; max-height: 400px; }
+.dbg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.dbg-table th, .dbg-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.dbg-table th {
+  position: sticky; top: 0;
+  background: var(--card-bg, #0f1219);
+  color: var(--text-mute);
+  font-weight: 600;
+}
+.dbg-table tr:hover { background: rgba(255, 255, 255, .02); }
+.dbg-pre {
+  background: rgba(0, 0, 0, .3);
+  padding: 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  max-height: 400px;
+  overflow: auto;
+  margin: 0;
+}
+
 /* TOU rate slot editor in Settings. One row per slot, with the
    start-end window read-only (utility-defined) and the rate editable. */
 .cost-tou-slots {

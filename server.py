@@ -1071,6 +1071,20 @@ def api_forecast_accuracy(device_sn: str | None = None):
     return {"device_sn": device_sn, "samples": samples, "summary": summary}
 
 
+@app.get("/api/daily_summary")
+def api_daily_summary(device_sn: str | None = None, days: int = 7):
+    """Daily sunset/sunrise predicted vs actual SOC rows. Sourced from
+    daily_solar_summary, written by the smart-charge tick. Used by the
+    Logs → Debug panel for at-a-glance comparison."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "rows": []}
+    days = max(1, min(int(days), 90))
+    return {"device_sn": device_sn, "days": days,
+            "rows": state.energy.list_daily_summary(device_sn, days=days)}
+
+
 @app.get("/api/smart_charge/config")
 def api_smart_charge_get():
     """Current smart-charge config + saved Kasa devices for the picker."""
