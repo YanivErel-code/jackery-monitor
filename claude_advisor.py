@@ -123,6 +123,27 @@ def _format_starter_bundle(bundle: dict) -> str:
         lines.append(f"- {k}: {v}")
     lines.append("")
 
+    # Recent code changes that re-define what historical data means.
+    # Without this hint the advisor re-flags the same bug every review
+    # because the 48h window still contains predictions/decisions from
+    # before the fix shipped.
+    changes = bundle.get("recent_code_changes") or []
+    if changes:
+        lines.append("## Recent code changes (read carefully)")
+        lines.append(
+            "The forecaster + smart-charge code was modified at the "
+            "timestamps below. Historical samples / predictions / "
+            "decisions older than the relevant timestamp were generated "
+            "by the OLD code. Treat patterns visible only in pre-fix "
+            "data as already-addressed and do NOT re-suggest the same "
+            "fix. Only flag a problem if you can show it in data "
+            "produced AFTER the relevant fix timestamp."
+        )
+        for c in changes:
+            lines.append(f"- {c.get('ts_iso')} [{c.get('subsystem')}]: "
+                         f"{c.get('summary')}")
+        lines.append("")
+
     accuracy = bundle.get("forecast_accuracy_summary") or {}
     if accuracy:
         lines.append("## Forecast accuracy by lead time (last 14d)")
