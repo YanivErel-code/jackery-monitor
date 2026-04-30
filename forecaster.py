@@ -81,6 +81,15 @@ LOAD_RECENCY_S = 3 * 86400
 # we just use the median (stable hour, e.g. overnight idle).
 LOAD_VARIABILITY_THRESHOLD = 0.5
 
+# Per-bucket load ceiling, expressed as a multiplier of the *overall mean*
+# load across history. With sparse histories (3-4 days), a single high-
+# output event at e.g. 1pm yields a per-bucket median of 2.5 kW while the
+# user's typical 1pm draw is 400W. The simulation then drains overnight
+# on a phantom multi-kW daily run and 24h+ predictions snap to 0%.
+# 2.0x overall mean keeps real daytime peaks (e.g. an HVAC cycle) but
+# blocks single-event medians from dominating.
+LOAD_BUCKET_CAP_MULT = 2.0
+
 
 def battery_capacity_wh(model_code: int | None) -> int:
     if model_code is None:
@@ -176,6 +185,11 @@ def fit_load_profile(
          (stable hour — typical for overnight idle), use the median. If
          large (variable hour — daytime activity), blend recent (last 3d
          at 70%) with older (30%) so the forecast follows recent shifts.
+      4. Final per-bucket cap at LOAD_BUCKET_CAP_MULT x overall mean —
+         protects against a single high-output event in a sparse history
+         (e.g. running an oven once at 1pm) from claiming "1pm load is
+         2.5kW every day". Without this, 18-24h-out predictions snap to
+         0% as the simulation drains the battery on phantom loads.
 
     Hours absent from the dict get a neighbor-hour fallback in
     `expected_load_w`, NOT a global average — global average bleeds
@@ -184,13 +198,20 @@ def fit_load_profile(
     now_ts = now_ts if now_ts is not None else time.time()
     recency_cutoff = now_ts - LOAD_RECENCY_S
 
-    all_vals = sorted(
+    all_vals_raw = [
         float(r["output_w"]) for r in energy_history
         if r.get("output_w") is not None
-    )
-    if not all_vals:
+    ]
+    if not all_vals_raw:
         return {}
+    all_vals = sorted(all_vals_raw)
     cap = all_vals[min(len(all_vals) - 1, int(len(all_vals) * 0.95))]
+    overall_mean = sum(all_vals_raw) / len(all_vals_raw)
+    # Per-bucket ceiling: never let a single hour claim more than this,
+    # regardless of what the median computed. Floor at a sensible "device
+    # is doing something" level so quiet histories still allow real
+    # daytime activity through.
+    bucket_ceiling = max(IDLE_LOAD_W * 6, LOAD_BUCKET_CAP_MULT * overall_mean)
 
     # bucket → list of (value, ts)
     buckets: dict[tuple[int, int], list[tuple[float, int]]] = {}
@@ -216,18 +237,19 @@ def fit_load_profile(
 
         # Stable bucket OR too few samples to recency-weight reliably.
         if rel_iqr < LOAD_VARIABILITY_THRESHOLD or n < 6:
-            profile[key] = median
+            profile[key] = min(median, bucket_ceiling)
             continue
 
         # Variable bucket: blend recent and older medians.
         recent = sorted(v for v, t in samples if t >= recency_cutoff)
         older = sorted(v for v, t in samples if t < recency_cutoff)
         if not recent:
-            profile[key] = median
+            profile[key] = min(median, bucket_ceiling)
             continue
         recent_med = recent[len(recent) // 2]
         older_med = older[len(older) // 2] if older else recent_med
-        profile[key] = 0.7 * recent_med + 0.3 * older_med
+        blended = 0.7 * recent_med + 0.3 * older_med
+        profile[key] = min(blended, bucket_ceiling)
 
     return profile
 

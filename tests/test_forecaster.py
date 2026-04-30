@@ -124,6 +124,35 @@ def test_load_profile_clips_outliers():
     assert bucket < 200, f"outlier leaked: bucket={bucket}"
 
 
+def test_load_profile_caps_runaway_buckets_against_overall_mean():
+    # Sparse history regression test: if a single hour-of-day has a few
+    # very high samples (e.g. user ran an EV charger one afternoon),
+    # the bucket median must NOT claim that's the typical load — that
+    # caused the 24h+ predictions to drain to 0% in the wild.
+    from datetime import datetime
+    base = 1_700_000_000  # arbitrary
+    energy = []
+    # 96 hours of 200W idle, scattered across all 24 hour-of-day buckets.
+    for i in range(96):
+        energy.append({"ts": base + i * 3600, "output_w": 200,
+                       "solar_w": 0, "battery_pct": 80})
+    # Now stack 4 high-load samples all at the same hour-of-day
+    # (same weekday too). Without the per-bucket ceiling, the median
+    # of [3000, 3000, 3000, 3000] = 3000W would dominate that hour.
+    spike_hour_ts = base + 13 * 3600  # hour 13 in the original cycle
+    for week in range(4):
+        energy.append({"ts": spike_hour_ts + week * 7 * 24 * 3600,
+                       "output_w": 3000, "solar_w": 0, "battery_pct": 50})
+    profile = forecaster.fit_load_profile(energy)
+    d = datetime.fromtimestamp(spike_hour_ts)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+    bucket = profile.get(key)
+    assert bucket is not None, "spike hour bucket missing"
+    # Overall mean is roughly (96*200 + 4*3000) / 100 ≈ 312W. Cap is
+    # 2x that = ~624W. Bucket should be capped well below 3000W.
+    assert bucket < 1000, f"runaway bucket leaked: {bucket}"
+
+
 def test_expected_load_uses_idle_default_when_no_data():
     # Empty profile → forecast hour gets IDLE_LOAD_W, NOT a global mean.
     # This is the regression test for the 0%-predicted-vs-44%-actual bug.
