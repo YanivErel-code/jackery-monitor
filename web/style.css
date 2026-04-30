@@ -914,6 +914,36 @@ main {
 }
 .keep-awake-row .hint { margin-left: auto; }
 
+/* Temperature unit (°C / °F) pill picker on the Settings tab.
+   Mirrors the keep-awake-row visually so the Display section reads
+   as a coherent pair of preferences. */
+.temp-unit-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  user-select: none;
+}
+.temp-unit-pills { margin-left: auto; display: inline-flex; gap: 4px; }
+.temp-pill {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+  font-family: var(--font-mono);
+}
+.temp-pill:hover { color: var(--text); }
+.temp-pill.on {
+  background: rgba(74, 222, 128, .12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* Raw cloud-properties dump on the Device tab. Shown collapsed by
    default; clicking "Show" expands it. */
 .raw-props {

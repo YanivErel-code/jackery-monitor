@@ -115,7 +115,7 @@
             <span id="battery-time">Loading…</span>
             <span id="battery-temp-group" class="meta-segment">
               <span class="dot-sep">·</span>
-              <span id="battery-temp">— °C</span>
+              <span id="battery-temp">—</span>
             </span>
           </div>
         </section>
@@ -758,13 +758,23 @@
           <h2>Display</h2>
         </div>
         <p class="hint" style="margin:6px 0 12px">
-          For dashboards left open on a wall-mounted iPad / tablet — uses the browser's Wake Lock API to keep the screen from dimming while the dashboard is the active tab. Per-browser preference; turn on for kiosk setups, leave off on phones. Requires iOS 16.4+ on iPad, modern Chrome/Firefox elsewhere.
+          Per-browser preferences. Don't roundtrip to the server; remembered locally so each browser/tablet can have its own.
         </p>
         <label class="keep-awake-row">
           <input id="keep-awake-toggle" type="checkbox" />
           <span>Keep screen on</span>
           <span id="keep-awake-status" class="hint"></span>
         </label>
+        <p class="hint" style="margin:8px 0 4px 30px">
+          For dashboards on a wall-mounted iPad / tablet — uses Wake Lock to keep the screen from dimming while the dashboard is the active tab. Requires iOS 16.4+ on iPad, modern Chrome/Firefox elsewhere.
+        </p>
+        <div class="temp-unit-row" style="margin-top:14px">
+          <span>Temperature</span>
+          <div class="temp-unit-pills" role="radiogroup" aria-label="Temperature unit">
+            <button id="temp-unit-c" class="temp-pill on" type="button" role="radio" aria-checked="true">°C</button>
+            <button id="temp-unit-f" class="temp-pill"    type="button" role="radio" aria-checked="false">°F</button>
+          </div>
+        </div>
       </section>
 
       <section class="card device-card">

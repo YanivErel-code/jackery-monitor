@@ -2143,7 +2143,7 @@ function applyStatus(s) {
     }
   }
   $('battery-time').textContent = timeLabel;
-  if (t.battery_temp_c != null) $('battery-temp').textContent = `${fmt(t.battery_temp_c, 0)} °C`;
+  if (t.battery_temp_c != null) $('battery-temp').textContent = formatTemp(t.battery_temp_c);
 
   animateNumber($('output-w'), t.output_power_w);
   animateNumber($('input-w'),  t.input_power_w);
@@ -3050,7 +3050,7 @@ function renderBatteryPacks() {
       soc: mainPct,
       flow: '',
       flowClass: 'flow-idle',
-      temp: mainTempC != null ? `${Math.round(mainTempC)}°C` : '',
+      temp: mainTempC != null ? formatTemp(mainTempC) : '',
       label: 'Main',
       snTitle: 'Host unit (cloud-reported SOC)',
       isMain: true,
@@ -3065,7 +3065,7 @@ function renderBatteryPacks() {
       soc: p.rb,
       flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
       flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
-      temp: (p.it != null && p.it !== 999) ? `${Math.round(p.it)}°C` : '',
+      temp: (p.it != null && p.it !== 999) ? formatTemp(p.it) : '',
       label: `…${sn.slice(-6)}`,
       snTitle: sn,
       isMain: false,
@@ -3265,7 +3265,60 @@ function initKeepAwakeToggle() {
   } else {
     setKeepAwakeStatus('');
   }
+  // Reflect saved temp-unit preference on each tab open.
+  syncTempUnitPills();
 }
+
+// ============================================================
+// TEMPERATURE UNIT (°C / °F) — per-browser display preference
+// ============================================================
+// Stored in localStorage so each device/browser can have its own.
+// All telemetry is captured + persisted on the server in Celsius;
+// this preference only affects DISPLAY. Toggle re-renders the live
+// view immediately so the user sees the change.
+
+const TEMP_UNIT_KEY = 'jackery-temp-unit';
+
+function getTempUnit() {
+  return localStorage.getItem(TEMP_UNIT_KEY) === 'F' ? 'F' : 'C';
+}
+
+function setTempUnit(unit) {
+  localStorage.setItem(TEMP_UNIT_KEY, unit === 'F' ? 'F' : 'C');
+  syncTempUnitPills();
+  // Re-render anything that shows a temperature so the change is
+  // immediate without waiting for the next poll/MQTT push.
+  if (window._lastStatus) {
+    try { applyStatus(window._lastStatus); } catch { /* ignore */ }
+  }
+  try { renderBatteryPacks(); } catch { /* ignore */ }
+}
+
+function syncTempUnitPills() {
+  const unit = getTempUnit();
+  const c = $('temp-unit-c'), f = $('temp-unit-f');
+  if (c) { c.classList.toggle('on', unit === 'C'); c.setAttribute('aria-checked', String(unit === 'C')); }
+  if (f) { f.classList.toggle('on', unit === 'F'); f.setAttribute('aria-checked', String(unit === 'F')); }
+}
+
+// Format a Celsius value according to the user's display preference.
+// `decimals` defaults to 0 (whole degrees) since the device's BMS
+// only reports integer °C anyway.
+function formatTemp(celsius, decimals = 0) {
+  if (celsius == null || Number.isNaN(Number(celsius))) return '—';
+  const c = Number(celsius);
+  if (getTempUnit() === 'F') {
+    const f = c * 9 / 5 + 32;
+    return `${f.toFixed(decimals)}°F`;
+  }
+  return `${c.toFixed(decimals)}°C`;
+}
+
+document.addEventListener('click', (e) => {
+  const id = e.target?.id;
+  if (id === 'temp-unit-c') setTempUnit('C');
+  else if (id === 'temp-unit-f') setTempUnit('F');
+});
 
 document.addEventListener('change', async (e) => {
   if (e.target?.id !== 'keep-awake-toggle') return;
