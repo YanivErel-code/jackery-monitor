@@ -1194,9 +1194,24 @@ def api_smart_charge_analytics(device_sn: str | None = None, days: int = 14):
 async def api_smart_charge_evaluate_now(device_sn: str | None = None):
     """Compute a decision RIGHT NOW (no execution, no history write).
     Used by the UI's "Evaluate now" button to show what the controller
-    would currently decide. Same pure logic as the periodic tick."""
+    would currently decide. Also returns narration when both
+    claude_enabled is on AND a key is configured — lets the user verify
+    the full pipeline without waiting for the next 5-min tick."""
     plan = await _smart_charge_evaluate(record=False, device_sn=device_sn)
-    return {"plan": plan.to_dict() if plan else None}
+    if not plan:
+        return {"plan": None, "narration": None}
+    narration = ""
+    cfg_sn = device_sn or (state.device.device_sn if state.device else None)
+    if cfg_sn:
+        cfg = smart_charge.get_config(cfg_sn)
+        if cfg.get("claude_enabled"):
+            try:
+                import claude_narrator
+                if claude_narrator.has_usable_key():
+                    narration = await claude_narrator.narrate_smart_charge(plan)
+            except Exception as e:
+                log.debug("evaluate_now narration failed: %s", e)
+    return {"plan": plan.to_dict(), "narration": narration or None}
 
 
 @app.get("/api/devices/capacity")

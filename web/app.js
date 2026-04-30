@@ -1773,7 +1773,7 @@ function renderSmartChargeHistory(rows) {
   }).join('');
 }
 
-function renderSmartChargePlan(plan) {
+function renderSmartChargePlan(plan, narration) {
   const el = $('sc-current-plan');
   if (!el) return;
   if (!plan) { el.hidden = true; return; }
@@ -1788,6 +1788,11 @@ function renderSmartChargePlan(plan) {
   const actionCls = plan.action === 'on' ? 'sc-act-on'
                   : plan.action === 'off' ? 'sc-act-off'
                   : 'sc-act-skip';
+  const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  const narrationLine = narration
+    ? `<div class="sc-narration" style="margin-top:10px; padding-left:0">💬 ${safe(narration)}</div>`
+    : '';
   el.innerHTML = `
     <div class="sc-plan-header">
       <span class="sc-action ${actionCls}">${(plan.action || '?').toUpperCase()}</span>
@@ -1802,7 +1807,7 @@ function renderSmartChargePlan(plan) {
       <div><span class="sc-lbl">Charge window</span><span>${window_}</span></div>
       <div><span class="sc-lbl">Sunrise</span><span>${sunrise}</span></div>
       <div><span class="sc-lbl">Cheapest rate</span><span>${rate}</span></div>
-    </div>`;
+    </div>${narrationLine}`;
   el.hidden = false;
 }
 
@@ -1854,8 +1859,10 @@ document.getElementById('sc-evaluate')?.addEventListener('click', async () => {
     const r = await fetch(url, { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
-    renderSmartChargePlan(j.plan);
-    status.textContent = 'Plan computed (no execution).';
+    renderSmartChargePlan(j.plan, j.narration);
+    status.textContent = j.narration
+      ? 'Plan computed + narrated.'
+      : 'Plan computed (no execution).';
     setTimeout(() => { status.hidden = true; }, 3500);
   } catch (err) {
     status.textContent = `Evaluate failed: ${err.message || err}`;
