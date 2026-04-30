@@ -113,6 +113,12 @@ def _log_kasa_version_once():
         pass
 
 
+def _is_auth_failure(err: Exception) -> bool:
+    lower = str(err).lower()
+    return ("challenge" in lower or "credentials" in lower
+            or "klap" in lower or "authenticationerror" in lower)
+
+
 async def _connect(host: str):
     try:
         from kasa import Discover  # type: ignore
@@ -120,20 +126,44 @@ async def _connect(host: str):
         raise KasaError(f"python-kasa not installed: {e}")
     _log_kasa_version_once()
     creds = _credentials()
+    first_err: Exception | None = None
+    # Pass 1: with saved cloud creds if present. Required for SMART-line
+    # plugs (KP125M / EP25 / KP405); older plugs ignore them.
+    if creds is not None:
+        try:
+            dev = await Discover.discover_single(host, credentials=creds)
+            await dev.update()
+            return dev
+        except Exception as e:
+            if not _is_auth_failure(e):
+                raise KasaError(f"could not reach Kasa device at {host}: "
+                                f"{type(e).__name__}: {e}")
+            first_err = e
+            log.info("Kasa %s: credentialed connect rejected, retrying "
+                     "without creds (older plug fallback)", host)
+    # Pass 2: no creds. Works for the older HS / KP non-M line; will
+    # fail-with-auth-error for SMART-line if the saved creds were wrong.
     try:
-        dev = await Discover.discover_single(host, credentials=creds)
+        dev = await Discover.discover_single(host, credentials=None)
         await dev.update()
         return dev
     except Exception as e:
-        msg = f"{type(e).__name__}: {e}"
-        # Now that the tzdata fix is in, the most likely remaining failures
-        # are real KLAP auth rejections — point the user at the right knob.
-        lower = str(e).lower()
-        if "challenge" in lower or "credentials" in lower or "klap" in lower:
-            if creds is None:
+        # Prefer the original credentialed error message if both passes
+        # failed — the user almost certainly has a SMART-line plug with
+        # bad creds, and that's the actionable diagnosis.
+        err = first_err or e
+        msg = f"{type(err).__name__}: {err}"
+        lower = str(err).lower()
+        if _is_auth_failure(err):
+            if first_err is None:
+                # No creds saved at all and the device wants them.
                 msg += " — this device needs Kasa cloud credentials. Add them in the Automation tab."
             else:
-                msg += " — saved Kasa cloud credentials were rejected. Verify the email matches your Kasa account exactly (case as registered)."
+                # Tried with creds, fell through, still failed.
+                msg += (" — saved Kasa cloud credentials were rejected AND "
+                        "credential-less fallback also failed. Verify the "
+                        "email matches your Kasa account exactly (case as "
+                        "registered) or re-add this device.")
         elif "zoneinfo" in lower or "no time zone" in lower:
             msg += " — server is missing tzdata; if you're seeing this, the latest image hasn't deployed yet."
         raise KasaError(f"could not reach Kasa device at {host}: {msg}")
