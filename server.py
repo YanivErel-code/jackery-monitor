@@ -114,6 +114,12 @@ class AppState:
         # doesn't re-fire on container restart within the same window.
         self.last_advisor_run_by_sn: dict[str, float] = {}
         self.advisor_task: asyncio.Task | None = None
+        # Per-device fire-and-forget review job state. Reviews can run
+        # 60-180s under adaptive thinking + multi-turn tool calls, well
+        # past Cloudflare/proxy timeouts, so /api/algorithm/review_now
+        # returns 202 immediately and the UI polls /review_status.
+        # Shape: device_sn -> {status, started_at, finished_at, result, error}.
+        self.advisor_jobs: dict[str, dict[str, Any]] = {}
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
         # threshold crossing instead of every single poll.
@@ -1626,21 +1632,71 @@ def api_alg_suggestions(device_sn: str | None = None,
     }
 
 
-@app.post("/api/algorithm/review_now")
+async def _advisor_review_job(device_sn: str) -> None:
+    """Background task body. Updates state.advisor_jobs[device_sn] in place
+    so the polling endpoint can report progress + final result without
+    holding the HTTP request open through the entire 60-180s review."""
+    job = state.advisor_jobs.setdefault(device_sn, {})
+    job.update({
+        "status": "running",
+        "started_at": time.time(),
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    })
+    try:
+        result = await _run_advisor_review(device_sn)
+        job["finished_at"] = time.time()
+        if result.get("ok"):
+            job["status"] = "done"
+            job["result"] = result
+        else:
+            job["status"] = "error"
+            job["error"] = str(result.get("reason") or "unknown")
+    except Exception as e:
+        log.exception("advisor: background job failed for %s", device_sn)
+        job["finished_at"] = time.time()
+        job["status"] = "error"
+        job["error"] = f"{type(e).__name__}: {e}"
+
+
+@app.post("/api/algorithm/review_now", status_code=202)
 async def api_alg_review_now(device_sn: str | None = None):
-    """Manually trigger a Claude review for one device (default: active).
-    Useful for the user's "I want to see suggestions right now" button
-    instead of waiting until tomorrow's 8am tick."""
+    """Kick off a Claude review in the background and return immediately.
+
+    Reviews routinely run 60-180s with adaptive thinking + multi-turn
+    tool calls, which exceeds Cloudflare's 100s edge timeout (HTTP 524).
+    So we spawn the review as a background asyncio task and let the UI
+    poll /api/algorithm/review_status until done. Re-clicking while one
+    is in flight is a no-op (returns the existing job)."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         raise HTTPException(400, "no active device")
-    result = await _run_advisor_review(device_sn)
-    if not result.get("ok"):
-        # Surface the upstream reason — for API errors that includes
-        # the actual Anthropic error message after `api_error:`.
-        raise HTTPException(503, f"advisor review failed: {result.get('reason')}")
-    return result
+    existing = state.advisor_jobs.get(device_sn)
+    if existing and existing.get("status") == "running":
+        return {"status": "running", "device_sn": device_sn,
+                "started_at": existing.get("started_at"),
+                "already_running": True}
+    asyncio.create_task(_advisor_review_job(device_sn))
+    return {"status": "running", "device_sn": device_sn,
+            "started_at": time.time(), "already_running": False}
+
+
+@app.get("/api/algorithm/review_status")
+async def api_alg_review_status(device_sn: str | None = None):
+    """Poll for the latest review job's state for one device."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    job = state.advisor_jobs.get(device_sn)
+    if not job:
+        return {"status": "idle", "device_sn": device_sn}
+    out = {"device_sn": device_sn, **job}
+    if job.get("status") == "running":
+        out["elapsed_s"] = round(time.time() - (job.get("started_at") or time.time()), 1)
+    return out
 
 
 @app.post("/api/algorithm/suggestions/{suggestion_id}/apply")

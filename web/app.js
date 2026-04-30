@@ -352,7 +352,7 @@ function switchTab(name) {
   if (name === 'forecast') { fetchForecast(); }
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); }
   if (name === 'logs')     { loadLogs(); }
-  if (name === 'automation') { loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); }
+  if (name === 'automation') { loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning(); }
   if (name === 'device')   { loadDeviceCapacity(); }
 }
 
@@ -3452,33 +3452,99 @@ async function dismissAlgSuggestion(id) {
   }
 }
 
+// Track the current poll loop so a re-click or device switch can cancel
+// it instead of stacking polls.
+let _advisorPollTimer = null;
+
 document.getElementById('alg-review-now')?.addEventListener('click', async () => {
   const status = $('alg-status');
   const summaryEl = $('alg-summary');
+  const btn = $('alg-review-now');
   status.hidden = false;
-  status.textContent = 'Running Claude review (Opus + extended thinking, 30-60s)…';
+  status.textContent = 'Starting Claude review (Opus + extended thinking, 60-180s)…';
+  if (btn) btn.disabled = true;
   try {
     const dev = activeJackeryDevice();
     const params = dev?.device_sn
       ? `?device_sn=${encodeURIComponent(dev.device_sn)}` : '';
+    // Fire-and-forget: server returns 202 immediately, we poll for the
+    // result. Cloudflare 524 is what happens when we tried to wait for
+    // the full review on a single HTTP request.
     const r = await fetch(`/api/algorithm/review_now${params}`, { method: 'POST' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
-    if (summaryEl && j.summary) {
-      summaryEl.textContent = j.summary;
-      summaryEl.hidden = false;
+    if (j.already_running) {
+      status.textContent = 'A review is already running for this device — polling for results…';
     }
-    const newCount = (j.new_suggestion_ids || []).length;
-    const turns = j.turns || 0;
-    const toolCalls = j.tool_calls || 0;
-    status.textContent = `Review complete: ${newCount} new ` +
-      `(${turns} turns, ${toolCalls} DB queries).`;
-    setTimeout(() => { status.hidden = true; }, 6000);
-    loadAlgorithmAdvisor();
+    pollAdvisorJob(dev?.device_sn);
   } catch (e) {
-    status.textContent = `Review failed: ${e.message || e}`;
+    status.textContent = `Review failed to start: ${e.message || e}`;
+    if (btn) btn.disabled = false;
   }
 });
+
+function pollAdvisorJob(deviceSn) {
+  // Clear any previous loop so re-clicks don't stack.
+  if (_advisorPollTimer) { clearTimeout(_advisorPollTimer); _advisorPollTimer = null; }
+  const params = deviceSn ? `?device_sn=${encodeURIComponent(deviceSn)}` : '';
+  const status = $('alg-status');
+  const summaryEl = $('alg-summary');
+  const btn = $('alg-review-now');
+
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/algorithm/review_status${params}`);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      if (j.status === 'running') {
+        const elapsed = j.elapsed_s != null ? `${Math.round(j.elapsed_s)}s elapsed` : '';
+        status.textContent = `Claude is reviewing… ${elapsed}`;
+        _advisorPollTimer = setTimeout(tick, 4000);
+        return;
+      }
+      if (j.status === 'done') {
+        const result = j.result || {};
+        if (summaryEl && result.summary) {
+          summaryEl.textContent = result.summary;
+          summaryEl.hidden = false;
+        }
+        const newCount = (result.new_suggestion_ids || []).length;
+        status.textContent = `Review complete: ${newCount} new ` +
+          `(${result.turns || 0} turns, ${result.tool_calls || 0} DB queries).`;
+        setTimeout(() => { status.hidden = true; }, 6000);
+        loadAlgorithmAdvisor();
+        if (btn) btn.disabled = false;
+        return;
+      }
+      if (j.status === 'error') {
+        status.textContent = `Review failed: ${j.error || 'unknown error'}`;
+        if (btn) btn.disabled = false;
+        return;
+      }
+      // status === 'idle' — shouldn't happen right after kicking, but
+      // re-poll once just in case the task hasn't latched yet.
+      _advisorPollTimer = setTimeout(tick, 1500);
+    } catch (e) {
+      status.textContent = `Status poll failed: ${e.message || e}`;
+      if (btn) btn.disabled = false;
+    }
+  };
+  // First poll quickly so the status text doesn't sit on "Starting…" for
+  // multiple seconds; subsequent polls back off to 4s.
+  _advisorPollTimer = setTimeout(tick, 800);
+}
+
+// Resume a poll if the user lands on Automation while a review is in
+// flight (e.g. they kicked it, switched tabs, came back).
+async function resumeAdvisorPollIfRunning() {
+  const dev = activeJackeryDevice();
+  if (!dev?.device_sn) return;
+  try {
+    const r = await fetch(`/api/algorithm/review_status?device_sn=${encodeURIComponent(dev.device_sn)}`);
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.status === 'running') pollAdvisorJob(dev.device_sn);
+  } catch { /* silent — not critical */ }
+}
 
 document.getElementById('alg-show-context')?.addEventListener('click', async () => {
   const wrap = $('alg-changes');
