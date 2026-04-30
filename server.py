@@ -208,47 +208,74 @@ async def poll_loop() -> None:
                     except Exception as e:
                         log.debug("uo persist failed: %s", e)
 
-                # Energy aggregation: integrate W over time per device
+                # Energy aggregation: integrate W over time per device.
+                # The bridge polls every Jackery device on the account, so
+                # we get telemetry for non-active ones via cloud_meta. Without
+                # this, switching to (say) the HomePower 3000 would show
+                # "Today: 0 kWh" because samples were only ever written
+                # while it was the active device.
                 dev = state.device
                 dev_sn = dev.device_sn if dev and dev.device_sn else None
-                if dev_sn:
-                    state.energy.upsert_device(
-                        dev_sn,
-                        getattr(dev, "name", None),
-                        getattr(dev, "model_code", None),
-                        None,
+                cloud = cloud_meta or {}
+                devs_telemetry_all = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
+                cloud_devices = (cloud.get("devices") or []) if isinstance(cloud, dict) else []
+
+                # Write samples for every device the bridge has telemetry for.
+                samples_to_write: list[tuple] = []
+                for other_sn, entry in devs_telemetry_all.items():
+                    other_t = (entry or {}).get("telemetry") or {}
+                    if not other_t:
+                        continue
+                    meta = next(
+                        (d for d in cloud_devices
+                         if str(d.get("device_sn")) == str(other_sn)),
+                        {},
                     )
+                    samples_to_write.append(
+                        (other_sn, other_t, meta.get("name"), meta.get("model_code"))
+                    )
+                # The active device's status_dict may carry richer fields
+                # than its devices_telemetry mirror — write it explicitly
+                # if the loop above didn't already.
+                if dev_sn and dev_sn not in devs_telemetry_all:
+                    samples_to_write.append(
+                        (dev_sn, status_dict,
+                         getattr(dev, "name", None),
+                         getattr(dev, "model_code", None))
+                    )
+                for sn, t, name, model_code in samples_to_write:
+                    state.energy.upsert_device(sn, name, model_code, None)
                     state.energy.record(
-                        dev_sn, ts,
-                        float(status_dict.get("input_power_w") or 0),
-                        float(status_dict.get("output_power_w") or 0),
-                        int(status_dict.get("battery_percent") or 0),
-                        solar_w=float(status_dict.get("solar_input_w") or 0),
-                        ac_input_w=float(status_dict.get("ac_input_w") or 0),
+                        sn, ts,
+                        float(t.get("input_power_w") or 0),
+                        float(t.get("output_power_w") or 0),
+                        int(t.get("battery_percent") or 0),
+                        solar_w=float(t.get("solar_input_w") or 0),
+                        ac_input_w=float(t.get("ac_input_w") or 0),
                     )
 
-                    # Hydrate the live chart from the energy DB on the first
-                    # successful poll after startup, so the chart shows the
-                    # last LIVE_CHART_HOURS even immediately after a restart.
-                    if not state.history_hydrated:
-                        try:
-                            past = state.energy.history(
-                                dev_sn,
-                                hours=LIVE_CHART_HOURS,
-                                bucket_s=LIVE_CHART_INTERVAL_S,
-                            )
-                            for p in past:
-                                state.history.append({
-                                    "ts": p["ts"],
-                                    "battery_percent": p["battery_pct"] or 0,
-                                    "input_power_w": p["input_w"] or 0,
-                                    "output_power_w": p["output_w"] or 0,
-                                })
-                            log.info("Live chart hydrated with %d historical points (last %dh)",
-                                     len(past), LIVE_CHART_HOURS)
-                        except Exception as e:
-                            log.warning("history hydrate failed: %s", e)
-                        state.history_hydrated = True
+                # Hydrate the live chart from the energy DB on the first
+                # successful poll after startup, so the chart shows the
+                # last LIVE_CHART_HOURS even immediately after a restart.
+                if dev_sn and not state.history_hydrated:
+                    try:
+                        past = state.energy.history(
+                            dev_sn,
+                            hours=LIVE_CHART_HOURS,
+                            bucket_s=LIVE_CHART_INTERVAL_S,
+                        )
+                        for p in past:
+                            state.history.append({
+                                "ts": p["ts"],
+                                "battery_percent": p["battery_pct"] or 0,
+                                "input_power_w": p["input_w"] or 0,
+                                "output_power_w": p["output_w"] or 0,
+                            })
+                        log.info("Live chart hydrated with %d historical points (last %dh)",
+                                 len(past), LIVE_CHART_HOURS)
+                    except Exception as e:
+                        log.warning("history hydrate failed: %s", e)
+                    state.history_hydrated = True
 
                 # Per-expansion-battery refresh. Throttled per-device since
                 # pack state moves slowly. Cached on state for the API,
