@@ -795,6 +795,15 @@ main {
 }
 .alg-actions { display: flex; gap: 8px; }
 
+.alg-ack-all {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-elev-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px; color: var(--text-dim);
+}
+
 .alg-changes { margin-top: 14px; }
 .alg-change-row {
   display: grid;
@@ -936,6 +945,15 @@ main {
   text-align: right;
 }
 .settings-control input[type="number"]:focus { outline: 1px solid var(--accent); }
+.settings-control input[type="number"]:disabled {
+  opacity: 0.5; cursor: not-allowed;
+  background: var(--bg-elev-2);
+}
+.settings-row.gated { opacity: 0.55; }
+.settings-row.gated .settings-label-text::after {
+  content: " — needs Anthropic key";
+  font-weight: 400; font-size: 12px; color: var(--text-dim);
+}
 
 /* ============== Automation tab ============== */
 .kasa-list {

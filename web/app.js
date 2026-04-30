@@ -1356,6 +1356,9 @@ function renderSettingsFields(specs) {
     `;
     fields.appendChild(row);
   }
+  // Re-apply Anthropic-key gating now that fields exist (the advisor
+  // hour input requires a saved key to be editable).
+  applyAnthropicGates();
 }
 
 $('settings-reload')?.addEventListener('click', loadSettings);
@@ -3315,7 +3318,20 @@ function renderAlgorithmSuggestions(rows) {
       </div>`;
   };
 
+  // Top action bar: Copy-all (always when there are rows) + Ack-all
+  // (only when 2+ anomalies, to keep one-off anomalies from cluttering).
+  const showAck = anomalies.length >= 2;
+  const topBar = `
+    <div class="alg-ack-all">
+      <span>${rows.length} pending — ${config.length} config, ${anomalies.length} anomalies</span>
+      <span style="display:flex; gap:8px">
+        <button class="btn btn-ghost" data-alg-copy-all type="button">Copy all</button>
+        ${showAck ? '<button class="btn btn-ghost" data-alg-ack-all type="button">Acknowledge all</button>' : ''}
+      </span>
+    </div>`;
+
   wrap.innerHTML = [
+    topBar,
     ...config.map(renderConfig),
     ...anomalies.map(renderAnomaly),
   ].join('');
@@ -3326,6 +3342,87 @@ function renderAlgorithmSuggestions(rows) {
   wrap.querySelectorAll('[data-alg-dismiss]').forEach((btn) => {
     btn.addEventListener('click', () => dismissAlgSuggestion(btn.dataset.algDismiss));
   });
+  wrap.querySelector('[data-alg-ack-all]')?.addEventListener('click', () => {
+    ackAllAnomalies(anomalies.map(a => a.id));
+  });
+  wrap.querySelector('[data-alg-copy-all]')?.addEventListener('click', () => {
+    copyAllInsights(config, anomalies);
+  });
+}
+
+async function copyAllInsights(config, anomalies) {
+  const fmtDate = (ts) => new Date((ts || 0) * 1000).toISOString();
+  const lines = [];
+  lines.push(`# AI advisor insights — exported ${new Date().toISOString()}`);
+  lines.push(`# ${config.length} config suggestion(s), ${anomalies.length} anomaly/anomalies`);
+  lines.push('');
+  if (config.length) {
+    lines.push('## Config suggestions');
+    for (const s of config) {
+      lines.push(`- ${s.target}: ${s.current_value} → ${s.proposed_value} (confidence: ${s.confidence || 'medium'}, ${fmtDate(s.created_at)})`);
+      if (s.reasoning) lines.push(`  reasoning: ${s.reasoning}`);
+    }
+    lines.push('');
+  }
+  if (anomalies.length) {
+    lines.push('## Anomalies');
+    for (const a of anomalies) {
+      lines.push(`- [${(a.severity || 'info').toUpperCase()}] ${fmtDate(a.created_at)}`);
+      if (a.reasoning) lines.push(`  ${a.reasoning}`);
+    }
+  }
+  const text = lines.join('\n');
+  const status = $('alg-status');
+  try {
+    await navigator.clipboard.writeText(text);
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Copied ${text.length} chars to clipboard.`;
+      setTimeout(() => { status.hidden = true; }, 2500);
+    }
+  } catch (e) {
+    // Clipboard API blocked (insecure context, permissions, etc.) — fall
+    // back to a textarea-prompt the user can manually copy from.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:10vh;left:5vw;width:90vw;height:60vh;z-index:9999;font-family:monospace;font-size:12px';
+    document.body.appendChild(ta);
+    ta.select();
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Clipboard blocked — select-all + copy from the textarea, then click anywhere to dismiss.';
+    }
+    const dismiss = (ev) => {
+      if (ev.target === ta) return;
+      ta.remove();
+      document.removeEventListener('click', dismiss, true);
+      if (status) status.hidden = true;
+    };
+    setTimeout(() => document.addEventListener('click', dismiss, true), 50);
+  }
+}
+
+async function ackAllAnomalies(ids) {
+  if (!ids?.length) return;
+  if (!confirm(`Acknowledge all ${ids.length} anomalies?`)) return;
+  const status = $('alg-status');
+  if (status) {
+    status.hidden = false;
+    status.textContent = `Acknowledging ${ids.length}…`;
+  }
+  try {
+    await Promise.all(ids.map(id =>
+      fetch(`/api/algorithm/suggestions/${id}/dismiss`, { method: 'POST' })
+        .catch(e => console.warn('dismiss failed', id, e))
+    ));
+    if (status) {
+      status.textContent = 'Acknowledged.';
+      setTimeout(() => { status.hidden = true; }, 2000);
+    }
+    loadAlgorithmAdvisor();
+  } catch (e) {
+    if (status) status.textContent = `Failed: ${e.message || e}`;
+  }
 }
 
 async function applyAlgSuggestion(id) {
@@ -3492,18 +3589,42 @@ async function loadAnthropicKeyStatus() {
   applyClaudeToggleGate();
 }
 
-function applyClaudeToggleGate() {
+function applyAnthropicGates() {
+  // Anything that depends on a saved + verified Anthropic API key gets
+  // gated here. Re-runnable on every render or status change.
+  const reason = 'Save an Anthropic API key on the Settings page first.';
+
   const t = $('sc-claude-toggle');
-  if (!t) return;
-  if (_anthropicHasKey) {
-    t.disabled = false;
-    t.title = '';
-  } else {
-    t.disabled = true;
-    if (t.checked) t.checked = false;
-    t.title = 'Save an Anthropic API key on the Settings page first.';
+  if (t) {
+    if (_anthropicHasKey) {
+      t.disabled = false;
+      t.title = '';
+    } else {
+      t.disabled = true;
+      if (t.checked) t.checked = false;
+      t.title = reason;
+    }
+  }
+
+  // Advisor daily-review hour lives in the generic settings form, so it
+  // only exists after renderSettingsFields() has run.
+  const hour = $('set-advisor_trigger_hour');
+  if (hour) {
+    const row = hour.closest('.settings-row');
+    if (_anthropicHasKey) {
+      hour.disabled = false;
+      hour.title = '';
+      if (row) row.classList.remove('gated');
+    } else {
+      hour.disabled = true;
+      hour.title = reason;
+      if (row) row.classList.add('gated');
+    }
   }
 }
+
+// Back-compat shim: older call sites can keep the original name.
+const applyClaudeToggleGate = applyAnthropicGates;
 
 document.getElementById('ak-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
