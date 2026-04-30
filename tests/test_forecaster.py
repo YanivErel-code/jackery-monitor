@@ -154,17 +154,22 @@ def test_load_profile_caps_runaway_buckets_against_overall_mean():
 
 
 def test_expected_load_uses_idle_default_when_no_data():
-    # Empty profile → forecast hour gets IDLE_LOAD_W, NOT a global mean.
+    # Empty profile → forecast hour gets IDLE_LOAD_W (the per-hour
+    # fallback) PLUS IDLE_OVERHEAD_W (the inverter idle / DC-bus draw
+    # that doesn't show up in `op` but still drains the battery — added
+    # universally so the load model matches SOC slope reality).
     # This is the regression test for the 0%-predicted-vs-44%-actual bug.
     profile: dict[tuple[int, int], float] = {}
     load = forecaster.expected_load_w(profile, 1_700_000_000)
-    assert load == forecaster.IDLE_LOAD_W
+    assert load == forecaster.IDLE_LOAD_W + forecaster.IDLE_OVERHEAD_W
 
 
 def test_expected_load_falls_back_to_neighbor_hour_not_global_mean():
     # User has heavy daytime activity (avg ~500W) but quiet evenings
     # (~50W). A missing 2am bucket should inherit from neighboring night
-    # hours (1am, 3am) — NOT the global mean.
+    # hours (1am, 3am) — NOT the global mean. The IDLE_OVERHEAD_W term
+    # is added uniformly so it doesn't affect WHICH bucket is selected,
+    # only the absolute value.
     from datetime import datetime
     profile = {
         # Daytime: high load
@@ -175,8 +180,11 @@ def test_expected_load_falls_back_to_neighbor_hour_not_global_mean():
     # Pick a weekday-Tuesday 2am for the lookup
     target = int(datetime(2024, 7, 2, 2, 0, 0).timestamp())
     load = forecaster.expected_load_w(profile, target)
-    # Should land at 40 or 50 (one of the night neighbors), NOT 500-ish
-    assert load in (40.0, 50.0), f"got {load} — leaked from daytime?"
+    # Should pick a night neighbor (40 or 50), with overhead added on
+    # top — NOT 500-ish (which would be daytime leakage).
+    expected = {40.0 + forecaster.IDLE_OVERHEAD_W,
+                50.0 + forecaster.IDLE_OVERHEAD_W}
+    assert load in expected, f"got {load} — leaked from daytime?"
 
 
 def test_load_profile_recency_weight_for_variable_buckets():
@@ -222,7 +230,12 @@ def test_simulate_soc_clamps_at_bounds():
 
 
 def test_build_forecast_glues_pieces_together():
-    # 14 days of strong, consistent solar; ask for forecast starting "now"
+    # 14 days of strong, consistent solar; ask for forecast starting "now".
+    # Since IDLE_OVERHEAD_W (600W) is now added to every load lookup, the
+    # synthetic panel must produce comfortably more than that during the
+    # day for the smoke-test charge assertion to hold. Use a 2.0 W per
+    # W/m² coefficient (~2kW peak array) so daytime solar (~1600W at
+    # ghi=800) clears the overhead + 100W output_w with margin.
     now = int(time.time())
     weather = []
     for i in range(-14 * 24, 24 * 5):  # past 14 days through next 5 days, hourly
@@ -231,7 +244,7 @@ def test_build_forecast_glues_pieces_together():
         hour_of_day = (ts // 3600) % 24
         ghi = 800 if 8 <= hour_of_day <= 16 else 0
         weather.append({"ts": ts, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
-    energy = [{"ts": w["ts"], "solar_w": int(0.4 * w["ghi_w_m2"]),
+    energy = [{"ts": w["ts"], "solar_w": int(2.0 * w["ghi_w_m2"]),
                "output_w": 100, "battery_pct": 60}
               for w in weather if w["ts"] < now]
     res = forecaster.build_forecast(
@@ -245,6 +258,6 @@ def test_build_forecast_glues_pieces_together():
     assert res["capacity_wh"] == 5040
     assert len(res["forecast"]) > 0
     assert all("predicted_soc" in h for h in res["forecast"])
-    # With strong solar > load, peak SOC should land above the start.
+    # With strong solar > load+overhead, peak SOC should land above the start.
     peak = max(h["predicted_soc"] for h in res["forecast"])
     assert peak >= 50.0
