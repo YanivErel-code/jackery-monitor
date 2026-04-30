@@ -384,7 +384,13 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
         log.info("advisor turn %d/%d (tool calls so far: %d)",
                  turn, MAX_TURNS, tool_calls_made)
         try:
-            resp = await client.messages.create(
+            # MUST use streaming for long-running requests. With 16k
+            # thinking + 32k max_tokens + tool use, the SDK will reject
+            # non-streaming calls with "Streaming is required for
+            # operations that may take longer than 10 minutes." The
+            # final message has the same shape as a create() return,
+            # we just consume the event stream first to get there.
+            async with client.messages.stream(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
                 thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
@@ -396,7 +402,13 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
                 # support it. Lets the multi-turn loop accumulate plenty
                 # of tool results without truncation.
                 extra_headers={"anthropic-beta": CONTEXT_1M_HEADER},
-            )
+            ) as stream:
+                # We don't need to react to individual events for now —
+                # just drain the stream and pull the assembled message
+                # at the end. Could surface interim progress later.
+                async for _ in stream:
+                    pass
+                resp = await stream.get_final_message()
         except Exception as e:
             msg = str(e)
             if len(msg) > 300:
