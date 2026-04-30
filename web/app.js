@@ -352,8 +352,38 @@ function switchTab(name) {
   if (name === 'forecast') { fetchForecast(); }
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); }
   if (name === 'logs')     { loadLogs(); }
-  if (name === 'automation') { loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning(); }
+  if (name === 'automation') {
+    loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
+    // User is now looking — clear the "new insights" dot.
+    setAutomationDot(false);
+  }
   if (name === 'device')   { loadDeviceCapacity(); }
+}
+
+// Tab-level "new insights pending" badge. Lights up when the daily
+// advisor (or a manual run) leaves pending items behind and the user
+// isn't currently on the Automation tab.
+function setAutomationDot(visible) {
+  const dot = $('tab-automation-dot');
+  if (!dot) return;
+  dot.hidden = !visible;
+}
+
+async function refreshAutomationDot() {
+  // Skip the network call when we're already on Automation — clicking
+  // the tab clears the dot directly. Polling here would be wasted work.
+  if (activeTab === 'automation') { setAutomationDot(false); return; }
+  try {
+    const dev = activeJackeryDevice();
+    const params = dev?.device_sn
+      ? `?device_sn=${encodeURIComponent(dev.device_sn)}&status=pending`
+      : '?status=pending';
+    const r = await fetch(`/api/algorithm/suggestions${params}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    const count = (j.suggestions || []).length;
+    setAutomationDot(count > 0);
+  } catch { /* network blip — leave dot unchanged */ }
 }
 
 // ============================================================
@@ -3513,6 +3543,9 @@ function pollAdvisorJob(deviceSn) {
           `(${result.turns || 0} turns, ${result.tool_calls || 0} DB queries).`;
         setTimeout(() => { status.hidden = true; }, 6000);
         loadAlgorithmAdvisor();
+        // Light the tab dot if user is on another tab — they'll see new
+        // items waiting without needing to wait for the 3min periodic.
+        refreshAutomationDot();
         if (btn) btn.disabled = false;
         return;
       }
@@ -3826,6 +3859,12 @@ function initHeroSortable() {
   // every 5 min while the tab is visible. fetchForecast is a no-op if the
   // result hasn't changed visibly.
   setInterval(() => { if (activeTab === 'forecast') fetchForecast(); }, 5 * 60_000);
+
+  // AI advisor pending-items badge on the Automation tab. Check on load
+  // + every 3 min so the daily 8am review (or a manual run that
+  // completed in another browser) lights up the dot promptly.
+  refreshAutomationDot();
+  setInterval(refreshAutomationDot, 3 * 60_000);
 
   // If auth was missing the user is in the modal — when they sign in successfully
   // the modal hides and the WS snapshot will populate the UI.

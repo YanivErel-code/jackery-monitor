@@ -200,6 +200,15 @@ main {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
+.tab-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: pulse 2s ease-in-out infinite;
+}
 
 .tab-panel {
   display: flex; flex-direction: column; gap: 18px;

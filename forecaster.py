@@ -70,6 +70,16 @@ SOLAR_RECENT_CAP_MULT = 1.5
 # forecasts and caused the 44pp overnight error.
 IDLE_LOAD_W = 30.0
 
+# Inverter idle / DC-bus / parasitic overhead that the device's `op` (AC
+# output) field doesn't capture. The advisor surfaced this as a 600-700W
+# constant gap: SOC slope on a 30240 Wh nameplate implies ~1140W avg
+# discharge over a 9h window where reported out_w avg was only ~460W.
+# Adding this as a flat additive to every per-hour load lookup makes the
+# forecaster's drain model match SOC reality. Conservative end of the
+# observed 600-700W band; a slight under-estimate is preferable to over-
+# predicting a 0% cliff.
+IDLE_OVERHEAD_W = 600.0
+
 # Cutoff for "recent" samples in load-profile recency weighting (seconds).
 # Variable buckets (high IQR / median) weight samples newer than this 70%
 # vs older 30%, so recent behavior shifts dominate without throwing away
@@ -260,6 +270,12 @@ def expected_load_w(
 ) -> float:
     """Look up the expected load for a forecast hour.
 
+    Returns out_w_bucket + IDLE_OVERHEAD_W. The overhead term covers the
+    inverter idle / DC-bus / balancing draw that doesn't show up in the
+    `op` (AC output) field but does drain the battery — without it, the
+    forecaster's load model systematically under-counts real discharge by
+    ~600W (verified against SOC slope on a 30240 Wh nameplate).
+
     Fallback hierarchy when the (hour, weekend) bucket is empty:
       1. Same hour, opposite weekend-flag.
       2. Neighboring hours within ±3, same weekend-flag (preserves day/night).
@@ -274,18 +290,25 @@ def expected_load_w(
     w = 1 if d.weekday() >= 5 else 0
 
     if (h, w) in profile:
-        return profile[(h, w)]
-    if (h, 1 - w) in profile:
-        return profile[(h, 1 - w)]
-    for delta in (1, -1, 2, -2, 3, -3):
-        nh = (h + delta) % 24
-        if (nh, w) in profile:
-            return profile[(nh, w)]
-    for delta in (1, -1, 2, -2, 3, -3):
-        nh = (h + delta) % 24
-        if (nh, 1 - w) in profile:
-            return profile[(nh, 1 - w)]
-    return IDLE_LOAD_W
+        base = profile[(h, w)]
+    elif (h, 1 - w) in profile:
+        base = profile[(h, 1 - w)]
+    else:
+        base = None
+        for delta in (1, -1, 2, -2, 3, -3):
+            nh = (h + delta) % 24
+            if (nh, w) in profile:
+                base = profile[(nh, w)]
+                break
+        if base is None:
+            for delta in (1, -1, 2, -2, 3, -3):
+                nh = (h + delta) % 24
+                if (nh, 1 - w) in profile:
+                    base = profile[(nh, 1 - w)]
+                    break
+        if base is None:
+            base = IDLE_LOAD_W
+    return base + IDLE_OVERHEAD_W
 
 
 # ---------- simulation ----------
@@ -293,6 +316,8 @@ def simulate_soc(
     starting_soc_pct: float,
     capacity_wh: int,
     forecast_hours: list[dict[str, Any]],
+    *,
+    ac_charge_floor_pct: float | None = None,
 ) -> list[dict[str, Any]]:
     """Walk SOC forward through the forecast window.
 
@@ -300,8 +325,19 @@ def simulate_soc(
     Output adds `predicted_soc` (clamped 0-100) per hour. Net positive
     inflow has CHARGE_EFFICIENCY applied; the simulator was previously
     over-predicting SOC by ignoring real-world charge losses.
+
+    `ac_charge_floor_pct`: when set, simulate the user's smart-charge /
+    Kasa-driven AC top-up — if SOC would drop below this floor in any
+    hour, treat it as if the controller intervened and clamp at the
+    floor. This was previously NOT modeled, which caused long-lead
+    predictions (24h+) to saturate at 0% even though the real device
+    was being grid-charged overnight by the smart-charge automation,
+    and produced a persistent negative bias at short lead times. Pass
+    None to keep the original "solar-only" behavior.
     """
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
+    floor = (max(0.0, min(100.0, float(ac_charge_floor_pct)))
+             if ac_charge_floor_pct is not None else None)
     out: list[dict[str, Any]] = []
     for h in forecast_hours:
         solar = float(h.get("solar_w") or 0)
@@ -314,6 +350,12 @@ def simulate_soc(
             net *= CHARGE_EFFICIENCY
         soc += net / capacity_wh * 100.0
         soc = max(0.0, min(100.0, soc))
+        # Smart-charge floor — the user has Kasa-driven grid top-up that
+        # holds SOC at or above target_sunrise_soc_pct. Modeling it as a
+        # hard floor undercounts how much grid energy is actually used
+        # but cleanly addresses the "predicted 0% / actual 92%" cliff.
+        if floor is not None and soc < floor:
+            soc = floor
         out.append({**h, "predicted_soc": round(soc, 1)})
     return out
 
@@ -325,8 +367,16 @@ def build_forecast(
     capacity_wh: int,
     now_ts: float | None = None,
     horizon_hours: int = 120,
+    *,
+    ac_charge_floor_pct: float | None = None,
 ) -> dict[str, Any]:
-    """Glue: fit models + simulate. Returns a UI-ready dict."""
+    """Glue: fit models + simulate. Returns a UI-ready dict.
+
+    `ac_charge_floor_pct`: passed through to `simulate_soc`. Callers
+    that have smart-charge enabled (and a target_sunrise_soc_pct) should
+    pass it so long-lead predictions don't saturate at 0% — see
+    `simulate_soc` docstring for the mechanism.
+    """
     now_ts = now_ts if now_ts is not None else time.time()
     cutoff = int(now_ts)
 
@@ -368,7 +418,10 @@ def build_forecast(
             "cloud_cover_pct": round(float(w.get("cloud_cover_pct") or 0), 1),
         })
 
-    simulated = simulate_soc(starting_soc_pct, capacity_wh, forecast_hours)
+    simulated = simulate_soc(
+        starting_soc_pct, capacity_wh, forecast_hours,
+        ac_charge_floor_pct=ac_charge_floor_pct,
+    )
     return {
         "starting_soc_pct": round(starting_soc_pct, 1),
         "capacity_wh": capacity_wh,

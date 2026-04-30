@@ -627,6 +627,27 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
     )
 
 
+def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
+    """Return the user's smart-charge target SOC if smart-charge is
+    enabled (mode != off) for this device, else None. The forecaster
+    uses this as a floor in `simulate_soc` so long-lead predictions
+    don't saturate at 0% — in reality the smart-charge controller
+    grid-charges when SOC drops near target. Cheap; safe to call from
+    every forecast path."""
+    if not device_sn:
+        return None
+    try:
+        cfg = smart_charge.get_config(device_sn)
+        if (cfg or {}).get("mode") == "off":
+            return None
+        target = (cfg or {}).get("target_sunrise_soc_pct")
+        if target is None:
+            return None
+        return float(target)
+    except Exception:
+        return None
+
+
 async def _smart_charge_evaluate(record: bool = True,
                                  device_sn: str | None = None):
     """Pull the inputs the smart-charge module needs, compute a Plan, and
@@ -685,6 +706,7 @@ async def _smart_charge_evaluate(record: bool = True,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
+        ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
     )
     # Persist the forecast so we have a continuous trace for predicted-vs-
     # actual analytics, regardless of whether the Forecast tab is open.
@@ -1469,6 +1491,7 @@ async def api_forecast(device_sn: str | None = None):
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
+        ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
     )
     # Persist this snapshot for later accuracy tracking. The PK is
     # (device_sn, made_at_hour, target_hour) so multiple calls in the same
