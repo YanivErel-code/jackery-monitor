@@ -929,7 +929,11 @@ async def _run_advisor_review(device_sn: str) -> dict:
         return {"ok": False, "reason": "no_api_key"}
     bundle = await _build_advisor_bundle(device_sn)
     result = await claude_advisor.review(bundle)
-    if result.get("skipped_reason"):
+    # If the call failed entirely, surface the reason (which now
+    # includes the actual Anthropic error message). If it succeeded
+    # in text-only mode (no_tool_call), still persist the summary so
+    # the user sees what Claude said.
+    if result.get("skipped_reason") and result["skipped_reason"] != "no_tool_call":
         return {"ok": False, "reason": result["skipped_reason"]}
 
     # Auto-expire stale pending suggestions before adding new ones, so
@@ -1473,6 +1477,8 @@ async def api_alg_review_now(device_sn: str | None = None):
         raise HTTPException(400, "no active device")
     result = await _run_advisor_review(device_sn)
     if not result.get("ok"):
+        # Surface the upstream reason — for API errors that includes
+        # the actual Anthropic error message after `api_error:`.
         raise HTTPException(503, f"advisor review failed: {result.get('reason')}")
     return result
 

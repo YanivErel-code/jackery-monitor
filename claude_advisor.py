@@ -260,26 +260,48 @@ async def review(bundle: dict) -> dict:
         resp = await client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
+            # Extended thinking gives the model headroom to walk through
+            # the data systematically before deciding. Constrains: with
+            # thinking enabled, tool_choice MUST be "auto" — forcing a
+            # specific tool ({"type": "tool", "name": ...}) returns
+            # BadRequestError. We trust the system prompt + lone tool
+            # to make the model call our schema unprompted.
             thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET},
             tools=[_review_tool()],
-            tool_choice={"type": "tool", "name": "submit_algorithm_review"},
+            tool_choice={"type": "auto"},
             system=_system_prompt(),
             messages=[{"role": "user", "content": user_msg}],
         )
     except Exception as e:
-        log.warning("advisor: Claude call failed: %s", e)
+        # Surface the API's actual message — bare "BadRequestError" is
+        # impossible to debug. Truncate to 300 chars so the UI can show
+        # it inline without wrapping.
+        msg = str(e)
+        if len(msg) > 300:
+            msg = msg[:300] + "…"
+        log.warning("advisor: Claude call failed: %s: %s",
+                    type(e).__name__, msg)
         return {"summary": "", "config_suggestions": [], "anomalies": [],
-                "skipped_reason": f"api_error: {type(e).__name__}"}
+                "skipped_reason": f"api_error: {type(e).__name__}: {msg}"}
 
     payload: dict | None = None
+    text_fallback = ""
     for block in (resp.content or []):
-        # Skip thinking blocks — we only want the tool_use args.
-        if getattr(block, "type", None) == "tool_use" and block.name == "submit_algorithm_review":
+        btype = getattr(block, "type", None)
+        # Skip thinking blocks — they're for the model's internal use.
+        if btype == "tool_use" and block.name == "submit_algorithm_review":
             payload = dict(block.input or {})
             break
+        if btype == "text":
+            text_fallback += getattr(block, "text", "") or ""
     if payload is None:
-        log.warning("advisor: no tool_use block in response")
-        return {"summary": "", "config_suggestions": [], "anomalies": [],
+        # No tool_use — model returned only text. Surface that text in
+        # the summary so the user at least sees Claude's diagnosis even
+        # if no structured suggestions came through. (Common in the
+        # first review on a quiet system.)
+        log.info("advisor: no tool_use in response, falling back to text")
+        return {"summary": text_fallback.strip()[:1000],
+                "config_suggestions": [], "anomalies": [],
                 "skipped_reason": "no_tool_call"}
 
     # Whitelist + range-check each suggestion. Drop invalid ones rather

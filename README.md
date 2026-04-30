@@ -5,19 +5,26 @@
 [![License](https://img.shields.io/github/license/YanivErel-code/jackery-monitor)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 
-Self-hosted dashboard for Jackery power stations. Live battery + power, 6-hour
-history chart, output control over MQTT, energy aggregation in SQLite, and
-SOC-driven automations that flip Kasa smart plugs.
+Self-hosted dashboard for Jackery power stations. Live per-battery state +
+power flow, 6-hour history chart, output control over MQTT, energy
+aggregation in SQLite, **5-day solar SOC forecast**, **smart-charge
+automation that turns on a grid-power Kasa plug only when the forecast
+says you won't make it through the night**, and **an optional Claude AI
+advisor that reviews yesterday's predictions vs reality every morning
+and suggests one-click tweaks** to the algorithm constants.
 
 Designed to run on a Synology NAS in Docker. Works anywhere with Docker
 Compose. Multi-device — handles multiple Jackery devices on the same account
-(e.g. Explorer 5000 Plus + HomePower 3000) and per-device automation rules.
+(e.g. Explorer 5000 Plus with up to 5 expansion packs + HomePower 3000) and
+per-device automation rules and AI insights.
 
 It connects through the **Jackery cloud account** (the same one the official app uses). On first launch the dashboard prompts you to sign in; credentials are encrypted on disk (AES-256-GCM on Linux/Synology, macOS Keychain on Mac) and never leave your host.
 
 ![Dashboard — Live tab with state of charge, power flow, today's energy, output toggles, and 6-hour history chart](docs/screenshots/dashboard-live.png)
 
 *Live tab: state of charge, power flow (output / input / solar), today's kWh and dollar value, output toggles, and the 6-hour battery + power chart.*
+
+> **🤖 New: AI advisor.** Each morning Claude Opus (with extended thinking) reviews the last 48h of forecast errors, smart-charge decisions, samples, and weather, then proposes specific config tweaks — *"raise `max_charge_w` from 1500 → 1850, your unit consistently pulls more during fast-charge mode"* — that you approve with one click. Nothing applies automatically. See [AI features](#ai-features-optional) below.
 
 ---
 
@@ -36,9 +43,30 @@ It connects through the **Jackery cloud account** (the same one the official app
 - **Device tab** — model, serial, cloud connection state, last update time.
   "Pause polling" with duration picker so you can hand the cloud session to
   the phone app without the bridge stealing it back.
+- **Forecast tab** — 5-day hourly SOC simulation. Solar regression fitted
+  from your own observed solar-vs-GHI pairs (Open-Meteo); load model uses
+  per-hour-of-day medians with a runaway-bucket cap so a single high-output
+  event doesn't dominate. Predicted-vs-actual chart accumulates over time.
+- **Battery packs card** (5000 Plus + expansions) — per-pack SOC, input W,
+  temp. Real-time updates over MQTT (no polling). Auto-detected total
+  capacity = main + N × expansion. Hidden cleanly on no-pack devices.
+- **Smart charge** (per-device, in Automation tab) — every 5 minutes,
+  forecasts overnight SOC; if the prediction says you'll fall below your
+  target sunrise SOC, schedules a Kasa-plug-on window during the cheapest
+  TOU rate. Test mode logs decisions without toggling; active mode toggles
+  the plug. All decisions persisted with predicted-vs-actual analytics.
+- **AI advisor** (optional, daily Claude Opus) — diagnoses the residual
+  errors in your forecast and smart-charge tracking, proposes config
+  tweaks bounded to a safe whitelist, surfaces anomalies. Human approves
+  each suggestion via one-click Apply / Dismiss. Audit log of every
+  applied change. See [AI features](#ai-features-optional).
+- **Decision narration** (optional, Haiku per fired decision) —
+  1-2 sentence plain-English explanation of each smart-charge decision,
+  attached to the persisted history row.
 - **Automation tab** — Kasa smart-plug rules driven by battery SOC. Each
   rule targets a specific Jackery device, fires once per threshold crossing,
-  retries automatically on transient failures.
+  retries automatically on transient failures. Plugs are assigned to a
+  specific Jackery so the smart-charge picker only shows the relevant ones.
 - **Logs tab** — ring buffer of bridge events (login, MQTT pushes, contested
   sessions, automation fires, errors). Filter by level or category.
 - **Settings tab** — runtime-tunable poll cadences, low-battery threshold,
