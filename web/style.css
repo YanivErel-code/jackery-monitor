@@ -170,18 +170,25 @@ a { color: var(--accent-2); }
 
 /* ============== Main + Tabs ============== */
 main {
-  /* Tiered cap so the dashboard feels right at every common viewport:
-     - <=1500px (laptops): 95vw, capped at 1500px — keeps line lengths
-       sane on narrow screens.
-     - 1500-2400px (24" 4K, 27" QHD): grows toward ~1900px.
-     - >=2400px (ultrawide / 32" 4K): caps at 2200px so the chart and
-       battery-pack rows aren't unscannable, but uses way more of the
-       screen than the old 1500px cap did. The lower-tier breakpoints
-       below (900 / 600) keep handling tablets and phones.
-     The CSS-only ladder uses clamp + min so we don't need media queries. */
-  max-width: clamp(0px, 95vw, 2200px);
+  /* Default tier — laptops and most desktops. Stays the same as the
+     historical cap so users on 1080p/QHD don't see any change. */
+  max-width: min(95vw, 1500px);
   margin: 0 auto;
-  padding: clamp(16px, 1.5vw, 32px);
+  padding: 22px;
+}
+/* Tier 2 — 27" QHD / 24" 4K. Cap grows from 1500 to ~1900 so the
+   dashboard fills more of the screen without making line lengths
+   uncomfortable to scan. */
+@media (min-width: 2000px) {
+  main { max-width: min(92vw, 1900px); padding: 26px; }
+}
+/* Tier 3 — 32"+ 4K and ultrawide (3440x1440 etc.). Bigger cap, but
+   still bounded — at 5K we'd otherwise hit ~5000px-wide rows that
+   are very hard to scan visually. 2400px is roughly the sweet spot
+   where the chart and battery-pack bars look full but the hero
+   cards aren't absurdly wide. */
+@media (min-width: 3000px) {
+  main { max-width: min(90vw, 2400px); padding: 32px; }
 }
 .tabs {
   display: flex; gap: 4px;
