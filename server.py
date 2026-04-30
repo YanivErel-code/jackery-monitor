@@ -613,17 +613,38 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
     )
 
 
-async def _smart_charge_evaluate(record: bool = True):
+async def _smart_charge_evaluate(record: bool = True,
+                                 device_sn: str | None = None):
     """Pull the inputs the smart-charge module needs, compute a Plan, and
-    (in active mode) toggle the configured Kasa plug. Used by the
-    periodic tick AND the UI's "Evaluate now" button (record=False
-    skips history + side effects)."""
-    cfg = smart_charge.get_config()
-    if cfg["mode"] == "off":
-        return None
-    device_sn = state.device.device_sn if state.device else None
+    (in active mode) toggle the configured Kasa plug. Per-device — pass
+    device_sn to evaluate a specific one; defaults to the active device.
+    record=False skips history + side effects."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         return None
+    cfg = smart_charge.get_config(device_sn)
+    if cfg["mode"] == "off":
+        return None
+
+    # Resolve metadata for the target device — fall back to active device's
+    # model_code if we don't have it stored, since the per-device telemetry
+    # cache doesn't carry model_code.
+    active_sn = state.device.device_sn if state.device else None
+    if device_sn == active_sn:
+        model_code = getattr(state.device, "model_code", None)
+        cloud = state.last_cloud_meta or {}
+        devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
+        main_soc = float((state.last_status or {}).get("battery_percent") or 50)
+    else:
+        cloud = state.last_cloud_meta or {}
+        devs = (cloud.get("devices") or []) if isinstance(cloud, dict) else []
+        meta = next((d for d in devs if str(d.get("device_sn")) == device_sn), {})
+        model_code = meta.get("model_code")
+        devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
+        entry = devs_t.get(device_sn) or {}
+        t = entry.get("telemetry") or {}
+        main_soc = float(t.get("battery_percent") or 50)
 
     # Inputs: forecast (uses the same cached weather as the Forecast tab),
     # current SOC, capacity (override-aware), TOU plan, tz offset.
@@ -634,15 +655,12 @@ async def _smart_charge_evaluate(record: bool = True):
         return smart_charge.compute_plan(
             config=cfg, current_soc_pct=None,
             forecast={"forecast": []}, cost_plan=cost_module.get_plan(),
-            capacity_wh=_total_capacity_wh(
-                device_sn, getattr(state.device, "model_code", None)),
+            capacity_wh=_total_capacity_wh(device_sn, model_code),
         )
     lat, lon = loc["latitude"], loc["longitude"]
     weather = await weather_client.fetch_irradiance(lat, lon)
     if weather.get("error"):
         return None
-    main_soc = float((state.last_status or {}).get("battery_percent") or 50)
-    model_code = getattr(state.device, "model_code", None)
     # If packs are attached, the forecaster needs the system-wide SOC to
     # match the system-wide capacity it'll be paired with.
     starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
@@ -709,12 +727,24 @@ async def _smart_charge_narrate(plan) -> str:
 
 
 async def smart_charge_loop():
-    """Periodic tick — every 5 minutes, run the smart-charge evaluator."""
+    """Periodic tick — every 5 minutes, run the smart-charge evaluator
+    for every device that has a per-device config saved (mode != off)."""
     while True:
         try:
-            await _smart_charge_evaluate(record=True)
+            configs = smart_charge.get_all_configs()
+            # Fall back to evaluating just the active device when no
+            # per-device configs exist (legacy path).
+            if not configs and state.device and state.device.device_sn:
+                await _smart_charge_evaluate(record=True)
+            for sn, cfg in configs.items():
+                if cfg.get("mode") == "off":
+                    continue
+                try:
+                    await _smart_charge_evaluate(record=True, device_sn=sn)
+                except Exception as e:
+                    log.warning("smart_charge tick failed for %s: %s", sn, e)
         except Exception as e:
-            log.warning("smart_charge tick failed: %s", e)
+            log.warning("smart_charge loop iteration failed: %s", e)
         await asyncio.sleep(5 * 60)
 
 
@@ -1086,21 +1116,32 @@ def api_daily_summary(device_sn: str | None = None, days: int = 7):
 
 
 @app.get("/api/smart_charge/config")
-def api_smart_charge_get():
-    """Current smart-charge config + saved Kasa devices for the picker."""
+def api_smart_charge_get(device_sn: str | None = None):
+    """Per-device smart-charge config + saved Kasa devices for the picker.
+    Defaults to the active device when device_sn is omitted."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
     return {
-        "config": smart_charge.get_config(),
+        "device_sn": device_sn,
+        "config": smart_charge.get_config(device_sn),
         "kasa_devices": state.kasa.list(),
     }
 
 
 @app.post("/api/smart_charge/config")
-async def api_smart_charge_set(req: Request):
+async def api_smart_charge_set(req: Request, device_sn: str | None = None):
     try:
         body = await req.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
-    return {"config": smart_charge.set_config(body if isinstance(body, dict) else {})}
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(status_code=400,
+                            detail="no active device — pass device_sn explicitly")
+    saved = smart_charge.set_config(body if isinstance(body, dict) else {},
+                                    device_sn=device_sn)
+    return {"device_sn": device_sn, "config": saved}
 
 
 @app.get("/api/smart_charge/status")
@@ -1113,7 +1154,9 @@ def api_smart_charge_status(device_sn: str | None = None):
     history: list[dict] = []
     if device_sn:
         history = state.energy.list_smart_charge_decisions(device_sn, limit=50)
-    return {"config": smart_charge.get_config(), "history": history}
+    return {"device_sn": device_sn,
+            "config": smart_charge.get_config(device_sn),
+            "history": history}
 
 
 @app.get("/api/smart_charge/analytics")
@@ -1140,11 +1183,11 @@ def api_smart_charge_analytics(device_sn: str | None = None, days: int = 14):
 
 
 @app.post("/api/smart_charge/evaluate_now")
-async def api_smart_charge_evaluate_now():
+async def api_smart_charge_evaluate_now(device_sn: str | None = None):
     """Compute a decision RIGHT NOW (no execution, no history write).
     Used by the UI's "Evaluate now" button to show what the controller
     would currently decide. Same pure logic as the periodic tick."""
-    plan = await _smart_charge_evaluate(record=False)
+    plan = await _smart_charge_evaluate(record=False, device_sn=device_sn)
     return {"plan": plan.to_dict() if plan else None}
 
 

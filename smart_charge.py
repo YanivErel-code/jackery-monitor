@@ -95,31 +95,83 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def get_config() -> dict[str, Any]:
+def _load_raw() -> dict[str, Any]:
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        log.warning("smart_charge config unreadable (%s); using defaults", e)
+        return {}
+
+
+def _is_per_device_shape(data: dict[str, Any]) -> bool:
+    """Per-device file format: {"by_device": {"<sn>": {...}, ...}}.
+    Legacy: a single config dict at the top level."""
+    return isinstance(data, dict) and isinstance(data.get("by_device"), dict)
+
+
+def get_config(device_sn: str | None = None) -> dict[str, Any]:
+    """Read this device's config. With no device_sn, returns the legacy
+    single-config shape — for back-compat with callers that haven't been
+    updated. New callers should always pass device_sn."""
     with _config_lock:
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            return dict(DEFAULT_CONFIG)
-        except Exception as e:
-            log.warning("smart_charge config unreadable (%s); using defaults", e)
-            return dict(DEFAULT_CONFIG)
+        data = _load_raw()
+    if _is_per_device_shape(data):
+        if device_sn:
+            return _validate_config(data["by_device"].get(device_sn) or {})
+        # No device_sn but per-device format on disk → return defaults.
+        return dict(DEFAULT_CONFIG)
+    # Legacy single-config file. If a device_sn was given, treat the
+    # legacy config as that device's config (one-time migration on save).
     return _validate_config(data)
 
 
-def set_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Validate + persist + return the saved config."""
+def set_config(cfg: dict[str, Any], device_sn: str | None = None) -> dict[str, Any]:
+    """Validate + persist + return the saved config for a device. With
+    no device_sn, writes in legacy single-config shape (back-compat)."""
     validated = _validate_config(cfg)
     with _config_lock:
+        existing = _load_raw()
+        if device_sn:
+            # Migrate legacy single-config to per-device on first write
+            # by stuffing the old config into the by_device map under
+            # the legacy "default" key, so the previous behavior survives.
+            if not _is_per_device_shape(existing):
+                migrated = {"by_device": {}}
+                if existing and "mode" in existing:
+                    migrated["by_device"]["__legacy__"] = existing
+                existing = migrated
+            existing["by_device"][device_sn] = validated
+            payload = existing
+        else:
+            payload = validated
         os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(validated, f, indent=2)
+            json.dump(payload, f, indent=2)
         os.replace(tmp, CONFIG_PATH)
-    log.info("smart_charge config saved: mode=%s target=%s",
+    log.info("smart_charge config saved: device=%s mode=%s target=%s",
+             device_sn or "(legacy)",
              validated["mode"], validated["target_sunrise_soc_pct"])
     return validated
+
+
+def get_all_configs() -> dict[str, dict[str, Any]]:
+    """Map of device_sn → config for every device that has one. Used
+    by the periodic loop so it can iterate all enabled devices."""
+    with _config_lock:
+        data = _load_raw()
+    if _is_per_device_shape(data):
+        return {
+            sn: _validate_config(cfg)
+            for sn, cfg in data["by_device"].items()
+            if sn != "__legacy__"
+        }
+    # Legacy single-config: no device association — return empty so
+    # the loop doesn't double-evaluate against the active device.
+    return {}
 
 
 # ---------- Decision plan ----------

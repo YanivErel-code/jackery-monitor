@@ -350,9 +350,9 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadSmartCharge(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); }
   if (name === 'logs')     { loadLogs(); }
-  if (name === 'automation') { loadAutomation(); }
+  if (name === 'automation') { loadAutomation(); loadSmartCharge(); }
   if (name === 'device')   { loadDeviceCapacity(); }
 }
 
@@ -1614,14 +1614,30 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
 // Load config + Kasa device list + recent decisions into the form.
 // Called on Settings tab activation; re-runs are cheap.
 async function loadSmartCharge() {
+  // Render only when the form actually exists in the DOM (Automation tab).
+  if (!$('sc-form')) return;
+  const dev = activeJackeryDevice();
+  const deviceSn = dev?.device_sn || '';
+  const lbl = $('sc-device-label');
+  if (lbl) lbl.textContent = dev?.name ? `· ${dev.name}` : '';
+  if (!deviceSn) {
+    // Without a selected device we can't load per-device config.
+    const status = $('sc-status');
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'No active device — pick one to configure smart charge.';
+    }
+    return;
+  }
   try {
+    const q = `?device_sn=${encodeURIComponent(deviceSn)}`;
     const [cfgRes, kasaRes, statusRes, anaRes] = await Promise.all([
-      fetch('/api/smart_charge/config'),
+      fetch(`/api/smart_charge/config${q}`),
       fetch('/api/kasa/saved'),
-      fetch('/api/smart_charge/status'),
-      fetch('/api/smart_charge/analytics?days=14'),
+      fetch(`/api/smart_charge/status${q}`),
+      fetch(`/api/smart_charge/analytics?days=14&device_sn=${encodeURIComponent(deviceSn)}`),
     ]);
-    const cfg = cfgRes.ok ? await cfgRes.json() : {};
+    const cfg = cfgRes.ok ? (await cfgRes.json()).config || {} : {};
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
     const ana = anaRes.ok ? await anaRes.json() : { summary: {} };
@@ -1751,6 +1767,12 @@ function renderSmartChargePlan(plan) {
 document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const status = $('sc-status');
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) {
+    status.hidden = false;
+    status.textContent = 'No active device — cannot save.';
+    return;
+  }
   status.hidden = false;
   status.textContent = 'Saving…';
   const cfg = {
@@ -1762,7 +1784,7 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
     claude_enabled: $('sc-claude-toggle').checked,
   };
   try {
-    const r = await fetch('/api/smart_charge/config', {
+    const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(cfg),
@@ -1780,10 +1802,14 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
 
 document.getElementById('sc-evaluate')?.addEventListener('click', async () => {
   const status = $('sc-status');
+  const deviceSn = activeJackeryDevice()?.device_sn;
   status.hidden = false;
   status.textContent = 'Evaluating…';
   try {
-    const r = await fetch('/api/smart_charge/evaluate_now', { method: 'POST' });
+    const url = deviceSn
+      ? `/api/smart_charge/evaluate_now?device_sn=${encodeURIComponent(deviceSn)}`
+      : '/api/smart_charge/evaluate_now';
+    const r = await fetch(url, { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     renderSmartChargePlan(j.plan);
@@ -1885,8 +1911,10 @@ function applyStatus(s) {
   // If the active Jackery device changed and we're on the Automation tab,
   // re-render the rules list so the "Showing rules for: X" filter follows.
   const newDeviceSn = activeJackeryDevice()?.device_sn;
-  if (activeTab === 'automation' && _allRules.length && prevDeviceSn !== newDeviceSn) {
-    renderRulesWithFilter();
+  if (activeTab === 'automation' && prevDeviceSn !== newDeviceSn) {
+    if (_allRules.length) renderRulesWithFilter();
+    // Smart-charge config is per-device — reload for the new selection.
+    loadSmartCharge();
   }
   // Same idea for the Forecast tab: forecast is per-device (battery
   // capacity, solar regression, load profile all differ), so re-fetch on
