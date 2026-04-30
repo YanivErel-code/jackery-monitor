@@ -96,12 +96,16 @@ It connects through the **Jackery cloud account** (the same one the official app
         │                                              │
         ├─── SQLite (/data/energy.db)                  ├──HTTPS── iot.jackeryapp.com   (HTTP API: login, properties)
         ├─── /data/settings.json                       │
-        ├─── /data/automation.json                     └──MQTT/TLS── emqx.jackeryapp.com  (push + output commands)
-        ├─── /data/kasa_devices.json
+        ├─── /data/automation.json                     ├──HTTPS── api.open-meteo.com (weather, no key)
+        ├─── /data/smart_charge.json                   │
+        ├─── /data/kasa_devices.json                   └──MQTT/TLS── emqx.jackeryapp.com  (push + output commands)
         ├─── /data/kasa-creds.json (encrypted)
+        ├─── /data/anthropic-creds.json (encrypted, optional)
         ├─── /data/auth.json (encrypted)
         │
-        └──HTTP── Kasa smart plugs on the LAN  (python-kasa, KLAP/SMART/IOT)
+        ├──HTTP── Kasa smart plugs on the LAN  (python-kasa, KLAP/SMART/IOT)
+        │
+        └──HTTPS── api.anthropic.com  (optional: AI advisor + decision narration)
 ```
 
 Both server and bridge run as the same image (`ghcr.io/yaniverel-code/jackery-monitor`),
@@ -228,6 +232,68 @@ viewing the 5000 Plus.
 
 ---
 
+## AI features (optional)
+
+Two Claude-powered features. Both are opt-in, gated by an Anthropic API key
+saved encrypted in the data volume. Without a key, the rest of the app is
+unaffected.
+
+**1. Algorithm advisor (Opus + extended thinking, daily)**
+
+The hard one. Every morning at 8 AM local time, per device, Claude Opus
+reviews:
+- Forecast accuracy by lead time bucket (last 14d MAE in pp)
+- Last 24h hourly samples (SOC, in/out W, solar, AC input)
+- Last 24h hourly weather (GHI, cloud cover)
+- Last 48h predicted-vs-actual SOC pairs
+- Last 7d smart-charge decisions joined to the actual sunrise SOC
+- Current per-device smart-charge config
+
+…and proposes specific config tweaks bound to a whitelist of safe
+parameters (`max_charge_w`, `target_sunrise_soc_pct`,
+`max_on_duration_minutes`). Each suggestion has an old → new value diff,
+Claude's reasoning, and a confidence label. **Nothing applies
+automatically** — the user clicks Apply or Dismiss. Hard safety floors
+are enforced at apply time (e.g. target SOC can never go below 15%).
+
+Anomaly callouts (e.g. *"the unit drew 3 kW between 2-4 AM yesterday —
+unusual vs the prior week"*) appear without an Apply button.
+
+Cost: ~$0.20-0.30 per review with Opus. Daily cadence + manual "Run
+review now" button. Set `JACKERY_ADVISOR_MODEL=claude-sonnet-4-5` in
+your Docker env if you want cheaper reviews — Sonnet still has extended
+thinking.
+
+**2. Decision narration (Haiku, per fired smart-charge decision)**
+
+Each smart-charge decision gets a 1-2 sentence explanation:
+*"Your battery will naturally charge to 83% by sunrise from solar alone,
+so we're turning the charger off to avoid wasting grid electricity."*
+The narration is attached to the persisted history row and shown
+inline in the Recent decisions list.
+
+Cost: ~1 Haiku call per fired decision (typically 1-3/day for an
+active-mode setup). Pennies per month.
+
+**Enabling:**
+1. Get an API key at console.anthropic.com (need to add credit, $5 minimum).
+2. **Settings tab → Anthropic API key.** Paste, click Save & test —
+   the server validates with a 1-token API call before persisting.
+   Stored encrypted at `/data/anthropic-creds.json`. Forget button
+   wipes it.
+3. **Automation tab → Smart charge → Claude narration toggle** unlocks
+   once a key is saved. Toggle it on per-device.
+4. **Automation tab → AI insights** is always visible; click Run review
+   now to trigger an on-demand review (30-60s for Opus to think + reply).
+5. The daily 8 AM tick fires automatically once a key is configured.
+
+**Privacy of the AI features:** the API key never leaves your NAS. Each
+review or narration call sends a snapshot of your telemetry +
+configuration to Anthropic; no other data is shared. Disable both at
+any time by clearing the key on the Settings page.
+
+---
+
 ## Configuration
 
 Most knobs live in the **Settings tab**, persisted to
@@ -262,6 +328,14 @@ jackery-monitor/
 ├── settings.py               Runtime-tunable settings module
 ├── crypto_util.py            Shared AES-256-GCM helper
 │
+├── forecaster.py             Solar regression + load profile + SOC simulation
+├── weather_client.py         Open-Meteo client (free, keyless)
+├── smart_charge.py           Per-device smart-charge planner + config
+├── cost.py                   TOU electricity rate plans + savings math
+├── claude_advisor.py         Daily Opus + extended-thinking algorithm review
+├── claude_narrator.py        Per-decision Haiku narration
+├── anthropic_creds.py        Encrypted Anthropic API key (/data/anthropic-creds.json)
+│
 ├── web/
 │   ├── index.html            Main dashboard
 │   ├── login.html            /login + /setup pages
@@ -285,13 +359,16 @@ Persistent state on the NAS (Docker volume `jackery-data`, mounted at
 
 ```
 /data/
-├── energy.db                 SQLite — energy aggregation per device
+├── energy.db                 SQLite — telemetry, forecast trace, AI suggestions
 ├── settings.json             Runtime settings overrides
 ├── automation.json           Saved automation rules
-├── kasa_devices.json         Saved Kasa-device registry
+├── kasa_devices.json         Saved Kasa-device registry (per-Jackery assigned)
 ├── kasa-creds.json           Encrypted Kasa cloud account credentials
 ├── jackery-creds.json        Encrypted Jackery cloud account credentials
 ├── auth.json                 Encrypted dashboard-login user
+├── anthropic-creds.json      Encrypted Anthropic API key (AI features)
+├── smart_charge.json         Per-device smart-charge config
+├── location.json             Geocoordinates + tz (for weather)
 └── .jackery-creds.key        AES-256 at-rest encryption key (mode 0600)
 ```
 
@@ -323,8 +400,10 @@ What stays on your NAS:
   - Jackery cloud account → `/data/jackery-creds.json`
   - Kasa cloud account → `/data/kasa-creds.json`
   - Dashboard login → `/data/auth.json`
+  - Anthropic API key (AI features) → `/data/anthropic-creds.json`
 - The single AES key for all of the above → `/data/.jackery-creds.key`
   (mode 0600)
+- All AI suggestions + audit log of applied changes (`/data/energy.db`)
 
 What leaves the NAS:
 
@@ -334,6 +413,15 @@ What leaves the NAS:
 - Calls to **Kasa smart plugs on your LAN** (direct IP) for automation
   actions; for newer Kasa SMART devices, this includes their cloud-account
   credentials in the local KLAP handshake.
+- Calls to **`api.anthropic.com`** *only when you've saved an API key*:
+  - Daily algorithm review: a snapshot of your forecast accuracy +
+    last 24h of telemetry + smart-charge config (no PII, no credentials).
+  - Per smart-charge decision narration (when narration toggle is on):
+    just the action + reasoning + a few SOC numbers.
+  - Disable at any time by clearing the API key on the Settings page.
+- Calls to **Open-Meteo** (free, keyless weather API) for
+  GHI + cloud-cover forecasts. Just your latitude/longitude in the
+  query — no account, no key, no other data.
 
 What is **never** sent off-device by this app:
 
