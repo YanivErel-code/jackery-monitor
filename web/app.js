@@ -1217,6 +1217,73 @@ $('dbg-cloud-probe')?.addEventListener('click', async () => {
     </div>` + out.innerHTML;
 });
 
+$('dbg-copy-all')?.addEventListener('click', async () => {
+  const status = $('debug-status');
+  status.hidden = false;
+  status.textContent = 'Gathering all debug data…';
+  // Run all queries in parallel — each surfaces an `error` field on
+  // failure rather than rejecting, so a flaky endpoint doesn't kill
+  // the whole bundle.
+  const safe = (url) => fetch(url).then(r =>
+    r.ok ? r.json() : { error: `HTTP ${r.status}`, url })
+    .catch(e => ({ error: String(e), url }));
+  const [
+    forecastAccuracy,
+    smartChargeAnalytics,
+    dailySummary,
+    batteryPacks,
+    rawProps,
+    cloudProbe,
+    forecast,
+    smartChargeStatus,
+    smartChargeConfig,
+    status_,
+  ] = await Promise.all([
+    safe('/api/forecast/accuracy'),
+    safe('/api/smart_charge/analytics?days=14'),
+    safe('/api/daily_summary?days=14'),
+    safe('/api/devices/battery_packs'),
+    safe('/api/debug/raw_props'),
+    safe('/api/debug/cloud_probe'),
+    safe('/api/forecast'),
+    safe('/api/smart_charge/status'),
+    safe('/api/smart_charge/config'),
+    safe('/api/status'),
+  ]);
+  const bundle = {
+    captured_at: new Date().toISOString(),
+    active_device_sn: status_?.device?.device_sn || null,
+    active_device_model: status_?.device?.model_code || null,
+    active_device_name: status_?.device?.name || null,
+    current_telemetry: status_?.telemetry || null,
+    forecast_accuracy: forecastAccuracy,
+    smart_charge_analytics: smartChargeAnalytics,
+    smart_charge_status: smartChargeStatus,
+    smart_charge_config: smartChargeConfig,
+    daily_summary: dailySummary,
+    battery_packs: batteryPacks,
+    raw_cloud_props: rawProps,
+    cloud_probe: cloudProbe,
+    forecast: forecast,
+  };
+  const text = JSON.stringify(bundle, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    status.textContent = `Copied ${(text.length / 1024).toFixed(1)} KB to clipboard.`;
+    setTimeout(() => { status.hidden = true; }, 4000);
+  } catch (e) {
+    // Fallback: render in the panel so the user can manually copy.
+    status.textContent = 'Clipboard blocked — bundle rendered below for manual copy.';
+    const out = $('debug-output');
+    out.hidden = false;
+    out.innerHTML = `
+      <div class="dbg-block">
+        <h3>All debug data <small class="hint">(${new Date().toLocaleTimeString()})</small></h3>
+        <pre class="dbg-pre" style="max-height:600px">${text.replace(/</g, '&lt;')}</pre>
+      </div>` + out.innerHTML;
+  }
+});
+
 $('dbg-clear')?.addEventListener('click', () => {
   const out = $('debug-output');
   out.innerHTML = '';
