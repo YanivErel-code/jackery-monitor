@@ -170,14 +170,18 @@ a { color: var(--accent-2); }
 
 /* ============== Main + Tabs ============== */
 main {
-  /* Adapt to the screen. The content (KPI cards + chart) was designed for
-     ~1200px and stretches awkwardly past 1500px. Cap at 1500 — that's
-     comfortably bigger than the old 1200 cap on standard laptops, still
-     dense enough on wide displays that cards don't look like empty boxes.
-     Phones / narrow tablets keep their dedicated breakpoints below. */
-  max-width: min(95vw, 1500px);
+  /* Tiered cap so the dashboard feels right at every common viewport:
+     - <=1500px (laptops): 95vw, capped at 1500px — keeps line lengths
+       sane on narrow screens.
+     - 1500-2400px (24" 4K, 27" QHD): grows toward ~1900px.
+     - >=2400px (ultrawide / 32" 4K): caps at 2200px so the chart and
+       battery-pack rows aren't unscannable, but uses way more of the
+       screen than the old 1500px cap did. The lower-tier breakpoints
+       below (900 / 600) keep handling tablets and phones.
+     The CSS-only ladder uses clamp + min so we don't need media queries. */
+  max-width: clamp(0px, 95vw, 2200px);
   margin: 0 auto;
-  padding: 22px;
+  padding: clamp(16px, 1.5vw, 32px);
 }
 .tabs {
   display: flex; gap: 4px;
