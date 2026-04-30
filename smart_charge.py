@@ -50,9 +50,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "kasa_device_host": None,           # which saved Kasa plug = the grid input
     "target_sunrise_soc_pct": 25,        # SOC we want at sunrise
     # AC charging rate the unit will pull from the wall while the plug
-    # is on. 5000 Plus default "Fast" mode is ~1500W; Standard is ~600W;
-    # Super-fast on 240V split-phase up to ~2400W. Pick what the unit
-    # is actually set to in its app/UI.
+    # is on. 5000 Plus modes: Standard ~600W, Fast ~1500W (default),
+    # up to ~1800W on a dedicated 120V/20A circuit. The marketed 2400W
+    # "Super-fast" rate requires Jackery's Smart Transfer Switch
+    # accessory, not just a 240V outlet — pick what the unit actually
+    # pulls in observed practice.
     "max_charge_w": 1500,
     "max_on_duration_minutes": 480,      # safety cap per dusk-dawn cycle
     "claude_enabled": False,             # optional decision narrator
