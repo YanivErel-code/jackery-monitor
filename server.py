@@ -726,7 +726,19 @@ async def _smart_charge_evaluate(record: bool = True,
                     narration = await _smart_charge_narrate(plan)
             except Exception as e:
                 log.debug("claude narration skipped: %s", e)
-        smart_charge.record_decision(plan, executed=executed, narration=narration)
+        # The decisions table was silently empty for weeks because we
+        # were calling a non-existent smart_charge.record_decision —
+        # the AttributeError got eaten by the loop's broad except. Use
+        # the actual energy_db method, with the Plan converted to a dict.
+        try:
+            state.energy.record_smart_charge_decision(
+                device_sn=device_sn,
+                plan=plan.to_dict() if hasattr(plan, "to_dict") else plan,
+                executed=executed,
+                narration=narration,
+            )
+        except Exception as e:
+            log.warning("smart_charge: failed to record decision: %s", e)
     return plan
 
 
