@@ -20,9 +20,9 @@ per-device automation rules and AI insights.
 
 It connects through the **Jackery cloud account** (the same one the official app uses). On first launch the dashboard prompts you to sign in; credentials are encrypted on disk (AES-256-GCM on Linux/Synology, macOS Keychain on Mac) and never leave your host.
 
-![Dashboard — Live tab with state of charge, power flow, today's energy, output toggles, and 6-hour history chart](docs/screenshots/dashboard-live.png)
+![Dashboard — Live tab with state of charge, power flow, today's energy, per-pack battery breakdown, output toggles, and 6-hour history chart](docs/screenshots/dashboard-live.png)
 
-*Live tab: state of charge, power flow (output / input / solar), today's kWh and dollar value, output toggles, and the 6-hour battery + power chart.*
+*Live tab: state of charge, power flow (output / input / solar), today's kWh and dollar value, per-expansion-pack SOC + temperature + charging power, output toggles, and the 6-hour battery + power chart.*
 
 > **🤖 New: AI advisor.** Each morning Claude Opus (with extended thinking) reviews the last 48h of forecast errors, smart-charge decisions, samples, and weather, then proposes specific config tweaks — *"raise `max_charge_w` from 1500 → 1850, your unit consistently pulls more during fast-charge mode"* — that you approve with one click. Nothing applies automatically. See [AI features](#ai-features-optional) below.
 
