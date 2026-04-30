@@ -708,8 +708,16 @@ async def _smart_charge_evaluate(record: bool = True,
 
     if record:
         narration = ""
+        # Belt-and-suspenders: even if the toggle is on, skip narration
+        # when no usable key exists — covers the case where the user
+        # cleared the key but didn't notice the toggle was still ticked.
         if cfg.get("claude_enabled"):
-            narration = await _smart_charge_narrate(plan)
+            try:
+                import claude_narrator
+                if claude_narrator.has_usable_key():
+                    narration = await _smart_charge_narrate(plan)
+            except Exception as e:
+                log.debug("claude narration skipped: %s", e)
         smart_charge.record_decision(plan, executed=executed, narration=narration)
     return plan
 
@@ -1492,6 +1500,46 @@ def api_kasa_creds_save(body: dict):
 @app.delete("/api/kasa/credentials")
 def api_kasa_creds_clear():
     kasa_creds.clear()
+    return {"ok": True}
+
+
+@app.get("/api/anthropic/key")
+def api_anthropic_key_status():
+    """Tell the UI whether an Anthropic API key is saved (without
+    returning the key itself). Drives the Settings page status badge
+    and gates the smart-charge `claude_enabled` toggle."""
+    import anthropic_creds as ac
+    return {
+        "has_key": ac.has_key() or bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "source": "env" if (not ac.has_key() and os.environ.get("ANTHROPIC_API_KEY"))
+                  else ("saved" if ac.has_key() else None),
+    }
+
+
+@app.post("/api/anthropic/key")
+async def api_anthropic_key_save(body: dict):
+    """Validate the candidate key by making a 1-token API call, then
+    persist it. We refuse to save a key that doesn't actually work —
+    user-side guarantee that flipping `claude_enabled` will produce
+    narration instead of silent empty strings."""
+    import anthropic_creds as ac
+    import claude_narrator
+    api_key = ((body or {}).get("api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(400, "api_key required")
+    ok, msg = await claude_narrator.validate_key(api_key)
+    if not ok:
+        raise HTTPException(400, f"key validation failed: {msg}")
+    if not ac.save(api_key):
+        raise HTTPException(500, "failed to save key")
+    return {"ok": True}
+
+
+@app.delete("/api/anthropic/key")
+def api_anthropic_key_clear():
+    """Forget the saved key. The env-var fallback (if set) keeps working."""
+    import anthropic_creds as ac
+    ac.clear()
     return {"ok": True}
 
 

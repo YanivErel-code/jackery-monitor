@@ -501,11 +501,11 @@
           <div class="settings-row">
             <label class="settings-label" for="sc-claude-toggle">
               <span class="settings-label-text">Claude narration</span>
-              <span class="settings-hint">Optional natural-language explanation of each decision. Off by default — costs API calls.</span>
+              <span class="settings-hint">Optional 1-2 sentence plain-English explanation attached to each decision. Disabled until you save an Anthropic API key on the Settings page. Costs ~one Haiku API call per fired decision (typically 1-3/day).</span>
             </label>
             <div class="settings-control">
               <label class="keep-awake-row">
-                <input id="sc-claude-toggle" type="checkbox" />
+                <input id="sc-claude-toggle" type="checkbox" disabled />
                 <span class="hint">Enable</span>
               </label>
             </div>
@@ -746,6 +746,22 @@
           <span>Keep screen on</span>
           <span id="keep-awake-status" class="hint"></span>
         </label>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
+          <h2>Anthropic API key</h2>
+          <span id="ak-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Optional. Powers the smart-charge "Claude narration" toggle — a 1-2 sentence plain-English explanation of each automation decision, attached to the persisted history. Get a key at <code>console.anthropic.com</code>. Stored encrypted in the data volume; never sent anywhere except api.anthropic.com.
+        </p>
+        <p id="ak-state-line" class="hint" style="margin:6px 0 12px"></p>
+        <form id="ak-form" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input id="ak-input" type="password" autocomplete="off" placeholder="sk-ant-…" class="device-select" style="min-width:280px; flex:1" />
+          <button class="btn btn-primary" type="submit">Save & test</button>
+          <button id="ak-clear" class="btn btn-ghost" type="button">Forget</button>
+        </form>
       </section>
 
       <section class="card device-card">

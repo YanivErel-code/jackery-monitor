@@ -10,3 +10,8 @@ python-kasa>=0.10
 # python:3.11-slim image doesn't ship it system-wide. Without this, all
 # Kasa connections fail with ZoneInfoNotFoundError before auth even starts.
 tzdata>=2024.1
+# Optional: powers the smart-charge "Claude narration" toggle (1-2 sentence
+# explanation of each decision, attached to the persisted history). The
+# rest of the app works fine without an API key — narration only runs
+# when the user explicitly enables it AND has saved a key.
+anthropic>=0.40

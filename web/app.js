@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') { loadAutomation(); loadSmartCharge(); }
   if (name === 'device')   { loadDeviceCapacity(); }
@@ -1702,6 +1702,14 @@ async function loadSmartCharge() {
     $('sc-max-on-min').value = cfg.max_on_duration_minutes ?? 480;
     $('sc-claude-toggle').checked = !!cfg.claude_enabled;
 
+    // Refresh the API-key gate every time the panel loads — the user
+    // may have just saved or cleared the key on Settings.
+    try {
+      const r = await fetch('/api/anthropic/key');
+      _anthropicHasKey = r.ok ? !!(await r.json()).has_key : false;
+    } catch { _anthropicHasKey = false; }
+    applyClaudeToggleGate();
+
     renderSmartChargeHistory(status.history || []);
     renderSmartChargeAnalytics(ana);
   } catch (e) {
@@ -1749,14 +1757,19 @@ function renderSmartChargeHistory(rows) {
     const actionCls = r.action === 'on' ? 'sc-act-on'
                     : r.action === 'off' ? 'sc-act-off'
                     : 'sc-act-skip';
+    const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    const narrationLine = r.narration
+      ? `<div class="sc-narration">💬 ${safe(r.narration)}</div>`
+      : '';
     return `
       <div class="sc-row">
         <span class="sc-when">${when}</span>
         <span class="sc-action ${actionCls}">${(r.action || '?').toUpperCase()}</span>
         <span class="sc-mode">[${r.mode || '?'}]</span>
         <span class="sc-pred">predicted ${pred} → actual ${actual} (target ${target})</span>
-        <span class="sc-reason" title="${r.reason || ''}">${r.reason || ''}</span>
-      </div>`;
+        <span class="sc-reason" title="${safe(r.reason || '')}">${safe(r.reason || '')}</span>
+      </div>${narrationLine}`;
   }).join('');
 }
 
@@ -3200,6 +3213,94 @@ document.addEventListener('change', async (e) => {
   } else {
     await releaseWakeLock();
     setKeepAwakeStatus('');
+  }
+});
+
+// ============================================================
+// ANTHROPIC API KEY (Settings → enables Claude narration)
+// ============================================================
+// Status banner + save-with-server-validation form. We never receive
+// the saved key back from the server; the status endpoint just tells
+// us whether one is present, so the form stays empty after save.
+
+let _anthropicHasKey = false;
+
+async function loadAnthropicKeyStatus() {
+  const line = $('ak-state-line');
+  const status = $('ak-status');
+  if (!line) return;
+  try {
+    const r = await fetch('/api/anthropic/key');
+    const j = r.ok ? await r.json() : { has_key: false };
+    _anthropicHasKey = !!j.has_key;
+    if (j.has_key) {
+      line.innerHTML = j.source === 'env'
+        ? '✅ <strong>Configured via env var</strong> on the bridge — UI changes here will only affect the saved-on-disk key.'
+        : '✅ <strong>API key saved.</strong> The Claude narration toggle on the Automation tab is unlocked.';
+    } else {
+      line.innerHTML = 'No key saved. Enter one below to unlock the Claude narration toggle on the Automation tab.';
+    }
+    if (status) status.hidden = true;
+  } catch (e) {
+    console.warn('anthropic key status fetch failed', e);
+  }
+  // Also re-evaluate the smart-charge claude toggle disabled state, in
+  // case the user saved a key while sitting on Settings then jumped to
+  // Automation without a full reload.
+  applyClaudeToggleGate();
+}
+
+function applyClaudeToggleGate() {
+  const t = $('sc-claude-toggle');
+  if (!t) return;
+  if (_anthropicHasKey) {
+    t.disabled = false;
+    t.title = '';
+  } else {
+    t.disabled = true;
+    if (t.checked) t.checked = false;
+    t.title = 'Save an Anthropic API key on the Settings page first.';
+  }
+}
+
+document.getElementById('ak-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('ak-status');
+  const input = $('ak-input');
+  const key = input.value.trim();
+  if (!key) return;
+  status.hidden = false;
+  status.textContent = 'Validating with Anthropic…';
+  try {
+    const r = await fetch('/api/anthropic/key', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ api_key: key }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || j.error || `HTTP ${r.status}`);
+    status.textContent = 'Saved. Test call succeeded.';
+    input.value = '';
+    setTimeout(() => { status.hidden = true; }, 3000);
+    loadAnthropicKeyStatus();
+  } catch (err) {
+    status.textContent = String(err.message || err);
+  }
+});
+
+document.getElementById('ak-clear')?.addEventListener('click', async () => {
+  const status = $('ak-status');
+  if (!confirm('Forget the saved Anthropic API key? Claude narration will stop until a new key is saved.')) return;
+  status.hidden = false;
+  status.textContent = 'Clearing…';
+  try {
+    const r = await fetch('/api/anthropic/key', { method: 'DELETE' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    status.textContent = 'Forgotten.';
+    setTimeout(() => { status.hidden = true; }, 2500);
+    loadAnthropicKeyStatus();
+  } catch (err) {
+    status.textContent = String(err.message || err);
   }
 });
 
