@@ -23,22 +23,38 @@ models fall back to 3024 Wh (HomePower 3000 size).
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("forecaster")
 
-# Battery capacity (Wh) by Jackery cloud model_code. The 5000 Plus reports
-# under both 13 and 22 depending on firmware/region; both are the same cell
-# stack (5040 Wh nominal). Unknown model_codes fall back to the smaller
-# HomePower 3000 size so we don't over-promise SOC headroom.
-BATTERY_CAPACITY_WH: dict[int, int] = {
-    13: 5040,
-    22: 5040,
-}
-DEFAULT_BATTERY_CAPACITY_WH = 3024
+# Battery capacity (Wh) by Jackery cloud model_code, loaded from
+# `models.json` at module import. Keeping this catalog in a JSON file
+# rather than a Python dict lets community contributors add new
+# model_codes via PR without touching the simulator code. Per-device
+# override (Device tab → capacity_wh_override) still beats the catalog.
+def _load_model_catalog() -> dict[str, Any]:
+    path = Path(__file__).parent / "models.json"
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        log.warning("models.json unreadable (%s); using built-in fallback", e)
+        return {"default_capacity_wh": 3024, "models": {}}
+
+
+_MODEL_CATALOG = _load_model_catalog()
+DEFAULT_BATTERY_CAPACITY_WH = int(_MODEL_CATALOG.get("default_capacity_wh") or 3024)
+BATTERY_CAPACITY_WH: dict[int, int] = {}
+for _k, _v in (_MODEL_CATALOG.get("models") or {}).items():
+    try:
+        BATTERY_CAPACITY_WH[int(_k)] = int(_v["capacity_wh"])
+    except (TypeError, ValueError, KeyError) as _e:
+        log.warning("models.json: skipping bad entry %r=%r (%s)", _k, _v, _e)
 
 # Minimum paired (solar_w, ghi) samples required to trust a regression fit.
 # Below this, fall back to a generic coefficient. 2 is the floor for a

@@ -432,6 +432,27 @@ What is **never** sent off-device by this app:
   on your LAN (because that's the point of the automation feature).
   That's it.
 
+## Adding a new Jackery model
+
+The model_code → battery capacity catalog lives in [`models.json`](models.json) at the repo root. If your device's model_code isn't listed, the forecaster falls back to a conservative 3024 Wh default.
+
+To check your device's model_code:
+1. **Device tab → Show raw cloud properties** — look for `_dev_modelCode` in the dump.
+2. Or check `Logs tab → /api/devices` debug query — shows `model_code` per device.
+
+To add a new model:
+1. Find your model_code via the steps above.
+2. Look up the official capacity for your unit (Jackery's spec sheet).
+3. PR an entry to `models.json`:
+   ```json
+   "42": {
+     "capacity_wh": 2042,
+     "name": "Explorer 2000 Pro",
+     "comment": "Confirmed on firmware vX.Y"
+   }
+   ```
+4. Until your PR lands, you can also use **Device tab → Capacity override** for a per-device-only override that takes priority over the catalog.
+
 ## Limitations
 
 - **Per-input solar (HPV vs LPV) isn't in the Jackery cloud API.** Only the
