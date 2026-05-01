@@ -894,9 +894,13 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
     if stored and stored.get("value") is not None:
         if stored.get("source") == "user":
             return {**stored, "source": "user"}
-        # Stale fit? Recompute if the row's >24h old, otherwise reuse.
+        # Cache fit/probe results — they're expensive to recompute.
+        # Catalog/default lookups are cheap (in-memory dict + a row
+        # query) so we re-resolve those every time. This also avoids
+        # the "old buggy value sticks for 24h" problem when the
+        # catalog logic is updated — fresh code immediately wins.
         age = int(time.time()) - int(stored.get("updated_at") or 0)
-        if stored.get("source") in ("fit", "probe", "catalog") and age < 24 * 3600:
+        if stored.get("source") in ("fit", "probe") and age < 24 * 3600:
             return stored
 
     # Step 2: live computation per parameter.
