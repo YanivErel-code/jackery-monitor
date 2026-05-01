@@ -2224,8 +2224,10 @@ function renderDecisionDetailsHtml(j) {
 
   const fcRows = (j.forecast_trace || []).map(f => `
     <tr><td>${fmtTime(f.target)}</td><td>${Math.round(f.predicted_soc)}%</td></tr>`).join('');
+  const fcMadeAt = j.forecast_made_at
+    ? ` <small class="hint">(snapshot taken ${fmtTs(j.forecast_made_at)})</small>` : '';
   const fcTable = fcRows
-    ? `<table class="dd-table"><thead><tr><th>target</th><th>predicted SOC</th></tr></thead><tbody>${fcRows}</tbody></table>`
+    ? `<table class="dd-table"><thead><tr><th>target</th><th>predicted SOC</th></tr></thead><tbody>${fcRows}</tbody></table>${fcMadeAt}`
     : '<div class="hint">No forecast trace stored at this decision time.</div>';
 
   const wRows = (j.weather || []).map(w => `
@@ -2279,7 +2281,7 @@ async function copyDecisionDetails(j) {
     lines.push(`- ${p.key}: ${p.value} ${p.unit || ''} [source=${p.source}${p.n_samples ? `, n=${p.n_samples}` : ''}]`);
   }
   lines.push('');
-  lines.push('## Forecast trace (predictions made at decision time)');
+  lines.push(`## Forecast trace${j.forecast_made_at ? ` (snapshot taken ${fmtTs(j.forecast_made_at)})` : ''}`);
   for (const f of (j.forecast_trace || [])) {
     lines.push(`- ${fmtTs(f.target)}  predicted_soc=${f.predicted_soc}`);
   }

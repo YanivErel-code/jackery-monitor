@@ -901,17 +901,32 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
 
     # Step 2: live computation per parameter.
     if key == "battery_capacity_wh":
-        # Catalog lookup. Per-device override (capacity_wh_override) is
-        # already handled separately in _total_capacity_wh; this is the
-        # model-derived value before pack stacking.
+        # Return the SYSTEM-wide capacity (main + N expansion packs),
+        # not just the per-unit catalog value — that's what the
+        # simulator actually uses. Source priority: user override
+        # (capacity_wh_override) > catalog * packs > default.
         try:
+            override = state.energy.get_capacity_override(device_sn)
+            if override:
+                state.energy.set_device_param(
+                    device_sn, key, float(override), source="user",
+                    note="capacity_wh_override",
+                )
+                return {"value": float(override), "source": "user",
+                        "updated_at": int(time.time())}
             d = next((x for x in state.energy.list_devices()
                       if x.get("device_sn") == device_sn), None)
             mc = (d or {}).get("model_code")
-            cap = forecaster.battery_capacity_wh(mc)
+            total = _total_capacity_wh(device_sn, mc)
             source = "catalog" if mc in forecaster.BATTERY_CAPACITY_WH else "default"
-            state.energy.set_device_param(device_sn, key, cap, source=source)
-            return {"value": cap, "source": source, "updated_at": int(time.time())}
+            n_packs = len(state.battery_packs_by_sn.get(device_sn, []))
+            state.energy.set_device_param(
+                device_sn, key, float(total), source=source,
+                note=f"main + {n_packs} pack(s)" if n_packs else "main only",
+            )
+            return {"value": float(total), "source": source,
+                    "note": f"main + {n_packs} pack(s)" if n_packs else "main only",
+                    "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s catalog failed: %s", device_sn, key, e)
 
@@ -954,6 +969,26 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
                 confidence=("high" if n >= 20 else "medium" if n >= 10 else "low"),
             )
             return {"value": v, "source": source, "n_samples": n,
+                    "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
+
+    elif key == "solar_coefficient":
+        try:
+            ehist = _cached_history(device_sn)
+            # The solar fit needs paired weather + energy samples; we
+            # only have weather observations stored locally. Query the
+            # last 14d.
+            wx = state.energy.list_weather_observations(
+                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
+            )
+            k_val, n = forecaster.fit_solar_coefficient(ehist, wx)
+            source = "fit" if n >= forecaster.MIN_FIT_SAMPLES else "default"
+            state.energy.set_device_param(
+                device_sn, key, k_val, source=source, n_samples=n,
+                confidence=("high" if n >= 20 else "medium" if n >= 5 else "low"),
+            )
+            return {"value": k_val, "source": source, "n_samples": n,
                     "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
@@ -2216,25 +2251,35 @@ def api_smart_charge_decision_details(decided_at: int, device_sn: str | None = N
     if not decision:
         raise HTTPException(404, "decision not found")
 
-    # Forecast trace made closest to this decision (±10 minutes).
+    # Forecast trace from the snapshot taken closest to (and at-or-
+    # before) this decision. `record_forecast` floors made_at to the
+    # hour, so the matching row is typically up to 1h earlier than
+    # decided_at — we find that hour explicitly rather than a tight
+    # symmetric window.
     forecast_trace: list[dict] = []
+    forecast_made_at: int | None = None
     try:
-        win_lo, win_hi = decided_at - 600, decided_at + 600
         with state.energy._conn() as c:
-            rows = c.execute(
-                """SELECT made_at, target, predicted_soc
-                     FROM forecast_predictions
-                    WHERE device_sn = ?
-                      AND made_at BETWEEN ? AND ?
-                      AND target >= ?
-                    ORDER BY target
-                    LIMIT 200""",
-                (device_sn, win_lo, win_hi, decided_at),
-            ).fetchall()
-        forecast_trace = [
-            {"made_at": r[0], "target": r[1],
-             "predicted_soc": float(r[2])} for r in rows
-        ]
+            row = c.execute(
+                """SELECT MAX(made_at) FROM forecast_predictions
+                    WHERE device_sn = ? AND made_at <= ?""",
+                (device_sn, int(decided_at)),
+            ).fetchone()
+            forecast_made_at = int(row[0]) if row and row[0] else None
+            if forecast_made_at is not None:
+                rows = c.execute(
+                    """SELECT made_at, target, predicted_soc
+                         FROM forecast_predictions
+                        WHERE device_sn = ? AND made_at = ?
+                          AND target >= ?
+                        ORDER BY target
+                        LIMIT 200""",
+                    (device_sn, forecast_made_at, int(decided_at)),
+                ).fetchall()
+                forecast_trace = [
+                    {"made_at": r[0], "target": r[1],
+                     "predicted_soc": float(r[2])} for r in rows
+                ]
     except Exception as e:
         log.debug("forecast trace lookup failed: %s", e)
 
@@ -2288,6 +2333,7 @@ def api_smart_charge_decision_details(decided_at: int, device_sn: str | None = N
         "device_sn": device_sn,
         "decision": decision,
         "forecast_trace": forecast_trace,
+        "forecast_made_at": forecast_made_at,
         "weather": weather_obs,
         "samples_trace": samples_trace,
         "resolved_params": resolved_params,
