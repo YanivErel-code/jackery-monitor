@@ -2005,6 +2005,31 @@ async def api_devices_params_set(req: Request):
             **resolve_device_param(device_sn, key)}
 
 
+@app.post("/api/devices/params/refit")
+async def api_devices_params_refit(req: Request):
+    """Force-clear any cached fit/probe/catalog row and re-resolve.
+    Useful when you've just deployed a fit improvement and want to see
+    the new value immediately instead of waiting for next call."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body") from None
+    device_sn = body.get("device_sn")
+    key = body.get("key")
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn or not key:
+        raise HTTPException(400, "device_sn and key required")
+    if key not in energy_db.DEVICE_PARAM_KEYS:
+        raise HTTPException(400, f"unknown param key: {key!r}")
+    # Drop the stored row (if any) and clear the in-process history
+    # memo so the live fit picks up the latest data.
+    state.energy.clear_device_param(device_sn, key)
+    _param_fit_cache.pop((device_sn, "_history"), None)
+    return {"device_sn": device_sn, "key": key,
+            **resolve_device_param(device_sn, key)}
+
+
 @app.get("/api/devices/probe_results")
 def api_devices_probe_results(device_sn: str | None = None):
     """Return the latest auto-probe results for one device — the raw

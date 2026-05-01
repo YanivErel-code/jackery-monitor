@@ -484,6 +484,9 @@ function renderDeviceParams(rows, deviceSn) {
         ${DEBUGGABLE.has(p.key)
           ? '<button class="btn btn-ghost btn-small" data-action="debug" type="button">Inspect</button>'
           : ''}
+        ${(p.source === 'fit' || p.source === 'probe' || p.source === 'catalog')
+          ? '<button class="btn btn-ghost btn-small" data-action="refit" type="button" title="Drop the stored value and re-resolve from the ladder">Refit</button>'
+          : ''}
         <button class="btn btn-ghost btn-small" data-action="override" type="button">Override</button>
         ${p.source === 'user' ? '<button class="btn btn-ghost btn-small" data-action="reset" type="button">Reset</button>' : ''}
       </div>
@@ -498,6 +501,36 @@ function renderDeviceParams(rows, deviceSn) {
   list.querySelectorAll('[data-action="debug"]').forEach((btn) => {
     btn.addEventListener('click', () => inspectParam(btn, deviceSn));
   });
+  list.querySelectorAll('[data-action="refit"]').forEach((btn) => {
+    btn.addEventListener('click', () => refitParam(btn, deviceSn));
+  });
+}
+
+async function refitParam(btn, deviceSn) {
+  const row = btn.closest('.device-param-row');
+  const key = row?.dataset.key;
+  if (!key) return;
+  const status = $('device-params-status');
+  if (status) {
+    status.hidden = false;
+    status.textContent = 'Re-resolving…';
+  }
+  try {
+    const r = await fetch('/api/devices/params/refit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_sn: deviceSn, key }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    if (status) {
+      status.textContent = `Refit: ${j.value} (source=${j.source}${j.n_samples ? `, n=${j.n_samples}` : ''})`;
+      setTimeout(() => { status.hidden = true; }, 4000);
+    }
+    loadDeviceParams();
+  } catch (e) {
+    if (status) status.textContent = `Refit failed: ${e.message || e}`;
+  }
 }
 
 async function inspectParam(btn, deviceSn) {
