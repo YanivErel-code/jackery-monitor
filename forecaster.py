@@ -300,6 +300,7 @@ def fit_max_charge_w(
     min_input_w: float = 100.0,
     min_samples: int = 6,
     percentile: float = 0.95,
+    return_candidates: bool = False,
 ) -> tuple[float | None, int]:
     """Estimate the AC charging rate this device actually pulls from
     the wall — read from the user's own telemetry rather than guessed
@@ -324,8 +325,14 @@ def fit_max_charge_w(
 
     `tz_offset_seconds` lets the night-window check use the user's
     local time. Pass `device_location.get_tz_offset()` from callers.
+
+    `return_candidates=True` returns ([candidate_dicts], n) instead
+    of (watts, n) — used by the Device-tab debug UI to inspect what
+    samples the fit picked. Each dict carries
+    {ts, input_w, ac_input_w, solar_w, value_used, path}.
     """
-    candidates: list[float] = []
+    candidates_w: list[float] = []
+    candidates_dbg: list[dict] = []
     skipped_unknown = 0
     for r in (energy_history or []):
         try:
@@ -334,25 +341,45 @@ def fit_max_charge_w(
             ts = int(r.get("ts") or 0)
         except (TypeError, ValueError):
             continue
+        path = None
+        value = None
         # Path 1: cloud's `acip` field carries the grid-classified value.
         if ac_w >= min_input_w:
-            candidates.append(ac_w)
-            continue
+            path = "ac_input_w"
+            value = ac_w
         # Path 2: input is high but cloud didn't classify it — only
         # accept when local time guarantees solar is zero.
-        if in_w >= min_input_w and ts > 0:
+        elif in_w >= min_input_w and ts > 0:
             local_h = ((ts + tz_offset_seconds) // 3600) % 24
             is_night = (local_h >= _NIGHT_START_LOCAL_HOUR
                         or local_h < _NIGHT_END_LOCAL_HOUR)
             if is_night:
-                candidates.append(in_w)
+                path = "input_w_night"
+                value = in_w
             else:
                 skipped_unknown += 1
-    if len(candidates) < min_samples:
-        return None, len(candidates)
-    candidates.sort()
-    idx = min(len(candidates) - 1, int(len(candidates) * percentile))
-    return float(candidates[idx]), len(candidates)
+                if return_candidates:
+                    candidates_dbg.append({
+                        "ts": ts, "input_w": in_w, "ac_input_w": ac_w,
+                        "solar_w": float(r.get("solar_w") or 0),
+                        "value_used": None, "path": "skipped_daytime",
+                    })
+                continue
+        if value is not None:
+            candidates_w.append(value)
+            if return_candidates:
+                candidates_dbg.append({
+                    "ts": ts, "input_w": in_w, "ac_input_w": ac_w,
+                    "solar_w": float(r.get("solar_w") or 0),
+                    "value_used": value, "path": path,
+                })
+    if return_candidates:
+        return candidates_dbg, len(candidates_w)  # type: ignore[return-value]
+    if len(candidates_w) < min_samples:
+        return None, len(candidates_w)
+    candidates_w.sort()
+    idx = min(len(candidates_w) - 1, int(len(candidates_w) * percentile))
+    return float(candidates_w[idx]), len(candidates_w)
 
 
 # ---------- charge efficiency ----------

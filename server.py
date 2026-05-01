@@ -1917,7 +1917,8 @@ async def api_reconnect():
 
 
 @app.get("/api/devices/params")
-def api_devices_params(device_sn: str | None = None):
+def api_devices_params(device_sn: str | None = None,
+                        debug_key: str | None = None):
     """Return every resolvable per-device parameter, with source +
     confidence. The Device tab renders this as a "Learned parameters"
     panel: each row shows the value, where it came from
@@ -1925,7 +1926,11 @@ def api_devices_params(device_sn: str | None = None):
 
     The resolution ladder lives in `resolve_device_param`. The keys
     exposed here are `energy_db.DEVICE_PARAM_KEYS`, so adding a new
-    resolvable param automatically gets it into the UI."""
+    resolvable param automatically gets it into the UI.
+
+    `debug_key`: when set to a fit-backed param name, returns the
+    actual samples that fed the fit so you can inspect why a value
+    landed where it did. Currently supported for max_charge_w."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
@@ -1934,7 +1939,24 @@ def api_devices_params(device_sn: str | None = None):
     for key, meta in energy_db.DEVICE_PARAM_KEYS.items():
         resolved = resolve_device_param(device_sn, key)
         out.append({"key": key, **meta, **resolved})
-    return {"device_sn": device_sn, "params": out}
+    response: dict[str, Any] = {"device_sn": device_sn, "params": out}
+    if debug_key == "max_charge_w":
+        try:
+            ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+            tz_off = device_location.get_tz_offset() or 0
+            samples, n_used = forecaster.fit_max_charge_w(
+                ehist, tz_offset_seconds=int(tz_off),
+                return_candidates=True,
+            )
+            response["debug"] = {
+                "key": "max_charge_w",
+                "tz_offset_seconds": int(tz_off),
+                "n_used_in_fit": n_used,
+                "samples": samples,  # list of {ts, input_w, ac_input_w, solar_w, value_used, path}
+            }
+        except Exception as e:
+            response["debug"] = {"key": "max_charge_w", "error": str(e)}
+    return response
 
 
 @app.post("/api/devices/params")

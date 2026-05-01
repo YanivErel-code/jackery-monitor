@@ -467,6 +467,9 @@ function renderDeviceParams(rows, deviceSn) {
     unit === 'ratio' ? Number(v).toFixed(3) : `${Math.round(Number(v))} ${safe(unit)}`
   );
   const sourceTag = (src) => `<span class="device-param-source device-param-source-${safe(src)}">${safe(src)}</span>`;
+  // Currently only max_charge_w has a debug-samples endpoint. As more
+  // fits add return_candidates support, list them here.
+  const DEBUGGABLE = new Set(['max_charge_w']);
   list.innerHTML = rows.map((p) => `
     <div class="device-param-row" data-key="${safe(p.key)}">
       <div>
@@ -478,16 +481,77 @@ function renderDeviceParams(rows, deviceSn) {
       <div class="device-param-value">${fmtVal(p.value, p.unit)}</div>
       <div class="device-param-edit" style="display:flex; gap:6px; align-items:center">
         ${sourceTag(p.source || 'unknown')}
+        ${DEBUGGABLE.has(p.key)
+          ? '<button class="btn btn-ghost btn-small" data-action="debug" type="button">Inspect</button>'
+          : ''}
         <button class="btn btn-ghost btn-small" data-action="override" type="button">Override</button>
         ${p.source === 'user' ? '<button class="btn btn-ghost btn-small" data-action="reset" type="button">Reset</button>' : ''}
       </div>
-    </div>`).join('');
+    </div>
+    <div class="device-param-debug" data-debug-for="${safe(p.key)}" hidden></div>`).join('');
   list.querySelectorAll('[data-action="override"]').forEach((btn) => {
     btn.addEventListener('click', () => promptOverrideParam(btn, deviceSn, rows));
   });
   list.querySelectorAll('[data-action="reset"]').forEach((btn) => {
     btn.addEventListener('click', () => resetParam(btn, deviceSn));
   });
+  list.querySelectorAll('[data-action="debug"]').forEach((btn) => {
+    btn.addEventListener('click', () => inspectParam(btn, deviceSn));
+  });
+}
+
+async function inspectParam(btn, deviceSn) {
+  const row = btn.closest('.device-param-row');
+  const key = row?.dataset.key;
+  if (!key) return;
+  const panel = document.querySelector(`.device-param-debug[data-debug-for="${key}"]`);
+  if (!panel) return;
+  if (!panel.hidden) { panel.hidden = true; return; }
+  panel.hidden = false;
+  panel.innerHTML = '<div class="hint" style="padding:8px 12px">Loading samples…</div>';
+  try {
+    const r = await fetch(
+      `/api/devices/params?device_sn=${encodeURIComponent(deviceSn)}&debug_key=${encodeURIComponent(key)}`,
+    );
+    const j = await r.json();
+    const dbg = j.debug || {};
+    if (dbg.error) {
+      panel.innerHTML = `<div class="hint" style="padding:8px 12px;color:#ef4444">Failed: ${dbg.error}</div>`;
+      return;
+    }
+    const samples = dbg.samples || [];
+    if (!samples.length) {
+      panel.innerHTML = '<div class="hint" style="padding:8px 12px">No samples returned by the fit.</div>';
+      return;
+    }
+    const safe = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, (c) =>
+      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleString() : '—';
+    const rows_html = samples.map(s => `
+      <tr>
+        <td>${fmtTime(s.ts)}</td>
+        <td>${Math.round(s.input_w || 0)}</td>
+        <td>${Math.round(s.ac_input_w || 0)}</td>
+        <td>${Math.round(s.solar_w || 0)}</td>
+        <td>${s.value_used == null ? '—' : Math.round(s.value_used)}</td>
+        <td>${safe(s.path)}</td>
+      </tr>`).join('');
+    panel.innerHTML = `
+      <div class="dd-section" style="padding:8px 12px">
+        <h4>Samples used by the fit (n=${dbg.n_used_in_fit}, tz_offset=${dbg.tz_offset_seconds}s)</h4>
+        <p class="hint" style="margin:4px 0 8px">Each row is one hourly bucket. The 95th percentile of <strong>value_used</strong> gives the fitted result. Watch for <code>input_w_night</code> rows where solar_w isn't 0 — that's solar leaking through the night-band filter.</p>
+        <div style="overflow-x:auto">
+          <table class="dd-table">
+            <thead><tr>
+              <th>hour</th><th>input_w</th><th>ac_input_w</th><th>solar_w</th><th>value_used</th><th>path</th>
+            </tr></thead>
+            <tbody>${rows_html}</tbody>
+          </table>
+        </div>
+      </div>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="hint" style="padding:8px 12px;color:#ef4444">Failed: ${e.message || e}</div>`;
+  }
 }
 
 async function promptOverrideParam(btn, deviceSn, rows) {
