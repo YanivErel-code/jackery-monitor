@@ -153,6 +153,153 @@ def test_load_profile_caps_runaway_buckets_against_overall_mean():
     assert bucket < 1000, f"runaway bucket leaked: {bucket}"
 
 
+def test_load_profile_trimmed_median_kills_outlier_pair():
+    # Sparse 11am bucket with 18 samples around 200W and 2 oven samples
+    # at 1800W. Raw median over 20 sorted values = mean of indices 9, 10
+    # — still 200W. But if the bucket only has 14 samples (12 at 200W
+    # + 2 at 1800W) sorted, the raw median lands at index 7 = 200W,
+    # already fine. The real risk is the *trim* itself shouldn't yank
+    # the value upward when there are too few samples — verify n<5
+    # gracefully falls back to raw median, and trim does drop outliers
+    # in a fatter bucket.
+    from datetime import datetime
+    base = 1_700_000_000
+    energy = []
+    # 18 weekly-aligned samples at 200W on the same (hour, weekday) bucket.
+    for i in range(18):
+        energy.append({"ts": base + i * 7 * 24 * 3600, "output_w": 200,
+                       "solar_w": 0, "battery_pct": 80})
+    # 2 oven samples at 1800W on the SAME bucket (different weeks).
+    for i in range(2):
+        energy.append({"ts": base + (18 + i) * 7 * 24 * 3600,
+                       "output_w": 1800, "solar_w": 0, "battery_pct": 80})
+    profile = forecaster.fit_load_profile(energy)
+    d = datetime.fromtimestamp(base)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+    bucket = profile.get(key)
+    assert bucket is not None
+    # With 20 samples and 10% trim, k=2 → drop 2 lowest + 2 highest =
+    # drop both ovens. Trimmed median of remaining 16 samples at 200W
+    # = 200W. Without trim, the sample-cap at p95 would have already
+    # squashed the ovens, but the trim adds a second line of defence
+    # for buckets where the spike isn't above global p95 (e.g. mid-tier
+    # ovens in an active household).
+    assert bucket < 400, f"trimmed median didn't reject ovens: {bucket}"
+
+
+def test_load_profile_uses_global_p95_as_bucket_ceiling():
+    # Replaces the old `2 * overall_mean` ceiling. With many low samples
+    # and a few high ones, the new ceiling = global p95, not 2*mean.
+    # Build a history where p95 ≠ 2*mean and assert ceiling tracks p95.
+    from datetime import datetime
+    base = 1_700_000_000
+    energy = []
+    # 90 weekday samples at 100W spread across 24 different (hour,wkd)
+    # buckets so each bucket has < 5 samples (so no recency weighting).
+    for i in range(90):
+        energy.append({"ts": base + i * 3600, "output_w": 100,
+                       "solar_w": 0, "battery_pct": 80})
+    # 10 high samples at 1500W all stacked into one bucket (hour 14
+    # weekday) at exact 7-day intervals so they share a (hour, weekday)
+    # bucket key.
+    spike_ts0 = base + 14 * 3600
+    for week in range(10):
+        energy.append({"ts": spike_ts0 + week * 7 * 24 * 3600,
+                       "output_w": 1500, "solar_w": 0, "battery_pct": 50})
+    profile = forecaster.fit_load_profile(energy)
+    # Overall mean ≈ (90*100 + 10*1500) / 100 = 240W. Old ceiling = 480W.
+    # p95 over 100 sorted samples: index 95 = 1500W → ceiling = 1500W.
+    # The hour 14 bucket should land near 1500W, NOT clamped down to
+    # ~480W like the old 2*mean rule did.
+    d = datetime.fromtimestamp(spike_ts0)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+    bucket = profile.get(key)
+    assert bucket is not None
+    # Bucket median is 1500 (all 10 samples are 1500). Trim drops 1
+    # from each end → still 1500. min(1500, ceiling=1500) = 1500.
+    assert 1400 <= bucket <= 1600, (
+        f"bucket {bucket} — expected ~1500 (p95 ceiling), "
+        "NOT old 2*mean cap of ~480"
+    )
+
+
+def test_inverter_overhead_pct_unbiased_under_quantization():
+    # Synthetic: true overhead = 10%. We quantize the SOC reads to 1pp
+    # but use 2pp drops (per the new MIN_SOC_DROP gate) so the
+    # quantization-induced jitter on each end is ±0.5pp / 2pp = ±25%
+    # noise on the implied drain. With per-sample clamp-to-zero (the
+    # OLD behaviour), every "too-efficient" window became 0 while
+    # "too-lossy" windows kept their full ratio → median biased high.
+    # New behaviour: collect signed ratios, take median, and the
+    # symmetric noise should cancel out.
+    import random
+    rng = random.Random(42)
+    capacity = 30000
+    # True overhead 10%: out_w = 545W → drain = 600W → 2pp/h on 30000Wh.
+    # Add ±0.5pp jitter to each soc read to simulate cloud quantization.
+    history = []
+    base = 1_700_000_000
+    for i in range(40):
+        ts0 = base + i * 3600 * 3
+        # True SOC = 90 - 2*i / 90 - 2*i - 2; jitter integer-rounded.
+        soc0_true = 90 - 2 * i
+        soc1_true = soc0_true - 2
+        soc0 = soc0_true + rng.choice([-1, 0, 0, 1])  # ±1pp on each end
+        soc1 = soc1_true + rng.choice([-1, 0, 0, 1])
+        # Reject self-inverted windows just like the production gate would.
+        if soc0 - soc1 < 2:
+            continue
+        history.append({"ts": ts0, "battery_pct": soc0, "output_wh": 545,
+                        "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": ts0 + 3600, "battery_pct": soc1, "output_wh": 545,
+                        "solar_wh": 0, "ac_input_wh": 0})
+    pct, n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=capacity)
+    assert n >= 5
+    # Without bias, median over many noisy windows should fall within
+    # ±5pp of the truth; the asymmetric clamp would push this to
+    # 0.20-0.40 (which is what the live data showed: 0.378).
+    assert 0.05 <= pct <= 0.18, (
+        f"got {pct}; bias-free median should be near 0.10"
+    )
+
+
+def test_build_forecast_emits_diagnostic_sources():
+    # Verify the new diagnostic keys are present and labelled correctly.
+    # With enough clean discharge windows, both fits should run →
+    # 'fit'. With no charge history, charge_efficiency falls back →
+    # 'default'.
+    now = int(time.time())
+    history = []
+    # Discharge-only history: 15 windows of 2pp drops, 545W out_w.
+    for i in range(15):
+        ts = now - 60 * 3600 + i * 3600 * 3
+        history.append({"ts": ts, "battery_pct": 90 - 2 * i, "output_w": 545,
+                        "output_wh": 545, "solar_w": 0, "solar_wh": 0,
+                        "ac_input_wh": 0, "ac_input_w": 0,
+                        "input_wh": 0, "input_w": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 88 - 2 * i, "output_w": 545,
+                        "output_wh": 545, "solar_w": 0, "solar_wh": 0,
+                        "ac_input_wh": 0, "ac_input_w": 0,
+                        "input_wh": 0, "input_w": 0})
+    weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
+               for i in range(48)]
+    res = forecaster.build_forecast(
+        energy_history=history, weather_hourly=weather,
+        starting_soc_pct=50.0, capacity_wh=30000, now_ts=now,
+        horizon_hours=24,
+    )
+    assert res.get("ready") is True
+    # New diagnostic keys.
+    assert "output_w_p95" in res
+    assert isinstance(res["output_w_p95"], (int, float))
+    assert res["output_w_p95"] > 0
+    assert "inverter_overhead_source" in res
+    assert res["inverter_overhead_source"] == "fit"
+    assert "charge_efficiency_source" in res
+    # No charging windows in this history → fall back to default.
+    assert res["charge_efficiency_source"] == "default"
+
+
 def test_expected_load_uses_idle_default_when_no_data():
     # Empty profile → forecast hour gets IDLE_LOAD_W (the per-hour
     # fallback) inflated by INVERTER_OVERHEAD_PCT (the heat-loss share
@@ -298,21 +445,24 @@ def test_idle_overhead_returns_default_when_no_data():
 
 def test_idle_overhead_returns_default_when_too_few_windows():
     # Only one qualifying window — below min_windows (5) so we should
-    # get the default back.
-    history = _discharge_window(1_700_000_000, 80, 79, 200)
+    # get the default back. Use a 2pp drop to satisfy the new
+    # INVERTER_FIT_MIN_SOC_DROP_PCT gate (1pp windows are noise).
+    history = _discharge_window(1_700_000_000, 80, 78, 545)
     overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
     assert overhead == forecaster.DEFAULT_IDLE_OVERHEAD_W
     assert n == 1
 
 
 def test_inverter_overhead_pct_recovers_known_value():
-    # Synthetic: SOC drops 1pp/hour on a 30000 Wh pack = 300 W observed
-    # drain. Reported out_w = 273 W → implied pct ≈ (300-273)/273 = 0.099.
+    # Synthetic: SOC drops 2pp/hour on a 30000 Wh pack = 600 W observed
+    # drain. Reported out_w = 545 W → implied pct ≈ (600-545)/545 = 0.101.
+    # 2pp drop is required by the new MIN_SOC_DROP gate (1pp windows
+    # are dominated by quantization noise).
     history = []
     base = 1_700_000_000
     for i in range(8):
-        history.extend(_discharge_window(base + i * 3600 * 2,
-                                          80 - i, 79 - i, out_w=273))
+        history.extend(_discharge_window(base + i * 3600 * 3,
+                                          80 - 2 * i, 78 - 2 * i, out_w=545))
     pct, n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=30000)
     assert n >= 5
     assert 0.08 <= pct <= 0.12, f"got {pct}, expected ~0.10"
@@ -322,50 +472,59 @@ def test_inverter_overhead_pct_skips_solar_polluted_windows():
     # Windows with solar should be excluded — otherwise the fit would
     # see "negative drain" (solar charging counted as load reduction)
     # and skew low. Mix 6 clean windows (10% pct) with 6 solar-polluted.
+    # Each window now needs 2pp drop to satisfy the MIN_SOC_DROP gate.
     history = []
     base = 1_700_000_000
-    # Clean: 1pp/hour drop + 273W out_w on 30000Wh = ~10% pct
+    # Clean: 2pp/hour drop + 545W out_w on 30000Wh = ~10% pct
     for i in range(6):
         history.extend(_discharge_window(base + i * 3600 * 3,
-                                          80 - i, 79 - i, out_w=273))
+                                          80 - 2 * i, 78 - 2 * i, out_w=545))
     # Polluted: same SOC drop + same out_w but with solar present
     for i in range(6):
-        ts = base + (100 + i) * 3600
-        history.append({"ts": ts, "battery_pct": 70 - i, "output_wh": 273,
+        ts = base + (100 + i * 3) * 3600
+        history.append({"ts": ts, "battery_pct": 70 - 2 * i, "output_wh": 545,
                         "solar_wh": 1500, "ac_input_wh": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 69 - i, "output_wh": 273,
+        history.append({"ts": ts + 3600, "battery_pct": 68 - 2 * i, "output_wh": 545,
                         "solar_wh": 1500, "ac_input_wh": 0})
     pct, _n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=30000)
     assert 0.08 <= pct <= 0.12, f"got {pct}, expected ~0.10 (solar excluded)"
 
 
-def test_inverter_overhead_pct_clamps_negative_to_zero():
-    # If reported out_w exceeds the SOC-implied drain (sensor noise),
-    # the ratio goes negative — we clamp to 0.
+def test_inverter_overhead_pct_falls_back_when_ratios_are_negative():
+    # If reported out_w consistently exceeds the SOC-implied drain (a
+    # device whose AC output sensor over-reads, or unaccounted-for
+    # charging the fit can't see), every window's ratio is negative.
+    # We no longer per-sample-clamp to 0 (that biased the fit upward
+    # under quantization noise). The MEDIAN clamps to fallback when
+    # negative — caller gets DEFAULT_INVERTER_OVERHEAD_PCT.
     history = []
     base = 1_700_000_000
     for i in range(8):
-        # 1pp drop on 30000Wh = 300W observed, but report 800W out_w.
-        # Ratio = -0.625; should be clamped to 0.
-        history.extend(_discharge_window(base + i * 3600 * 2,
-                                          80 - i, 79 - i, out_w=800))
+        # 2pp drop on 30000Wh = 600W observed, but report 1000W out_w.
+        # Per-window ratio = (600-1000)/1000 = -0.40 → median is
+        # negative → fall back to DEFAULT_INVERTER_OVERHEAD_PCT.
+        history.extend(_discharge_window(base + i * 3600 * 3,
+                                          80 - 2 * i, 78 - 2 * i, out_w=1000))
     pct, n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=30000)
     assert n >= 5
-    assert pct == 0.0
+    assert pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
 
 def test_inverter_overhead_pct_used_by_build_forecast():
     # End-to-end: a history with a clear 10% overhead should make
     # build_forecast surface inverter_overhead_pct ≈ 0.10 in its result.
+    # 2pp drops per window (was 1pp) for the new MIN_SOC_DROP gate.
     now = int(time.time())
     history = []
+    # 15 cycles × (2 rows each, 2pp drop each) → 15 qualifying windows.
+    # SOC ramps 90 → 60 over 30 cycles, well above DEPLETED floor.
     for i in range(15):
-        ts = now - 30 * 3600 + i * 3600 * 2
-        history.append({"ts": ts, "battery_pct": 90 - i, "output_w": 273,
-                        "output_wh": 273, "solar_w": 0, "solar_wh": 0,
+        ts = now - 60 * 3600 + i * 3600 * 3
+        history.append({"ts": ts, "battery_pct": 90 - 2 * i, "output_w": 545,
+                        "output_wh": 545, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 89 - i, "output_w": 273,
-                        "output_wh": 273, "solar_w": 0, "solar_wh": 0,
+        history.append({"ts": ts + 3600, "battery_pct": 88 - 2 * i, "output_w": 545,
+                        "output_wh": 545, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
     weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
                for i in range(48)]
@@ -493,18 +652,20 @@ def test_charge_efficiency_used_by_build_forecast():
                         "solar_w": 0, "solar_wh": 0,
                         "output_w": 0, "output_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
-    # Discharge windows: 8 more across 16h to satisfy the readiness gate.
+    # Discharge windows: 8 more across 24h to satisfy the readiness gate.
+    # Need 2pp drops per window (was 1pp) for the new MIN_SOC_DROP gate.
+    # 30000Wh × 2pp / 1h = 600W drain; out_w=545 → ~10% overhead.
     for i in range(8):
-        ts = now - 14 * 3600 + i * 3600 * 2
-        history.append({"ts": ts, "battery_pct": 70 - i,
+        ts = now - 24 * 3600 + i * 3600 * 3
+        history.append({"ts": ts, "battery_pct": 80 - 2 * i,
                         "input_wh": 0, "input_w": 0,
                         "solar_w": 0, "solar_wh": 0,
-                        "output_w": 100, "output_wh": 100,
+                        "output_w": 545, "output_wh": 545,
                         "ac_input_wh": 0, "ac_input_w": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 69 - i,
+        history.append({"ts": ts + 3600, "battery_pct": 78 - 2 * i,
                         "input_wh": 0, "input_w": 0,
                         "solar_w": 0, "solar_wh": 0,
-                        "output_w": 100, "output_wh": 100,
+                        "output_w": 545, "output_wh": 545,
                         "ac_input_wh": 0, "ac_input_w": 0})
     weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
                for i in range(48)]

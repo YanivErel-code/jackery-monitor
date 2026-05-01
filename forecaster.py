@@ -123,9 +123,40 @@ LOAD_VARIABILITY_THRESHOLD = 0.5
 # output event at e.g. 1pm yields a per-bucket median of 2.5 kW while the
 # user's typical 1pm draw is 400W. The simulation then drains overnight
 # on a phantom multi-kW daily run and 24h+ predictions snap to 0%.
-# 2.0x overall mean keeps real daytime peaks (e.g. an HVAC cycle) but
-# blocks single-event medians from dominating.
+#
+# Historical: this used to default to 2.0x overall_mean. That clamped real
+# morning peaks (~1500-2000W on solar/HVAC users) to 2x mean instead of
+# their natural value, AND combined with the ratio-driven inverter
+# overhead fit it produced suspiciously bimodal forecasts where every
+# busy hour pinned to (mean*MULT) * (1+overhead). The new strategy uses
+# the GLOBAL 95th percentile of output_w as the cap — that reflects what
+# the device actually does on its busiest 5% of minutes, regardless of
+# the mean. Outliers above p95 are already trimmed before bucketing, so
+# the cap rarely bites for typical buckets.
+#
+# We keep LOAD_BUCKET_CAP_MULT for backward-compatibility tests but the
+# main code path uses `cap` (the p95) as bucket_ceiling. See
+# build_load_profile().
 LOAD_BUCKET_CAP_MULT = 2.0
+
+# Inside-bucket outlier trim: the fraction of samples to drop from EACH
+# end before computing the per-bucket median. Protects against a few
+# oven/AC-cycle-start spikes pulling a sparse bucket's median up — the
+# old code took the raw median of all samples, which over a 14-day
+# history with ~14 samples per bucket meant 2 oven runs could move the
+# median by 600+W. With trim=0.10 we drop the top and bottom 10% before
+# computing median. Skipped when n<5 (too few to trim safely).
+LOAD_BUCKET_TRIM_PCT = 0.10
+
+# Inverter-overhead fit: minimum SOC drop (in percentage points) for a
+# window to count. The cloud reports SOC in 1pp integer steps, so a
+# nominal 1pp drop could be anywhere from 0.5pp (rounded up) to 1.5pp
+# (rounded down) — that's ±50% quantization noise on the implied drain.
+# Requiring 2pp brings the noise floor down to ±25% per window, and the
+# median across many windows averages it out. Trade-off: fewer
+# qualifying windows, which is fine because we already require
+# min_windows=5.
+INVERTER_FIT_MIN_SOC_DROP_PCT = 2.0
 
 
 def battery_capacity_wh(model_code: int | None) -> int:
@@ -246,13 +277,22 @@ def fit_inverter_overhead_pct(
     """
     SOLAR_NOISE_WH = 50.0   # noise floor below which we treat solar as 0
     AC_NOISE_WH = 50.0      # same for AC charging
-    MIN_SOC_DROP_PCT = 1.0  # below this it's sensor jitter, not real drain
     MIN_OUT_W = 50.0        # need real throughput to compute a ratio
 
     rows = sorted(
         (r for r in (energy_history or []) if r.get("ts") is not None),
         key=lambda r: r["ts"],
     )
+    # Collect raw signed ratios. We do NOT clamp negatives per-sample
+    # anymore — that produced an asymmetric bias when the cloud's SOC
+    # quantization (1pp integer steps) symmetrically jittered the
+    # implied drain around the truth. Clamping per-sample turned random
+    # symmetric noise into a one-sided positive bias — every "this
+    # window looked too efficient" sample became 0.0, while every "this
+    # window looked too lossy" sample kept its full positive value.
+    # Median-of-signed-ratios eliminates the bias. We still clamp
+    # NEGATIVE final medians to 0 (a real device can't have negative
+    # overhead) but only at the end.
     pcts: list[float] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
@@ -260,32 +300,38 @@ def fit_inverter_overhead_pct(
         if soc_a is None or soc_b is None:
             continue
         soc_drop = soc_a - soc_b
-        if soc_drop < MIN_SOC_DROP_PCT:
+        # Require >= 2pp so quantization noise (±0.5pp on each end =
+        # ±1pp total) can't dominate the implied drain. With 1pp
+        # windows, a true 0.5pp drop reads as 1pp — a 100% over-read
+        # of drain, fitting an artificial 100% overhead on that window.
+        if soc_drop < INVERTER_FIT_MIN_SOC_DROP_PCT:
             continue
         if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
             continue
         if (a.get("ac_input_wh") or 0) > AC_NOISE_WH:
             continue
         dt_h = (b["ts"] - a["ts"]) / 3600.0
-        if dt_h <= 0 or dt_h > 6.0:
+        # Require >= 30 min so dt errors don't dominate; cap at 6h so
+        # we don't reach across overnight gaps where SOC could have
+        # changed via untracked sources.
+        if dt_h < 0.5 or dt_h > 6.0:
             continue
         observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
         reported_out_w = (a.get("output_wh") or 0) / dt_h
         if reported_out_w < MIN_OUT_W:
             continue
         pct = (observed_drain_w - reported_out_w) / reported_out_w
-        # Negative ratio = SOC drained slower than out_w would imply
-        # (sensor noise / pack-balancing artifact). Clamp to 0.
-        if pct < 0:
-            pct = 0.0
         pcts.append(pct)
 
     if len(pcts) < min_windows:
         return float(default), len(pcts)
     pcts.sort()
     median = pcts[len(pcts) // 2]
-    # Sanity-clamp: above 50% loss is measurement error.
-    if median > 0.50:
+    # Final clamps:
+    #  - Negative median = device's reported out_w consistently
+    #    overstates real drain, which is implausible — fall back.
+    #  - >50% loss = measurement error; fall back.
+    if median < 0.0 or median > 0.50:
         return float(default), len(pcts)
     return float(median), len(pcts)
 
@@ -524,6 +570,25 @@ def fit_charge_efficiency(
 
 
 # ---------- load model ----------
+def _trimmed_median(sorted_vals: list[float], trim_pct: float) -> float:
+    """Median of `sorted_vals` after dropping the top and bottom
+    `trim_pct` fraction. Robust against outliers in sparse buckets
+    (e.g. two oven samples in a 14-sample 11am bucket pulling the raw
+    median up by 600W). Skipped when n<5 — too few samples to trim
+    safely; in that case returns the raw median.
+
+    Caller must pass an already-sorted list. Returns 0.0 for empty.
+    """
+    n = len(sorted_vals)
+    if n == 0:
+        return 0.0
+    if n < 5:
+        return sorted_vals[n // 2]
+    k = max(1, int(n * trim_pct))
+    trimmed = sorted_vals[k:n - k] if n - 2 * k >= 1 else sorted_vals
+    return trimmed[len(trimmed) // 2]
+
+
 def fit_load_profile(
     energy_history: list[dict[str, Any]],
     *,
@@ -558,13 +623,14 @@ def fit_load_profile(
     if not all_vals_raw:
         return {}
     all_vals = sorted(all_vals_raw)
+    # Global p95 — used both as the per-sample cap (kills extreme spikes
+    # before bucketing) and as the per-bucket ceiling (replaces the old
+    # 2 * mean heuristic which clamped real morning peaks).
     cap = all_vals[min(len(all_vals) - 1, int(len(all_vals) * 0.95))]
-    overall_mean = sum(all_vals_raw) / len(all_vals_raw)
-    # Per-bucket ceiling: never let a single hour claim more than this,
-    # regardless of what the median computed. Floor at a sensible "device
-    # is doing something" level so quiet histories still allow real
-    # daytime activity through.
-    bucket_ceiling = max(IDLE_LOAD_W * 6, LOAD_BUCKET_CAP_MULT * overall_mean)
+    # Per-bucket ceiling: the global p95. Floor at IDLE_LOAD_W * 6 so a
+    # quiet history (where p95 is e.g. 50W) still allows for real
+    # daytime activity to be predicted.
+    bucket_ceiling = max(IDLE_LOAD_W * 6, cap)
 
     # bucket → list of (value, ts)
     buckets: dict[tuple[int, int], list[tuple[float, int]]] = {}
@@ -582,7 +648,16 @@ def fit_load_profile(
     for key, samples in buckets.items():
         vals = sorted(v for v, _ in samples)
         n = len(vals)
-        median = vals[n // 2]
+        # Trimmed median: drop top/bottom LOAD_BUCKET_TRIM_PCT before
+        # taking the median. Robust against a few oven-style spikes
+        # in a sparse bucket. Falls back to raw median when n is too
+        # small to trim.
+        median = _trimmed_median(vals, LOAD_BUCKET_TRIM_PCT)
+        # IQR over the FULL sorted list — we want to detect a
+        # genuinely variable bucket (high spread), not the spread of
+        # the trimmed center. A bucket with two oven samples and
+        # twelve idle samples should still be classified as stable
+        # so we don't recency-weight a tiny tail.
         q25 = vals[n // 4]
         q75 = vals[(3 * n) // 4]
         iqr = q75 - q25
@@ -593,14 +668,15 @@ def fit_load_profile(
             profile[key] = min(median, bucket_ceiling)
             continue
 
-        # Variable bucket: blend recent and older medians.
+        # Variable bucket: blend recent and older trimmed medians.
         recent = sorted(v for v, t in samples if t >= recency_cutoff)
         older = sorted(v for v, t in samples if t < recency_cutoff)
         if not recent:
             profile[key] = min(median, bucket_ceiling)
             continue
-        recent_med = recent[len(recent) // 2]
-        older_med = older[len(older) // 2] if older else recent_med
+        recent_med = _trimmed_median(recent, LOAD_BUCKET_TRIM_PCT)
+        older_med = (_trimmed_median(older, LOAD_BUCKET_TRIM_PCT)
+                     if older else recent_med)
         blended = 0.7 * recent_med + 0.3 * older_med
         profile[key] = min(blended, bucket_ceiling)
 
@@ -823,6 +899,16 @@ def build_forecast(
     # Reported as a debug stat only — NOT used as a fallback for missing
     # hours. Mixing daytime samples into nighttime forecasts was the bug.
     overall_load = sum(out_vals) / len(out_vals) if out_vals else 0.0
+    out_vals_sorted = sorted(out_vals)
+    out_p95 = (out_vals_sorted[min(len(out_vals_sorted) - 1,
+                                    int(len(out_vals_sorted) * 0.95))]
+               if out_vals_sorted else 0.0)
+    # Source labels: "fit" if the per-device fit landed in plausible
+    # range, "default" if it fell back. Lets the UI (and the AI
+    # advisor) tell at a glance whether the device is calibrated or
+    # still using population defaults.
+    overhead_source = "fit" if overhead_n >= 5 else "default"
+    charge_eff_source = "fit" if charge_eff_n >= 5 else "default"
 
     # Cap projected solar by the device's recent observed peak so an
     # overfit regression can't predict more solar than the array has
@@ -868,11 +954,16 @@ def build_forecast(
         "solar_coefficient": round(k, 4),
         "fit_samples": n_fit,
         "overall_load_w": round(overall_load, 1),
+        # NEW: p95 of output_w. Used as the per-bucket ceiling in the
+        # load profile, replacing the old 2*mean heuristic that biased
+        # busy-hour predictions upward.
+        "output_w_p95": round(out_p95, 1),
         # Auto-fitted per-device inverter overhead as a fraction of
         # throughput. _n reports how many clean discharge windows the
         # fit used — when small, value is the 10% default.
         "inverter_overhead_pct": round(overhead_pct, 4),
         "inverter_overhead_n_windows": overhead_n,
+        "inverter_overhead_source": overhead_source,
         # Back-compat: report watt-equivalent at typical 500W load too.
         "idle_overhead_w": round(overhead_pct * 500.0, 1),
         "idle_overhead_n_windows": overhead_n,
@@ -880,5 +971,6 @@ def build_forecast(
         # ratio). Same n_windows convention as idle_overhead.
         "charge_efficiency": round(charge_eff, 3),
         "charge_efficiency_n_windows": charge_eff_n,
+        "charge_efficiency_source": charge_eff_source,
         "forecast": simulated,
     }
