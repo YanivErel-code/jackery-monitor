@@ -261,3 +261,111 @@ def test_build_forecast_glues_pieces_together():
     # With strong solar > load+overhead, peak SOC should land above the start.
     peak = max(h["predicted_soc"] for h in res["forecast"])
     assert peak >= 50.0
+
+
+# ---------- fit_idle_overhead_w ----------
+
+def _discharge_window(ts0: int, soc0: int, soc1: int, out_w: int):
+    """Helper: build two adjacent hourly buckets describing a clean
+    discharge (no solar, no AC charging) where SOC drops from soc0 to soc1
+    while reporting `out_w` average AC output."""
+    return [
+        {"ts": ts0,         "battery_pct": soc0, "output_wh": out_w,
+         "solar_wh": 0, "ac_input_wh": 0},
+        {"ts": ts0 + 3600,  "battery_pct": soc1, "output_wh": out_w,
+         "solar_wh": 0, "ac_input_wh": 0},
+    ]
+
+
+def test_idle_overhead_returns_default_when_no_data():
+    overhead, n = forecaster.fit_idle_overhead_w([], capacity_wh=30000)
+    assert overhead == forecaster.DEFAULT_IDLE_OVERHEAD_W
+    assert n == 0
+
+
+def test_idle_overhead_returns_default_when_too_few_windows():
+    # Only one qualifying window — below min_windows (5) so we should
+    # get the default back.
+    history = _discharge_window(1_700_000_000, 80, 79, 200)
+    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+    assert overhead == forecaster.DEFAULT_IDLE_OVERHEAD_W
+    assert n == 1
+
+
+def test_idle_overhead_recovers_known_parasitic():
+    # Synthetic: SOC drops 1pp/hour on a 30000 Wh pack = 300 W observed
+    # drain. Reported out_w is 100 W. Implied parasitic = 200 W.
+    history = []
+    base = 1_700_000_000
+    for i in range(8):
+        history.extend(_discharge_window(base + i * 3600 * 2,
+                                          80 - i, 79 - i, out_w=100))
+    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+    assert n >= 5
+    assert 180 <= overhead <= 220, f"got {overhead}, expected ~200"
+
+
+def test_idle_overhead_skips_solar_polluted_windows():
+    # Windows with solar should be excluded — otherwise the fit would
+    # mis-attribute solar charging as negative drain. Synthesize 6 clean
+    # discharge windows (200W parasitic) and 6 solar-polluted ones with
+    # bogus high gaps; the fit should only use the clean set.
+    history = []
+    base = 1_700_000_000
+    # Clean: 1pp/hour drop + 100W out_w on 30000Wh = 200W parasitic
+    for i in range(6):
+        history.extend(_discharge_window(base + i * 3600 * 3,
+                                          80 - i, 79 - i, out_w=100))
+    # Polluted: same SOC drop + same out_w but with solar present
+    for i in range(6):
+        ts = base + (100 + i) * 3600
+        history.append({"ts": ts, "battery_pct": 70 - i, "output_wh": 100,
+                        "solar_wh": 1500, "ac_input_wh": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 69 - i, "output_wh": 100,
+                        "solar_wh": 1500, "ac_input_wh": 0})
+    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+    # Fit should land around 200W — solar windows excluded.
+    assert 180 <= overhead <= 220, f"got {overhead}, expected ~200"
+
+
+def test_idle_overhead_clamps_negative_to_zero():
+    # If reported out_w exceeds the SOC-implied drain (a noisy sensor
+    # reading), the gap is negative — we clamp to 0 rather than letting
+    # bad samples push the median down.
+    history = []
+    base = 1_700_000_000
+    for i in range(8):
+        # 1pp drop on 30000Wh = 300W observed, but report 800W out_w.
+        # Gap would be -500W; should be clamped to 0.
+        history.extend(_discharge_window(base + i * 3600 * 2,
+                                          80 - i, 79 - i, out_w=800))
+    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+    assert n >= 5
+    assert overhead == 0.0
+
+
+def test_idle_overhead_used_by_build_forecast():
+    # End-to-end: a history with a clear 200W parasitic should make
+    # build_forecast surface idle_overhead_w ≈ 200 in its result.
+    now = int(time.time())
+    history = []
+    # Mix a few clean discharge windows into otherwise-irrelevant data
+    for i in range(8):
+        ts = now - 86400 + i * 3600 * 2
+        history.append({"ts": ts, "battery_pct": 80 - i, "output_w": 100,
+                        "output_wh": 100, "solar_w": 0, "solar_wh": 0,
+                        "ac_input_wh": 0, "ac_input_w": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 79 - i, "output_w": 100,
+                        "output_wh": 100, "solar_w": 0, "solar_wh": 0,
+                        "ac_input_wh": 0, "ac_input_w": 0})
+    weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
+               for i in range(48)]
+    res = forecaster.build_forecast(
+        energy_history=history, weather_hourly=weather,
+        starting_soc_pct=50.0, capacity_wh=30000, now_ts=now,
+        horizon_hours=24,
+    )
+    assert "idle_overhead_w" in res
+    assert "idle_overhead_n_windows" in res
+    assert res["idle_overhead_n_windows"] >= 5
+    assert 180 <= res["idle_overhead_w"] <= 220

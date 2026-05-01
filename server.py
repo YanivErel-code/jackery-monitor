@@ -864,6 +864,19 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
 
     cfg = smart_charge.get_config(device_sn)
 
+    # Per-device fitted parasitic overhead — let Claude see the value
+    # it's currently using and how many windows it was fit from. Cheap:
+    # uses the same hourly buckets the forecaster does.
+    fitted_overhead_w: float | None = None
+    fitted_overhead_n: int = 0
+    try:
+        ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+        fitted_overhead_w, fitted_overhead_n = forecaster.fit_idle_overhead_w(
+            ehist, capacity,
+        )
+    except Exception as e:
+        log.debug("advisor: idle_overhead fit failed: %s", e)
+
     accuracy_summary = {}
     try:
         samples_acc = state.energy.prediction_accuracy(device_sn)
@@ -967,6 +980,9 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
         "main_soc_pct": main_soc,
         "system_soc_pct": round(sys_soc, 1) if sys_soc is not None else None,
         "smart_charge_config": cfg,
+        "fitted_idle_overhead_w": (round(fitted_overhead_w, 1)
+                                   if fitted_overhead_w is not None else None),
+        "fitted_idle_overhead_n_windows": fitted_overhead_n,
         "forecast_accuracy_summary": accuracy_summary,
         "recent_samples": recent_samples,
         "recent_weather": recent_weather,
@@ -1027,19 +1043,41 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "Re-tuned IDLE_OVERHEAD_W from 600 → 200 based on YOUR "
                 "previous review's empirical reconciliation: steady-state "
                 "windows showed actual constant overhead is closer to "
-                "145-190W, and 600W was over-predicting drain by 300-450W. "
-                "Predictions made BEFORE this timestamp will look "
-                "biased-low; predictions AFTER should track SOC slope "
-                "much more closely. Also: a known measurement asymmetry "
-                "remains — predictions are seeded with system SOC "
+                "145-190W, and 600W was over-predicting drain by 300-450W."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-01T17:30:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Replaced the hardcoded IDLE_OVERHEAD_W constant with a "
+                "per-device auto-fit: fit_idle_overhead_w() now walks the "
+                "user's own discharge history (bucket pairs with no solar, "
+                "no AC charging, ≥1pp SOC drop) and computes the implied "
+                "parasitic from observed SOC slope minus reported out_w, "
+                "then takes the median across qualifying windows. The 200W "
+                "constant is now just the cold-start fallback. The fitted "
+                "value for THIS device is in the bundle as "
+                "fitted_idle_overhead_w — use that when reasoning about "
+                "load accuracy, not the constant. If the fitted value "
+                "looks wrong, flag the FIT (data quality, edge cases), "
+                "not the constant."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-01T17:30:00+00:00",
+            "subsystem": "known_issues",
+            "summary": (
+                "Known measurement asymmetry remains (don't re-suggest "
+                "every review): predictions are seeded with system SOC "
                 "(capacity-weighted main + expansion packs) but the "
                 "`actual_soc` field in prediction_accuracy reads from "
                 "samples.last_battery_pct which is the MAIN-only reading. "
                 "When packs are out of balance with main (e.g. main at "
                 "100%, packs at 75%) this manifests as a bias that grows "
-                "with SOC. This is on the to-do list to fix; you can "
-                "flag it but do not re-suggest the same diagnosis every "
-                "review."
+                "with SOC. Fix is non-trivial (needs a system-SOC column "
+                "or a join on battery_packs at target time); on the "
+                "to-do list."
             ),
         },
     ]

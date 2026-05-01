@@ -123,6 +123,20 @@ def _format_starter_bundle(bundle: dict) -> str:
         lines.append(f"- {k}: {v}")
     lines.append("")
 
+    overhead_w = bundle.get("fitted_idle_overhead_w")
+    overhead_n = bundle.get("fitted_idle_overhead_n_windows", 0)
+    if overhead_w is not None:
+        lines.append("## Auto-fitted parasitic overhead")
+        lines.append(
+            f"- idle_overhead_w (used in load model): {overhead_w} W "
+            f"(fit from {overhead_n} clean discharge windows)"
+        )
+        if overhead_n < 5:
+            lines.append("  ⚠ Few windows — value is still the population "
+                         "default. Wait until more discharge data accumulates "
+                         "before flagging it as wrong.")
+        lines.append("")
+
     # Recent code changes that re-define what historical data means.
     # Without this hint the advisor re-flags the same bug every review
     # because the 48h window still contains predictions/decisions from
