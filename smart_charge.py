@@ -230,8 +230,15 @@ def compute_plan(
     capacity_wh: int,
     tz_offset_seconds: int = 0,
     now_ts: float | None = None,
+    forecast_unavailable_reason: str | None = None,
 ) -> Plan:
-    """Pure function: given inputs, decide what to do. No side effects."""
+    """Pure function: given inputs, decide what to do. No side effects.
+
+    `forecast_unavailable_reason` lets callers explain *why* they
+    couldn't supply a forecast — e.g. "calibrating: 8 of 24h captured" —
+    so the decision row carries useful context instead of a generic
+    error. Falls back to a "set location first" hint when not provided.
+    """
     now = int(now_ts or time.time())
     mode = str(config.get("mode") or "off")
     target = float(config.get("target_sunrise_soc_pct") or 25)
@@ -246,7 +253,8 @@ def compute_plan(
 
     fc = forecast.get("forecast") or []
     if not fc:
-        return Plan(action="off", reason="no forecast yet — set location first",
+        reason = forecast_unavailable_reason or "no forecast yet — set location first"
+        return Plan(action="off", reason=reason,
                     mode=mode, decided_at=now,
                     current_soc_pct=current_soc_pct,
                     target_sunrise_soc_pct=target)

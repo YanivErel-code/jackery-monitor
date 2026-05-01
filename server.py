@@ -708,6 +708,24 @@ async def _smart_charge_evaluate(record: bool = True,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
     )
+    # If we don't have enough history yet to fit a trustworthy forecast,
+    # don't act on it — return a no-op plan so the controller stays in
+    # "skip" until the forecaster reports ready=True.
+    if not fcast.get("ready"):
+        readiness = fcast.get("readiness", {})
+        return smart_charge.compute_plan(
+            config=cfg, current_soc_pct=starting_soc,
+            forecast={"forecast": []}, cost_plan=cost_module.get_plan(),
+            capacity_wh=capacity,
+            tz_offset_seconds=int(loc.get("utc_offset_seconds") or 0),
+            forecast_unavailable_reason=(
+                f"calibrating: {readiness.get('have_hours', 0)}h of "
+                f"{readiness.get('needed_hours', 24)}h captured, "
+                f"{readiness.get('have_idle_windows', 0)}/"
+                f"{readiness.get('needed_idle_windows', 5)} "
+                f"discharge windows"
+            ),
+        )
     # Persist the forecast so we have a continuous trace for predicted-vs-
     # actual analytics, regardless of whether the Forecast tab is open.
     # PK collapses multiple writes within an hour so cost is bounded.
@@ -1604,10 +1622,10 @@ async def api_forecast(device_sn: str | None = None):
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
     )
-    # Persist this snapshot for later accuracy tracking. The PK is
-    # (device_sn, made_at_hour, target_hour) so multiple calls in the same
-    # hour collapse to one row per (device, target).
-    state.energy.record_forecast(device_sn, time.time(), result["forecast"])
+    # Only persist when the forecast is actually fit — recording an
+    # empty placeholder would corrupt prediction-accuracy analytics.
+    if result.get("ready"):
+        state.energy.record_forecast(device_sn, time.time(), result["forecast"])
     return {
         "device_sn": device_sn,
         "low_battery_threshold": user_settings.get("low_battery_threshold"),

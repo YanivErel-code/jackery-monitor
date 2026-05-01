@@ -236,6 +236,8 @@ def test_build_forecast_glues_pieces_together():
     # smoke-test charge assertion to hold. With OVERHEAD=200 + 100W
     # output_w = ~300W effective daytime load, a 2.0 W per W/m²
     # coefficient (~1600W peak at ghi=800) clears it with wide margin.
+    # The synthetic battery_pct walks down at night so the new
+    # forecast_readiness gate sees clean discharge windows.
     now = int(time.time())
     weather = []
     for i in range(-14 * 24, 24 * 5):  # past 14 days through next 5 days, hourly
@@ -244,8 +246,21 @@ def test_build_forecast_glues_pieces_together():
         hour_of_day = (ts // 3600) % 24
         ghi = 800 if 8 <= hour_of_day <= 16 else 0
         weather.append({"ts": ts, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
+
+    def _synth_soc(ts: int) -> int:
+        # 90% during the day, drops 5pp/hour overnight, recovers at dawn.
+        h = (ts // 3600) % 24
+        if 8 <= h <= 16:
+            return 90
+        # Hours away from sunset (16) — drops linearly until dawn.
+        hours_after_sunset = (h - 16) % 24
+        return max(60, 90 - hours_after_sunset * 5)
+
     energy = [{"ts": w["ts"], "solar_w": int(2.0 * w["ghi_w_m2"]),
-               "output_w": 100, "battery_pct": 60}
+               "solar_wh": int(2.0 * w["ghi_w_m2"]),
+               "output_w": 100, "output_wh": 100,
+               "ac_input_wh": 0, "ac_input_w": 0,
+               "battery_pct": _synth_soc(w["ts"])}
               for w in weather if w["ts"] < now]
     res = forecaster.build_forecast(
         energy_history=energy,
@@ -323,7 +338,7 @@ def test_idle_overhead_skips_solar_polluted_windows():
                         "solar_wh": 1500, "ac_input_wh": 0})
         history.append({"ts": ts + 3600, "battery_pct": 69 - i, "output_wh": 100,
                         "solar_wh": 1500, "ac_input_wh": 0})
-    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+    overhead, _n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
     # Fit should land around 200W — solar windows excluded.
     assert 180 <= overhead <= 220, f"got {overhead}, expected ~200"
 
@@ -346,16 +361,17 @@ def test_idle_overhead_clamps_negative_to_zero():
 
 def test_idle_overhead_used_by_build_forecast():
     # End-to-end: a history with a clear 200W parasitic should make
-    # build_forecast surface idle_overhead_w ≈ 200 in its result.
+    # build_forecast surface idle_overhead_w ≈ 200 in its result. We
+    # spread 15 windows across ~30h so the new readiness gate passes
+    # (≥24h of history span + ≥5 discharge windows).
     now = int(time.time())
     history = []
-    # Mix a few clean discharge windows into otherwise-irrelevant data
-    for i in range(8):
-        ts = now - 86400 + i * 3600 * 2
-        history.append({"ts": ts, "battery_pct": 80 - i, "output_w": 100,
+    for i in range(15):
+        ts = now - 30 * 3600 + i * 3600 * 2
+        history.append({"ts": ts, "battery_pct": 90 - i, "output_w": 100,
                         "output_wh": 100, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 79 - i, "output_w": 100,
+        history.append({"ts": ts + 3600, "battery_pct": 89 - i, "output_w": 100,
                         "output_wh": 100, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
     weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
@@ -365,7 +381,33 @@ def test_idle_overhead_used_by_build_forecast():
         starting_soc_pct=50.0, capacity_wh=30000, now_ts=now,
         horizon_hours=24,
     )
+    assert res.get("ready") is True
     assert "idle_overhead_w" in res
     assert "idle_overhead_n_windows" in res
     assert res["idle_overhead_n_windows"] >= 5
     assert 180 <= res["idle_overhead_w"] <= 220
+
+
+def test_build_forecast_blocks_when_history_too_short():
+    # The readiness gate should refuse to produce a forecast on a fresh
+    # install. Caller sees `ready: False` + a `readiness` block with the
+    # progress so the UI can show a calibration message.
+    now = int(time.time())
+    # Only 4 hours of history — well below MIN_FORECAST_HISTORY_HOURS.
+    history = [
+        {"ts": now - 4 * 3600, "battery_pct": 80, "output_w": 100,
+         "output_wh": 100, "solar_wh": 0, "ac_input_wh": 0},
+        {"ts": now - 3 * 3600, "battery_pct": 79, "output_w": 100,
+         "output_wh": 100, "solar_wh": 0, "ac_input_wh": 0},
+    ]
+    weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
+               for i in range(48)]
+    res = forecaster.build_forecast(
+        energy_history=history, weather_hourly=weather,
+        starting_soc_pct=80.0, capacity_wh=30000, now_ts=now,
+    )
+    assert res["ready"] is False
+    assert res["forecast"] == []
+    r = res["readiness"]
+    assert r["reason"] == "calibrating"
+    assert r["have_hours"] < r["needed_hours"]

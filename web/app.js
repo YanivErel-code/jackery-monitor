@@ -2724,6 +2724,19 @@ async function fetchForecast() {
       return;
     }
     if (j.error) { showNeedsConfig(j.error, body.textContent); return; }
+    if (j.ready === false) {
+      const r = j.readiness || {};
+      const haveH = r.have_hours ?? 0, needH = r.needed_hours ?? 24;
+      const haveW = r.have_idle_windows ?? 0, needW = r.needed_idle_windows ?? 5;
+      showNeedsConfig(
+        'Forecaster is calibrating',
+        `Need ${needH}h of history (${haveH}h captured) and ` +
+        `${needW} clean discharge windows (${haveW} so far). ` +
+        `Once enough data accumulates, the forecast will appear here ` +
+        `automatically — no action required.`
+      );
+      return;
+    }
     needsConfig.hidden = true;
     content.hidden = false;
     stats.hidden = false;

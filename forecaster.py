@@ -224,7 +224,8 @@ def fit_idle_overhead_w(
         key=lambda r: r["ts"],
     )
     gaps: list[float] = []
-    for a, b in zip(rows, rows[1:]):
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
         soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
         if soc_a is None or soc_b is None:
             continue
@@ -446,6 +447,61 @@ def simulate_soc(
     return out
 
 
+# Minimum data required before we'll produce a forecast at all. A
+# half-fit forecast on day 1 is worse than none — it's confidently
+# wrong and the smart-charge controller would act on it.
+MIN_FORECAST_HISTORY_HOURS = 24
+MIN_FORECAST_IDLE_WINDOWS = 5
+
+
+def forecast_readiness(
+    energy_history: list[dict[str, Any]],
+    capacity_wh: int,
+) -> dict[str, Any]:
+    """Decide whether we have enough per-device history to build a
+    forecast users can trust. Returns a dict with `ready` + the metrics
+    the gate evaluated, so the UI can show "8 of 24 hours captured"
+    style progress instead of a binary unhelpful "not yet".
+
+    Gates:
+      1. ≥ MIN_FORECAST_HISTORY_HOURS of *span* between earliest and
+         latest sample. A full diurnal cycle is the minimum to fit a
+         useful solar coefficient and a per-hour load profile.
+      2. ≥ MIN_FORECAST_IDLE_WINDOWS clean discharge windows so the
+         parasitic overhead is fit from the user's own data, not the
+         population default.
+
+    A failed gate is not a bug — it's expected on a fresh install.
+    """
+    rows = sorted(
+        (r for r in (energy_history or []) if r.get("ts") is not None),
+        key=lambda r: r["ts"],
+    )
+    if len(rows) < 2:
+        return {
+            "ready": False,
+            "reason": "no_history",
+            "have_hours": 0.0,
+            "needed_hours": MIN_FORECAST_HISTORY_HOURS,
+            "have_idle_windows": 0,
+            "needed_idle_windows": MIN_FORECAST_IDLE_WINDOWS,
+        }
+    span_hours = (rows[-1]["ts"] - rows[0]["ts"]) / 3600.0
+    _, n_windows = fit_idle_overhead_w(energy_history, capacity_wh)
+    ready = (
+        span_hours >= MIN_FORECAST_HISTORY_HOURS
+        and n_windows >= MIN_FORECAST_IDLE_WINDOWS
+    )
+    return {
+        "ready": ready,
+        "reason": "ready" if ready else "calibrating",
+        "have_hours": round(span_hours, 1),
+        "needed_hours": MIN_FORECAST_HISTORY_HOURS,
+        "have_idle_windows": n_windows,
+        "needed_idle_windows": MIN_FORECAST_IDLE_WINDOWS,
+    }
+
+
 def build_forecast(
     energy_history: list[dict[str, Any]],
     weather_hourly: list[dict[str, Any]],
@@ -458,11 +514,25 @@ def build_forecast(
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
+    Returns `{ready: False, readiness: {...}, forecast: []}` when there
+    isn't enough per-device history to fit a trustworthy model. Callers
+    must check `ready` before consuming `forecast` — the smart-charge
+    controller and the Forecast tab both gate on it.
+
     `ac_charge_floor_pct`: passed through to `simulate_soc`. Callers
     that have smart-charge enabled (and a target_sunrise_soc_pct) should
     pass it so long-lead predictions don't saturate at 0% — see
     `simulate_soc` docstring for the mechanism.
     """
+    readiness = forecast_readiness(energy_history, capacity_wh)
+    if not readiness["ready"]:
+        return {
+            "ready": False,
+            "readiness": readiness,
+            "capacity_wh": capacity_wh,
+            "starting_soc_pct": round(starting_soc_pct, 1),
+            "forecast": [],
+        }
     now_ts = now_ts if now_ts is not None else time.time()
     cutoff = int(now_ts)
 
@@ -513,6 +583,8 @@ def build_forecast(
         ac_charge_floor_pct=ac_charge_floor_pct,
     )
     return {
+        "ready": True,
+        "readiness": readiness,
         "starting_soc_pct": round(starting_soc_pct, 1),
         "capacity_wh": capacity_wh,
         "solar_coefficient": round(k, 4),
