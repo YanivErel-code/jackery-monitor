@@ -894,14 +894,15 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
     if stored and stored.get("value") is not None:
         if stored.get("source") == "user":
             return {**stored, "source": "user"}
-        # Cache fit/probe results — they're expensive to recompute.
-        # Catalog/default lookups are cheap (in-memory dict + a row
-        # query) so we re-resolve those every time. This also avoids
-        # the "old buggy value sticks for 24h" problem when the
-        # catalog logic is updated — fresh code immediately wins.
-        age = int(time.time()) - int(stored.get("updated_at") or 0)
-        if stored.get("source") in ("fit", "probe") and age < 24 * 3600:
-            return stored
+        # Source-of-truth is always the live re-resolution: fits are
+        # sub-millisecond once `_cached_history` memoizes the 14d
+        # window for the request, and probes are bounded. The DB row
+        # is a record of the latest result for UI staleness display
+        # and historical analysis, NOT a cache that shadows the
+        # current fit. Earlier we cached 'fit'/'probe' results for
+        # 24h, which had the awful side effect of locking in buggy
+        # values across deploys. Now, only `source='user'` returns
+        # early — every other key re-runs the ladder.
 
     # Step 2: live computation per parameter.
     if key == "battery_capacity_wh":
@@ -1004,11 +1005,13 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
 
-    # Step 3: stored value with stale fit — better than nothing.
+    # Last resort: a fit raised an exception or returned None but we
+    # have a previously-stored value — better than telling the caller
+    # "unknown" when we have history.
     if stored and stored.get("value") is not None:
         return {**stored, "source": stored.get("source") or "unknown"}
 
-    # Step 4: nothing available — caller surfaces "ask user" UI.
+    # Nothing available — caller surfaces "ask user" UI.
     return {"value": None, "source": "unknown"}
 
 
