@@ -37,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 
 import auth
 import cost as cost_module
+import energy_db
 import forecaster
 import kasa_client
 import kasa_creds
@@ -830,6 +831,139 @@ def _flag_unknown_models(cloud_meta: dict | None) -> None:
                 device_sn, device_id, mc_int,
                 d.get("model_name") or d.get("name") or "",
             ))
+
+
+# ============================================================
+# Per-device parameter resolution ladder
+# ============================================================
+# Single entry point for "what value should we use for parameter X on
+# device Y?". Walks: user override (DB) → cached fit (DB) → live fit
+# → catalog/probe → default → unknown. Every call returns a dict
+# {value, source, ...} so callers can render "where this came from"
+# in the UI and decide whether to ask the user.
+#
+# Adding a new resolvable parameter:
+#  1. Append to energy_db.DEVICE_PARAM_KEYS so the UI knows about it
+#  2. Add a clause below for the live-fit / catalog steps
+#
+# The DB rows themselves are written by either the UI ("user" source)
+# or by background fits ("fit" / "probe" source) so the resolver can
+# always read from DB first and avoid recomputing on every call.
+
+# Cache the freshly-fit values on a short timer so the resolver can be
+# hit on every API call without re-doing the math each time.
+_param_fit_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_PARAM_FIT_CACHE_TTL_S = 60.0
+
+
+def _cached_history(device_sn: str) -> list[dict]:
+    """One-shot 14d history pull, used by the resolver's live-fit
+    branch. Memoized via _param_fit_cache so multiple param lookups
+    in the same request don't re-query the DB."""
+    key = (device_sn, "_history")
+    now = time.time()
+    cached = _param_fit_cache.get(key)
+    if cached and now - cached[0] < _PARAM_FIT_CACHE_TTL_S:
+        return cached[1]  # type: ignore[return-value]
+    h = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+    _param_fit_cache[key] = (now, h)
+    return h
+
+
+def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
+    """Walk the resolution ladder for `key` on `device_sn`. Returns a
+    dict with at least {value, source}; may also include n_samples,
+    confidence, note, updated_at when those make sense.
+
+    Source values, in priority order:
+      'user'    — user-set override in DB (Device tab form, etc.)
+      'fit'     — cached fit from DB (auto-fit results, persisted)
+      'probe'   — cloud-probe result (e.g. discovered capacity)
+      'catalog' — bundled lookup (models.json for capacity)
+      'default' — population fallback (cold-start)
+      'unknown' — none of the above; UI should ask the user
+
+    The resolver writes back fresh fits to DB (source='fit') so a
+    subsequent call returns the cached value without recomputing.
+    """
+    if not device_sn or not key:
+        return {"value": None, "source": "unknown"}
+
+    # Step 1: anything stored in DB wins (user overrides + cached fits).
+    stored = state.energy.get_device_param(device_sn, key)
+    if stored and stored.get("value") is not None:
+        if stored.get("source") == "user":
+            return {**stored, "source": "user"}
+        # Stale fit? Recompute if the row's >24h old, otherwise reuse.
+        age = int(time.time()) - int(stored.get("updated_at") or 0)
+        if stored.get("source") in ("fit", "probe", "catalog") and age < 24 * 3600:
+            return stored
+
+    # Step 2: live computation per parameter.
+    if key == "battery_capacity_wh":
+        # Catalog lookup. Per-device override (capacity_wh_override) is
+        # already handled separately in _total_capacity_wh; this is the
+        # model-derived value before pack stacking.
+        try:
+            d = next((x for x in state.energy.list_devices()
+                      if x.get("device_sn") == device_sn), None)
+            mc = (d or {}).get("model_code")
+            cap = forecaster.battery_capacity_wh(mc)
+            source = "catalog" if mc in forecaster.BATTERY_CAPACITY_WH else "default"
+            state.energy.set_device_param(device_sn, key, cap, source=source)
+            return {"value": cap, "source": source, "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s catalog failed: %s", device_sn, key, e)
+
+    elif key == "max_charge_w":
+        try:
+            w, n = forecaster.fit_max_charge_w(_cached_history(device_sn))
+            if w is not None:
+                state.energy.set_device_param(
+                    device_sn, key, w, source="fit", n_samples=n,
+                    confidence=("high" if n >= 30 else "medium" if n >= 12 else "low"),
+                )
+                return {"value": w, "source": "fit", "n_samples": n,
+                        "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
+
+    elif key == "idle_overhead_w":
+        try:
+            cap = (state.energy.get_capacity_override(device_sn)
+                   or _total_capacity_wh(device_sn, None))
+            w, n = forecaster.fit_idle_overhead_w(_cached_history(device_sn), cap)
+            source = "fit" if n >= 5 else "default"
+            state.energy.set_device_param(
+                device_sn, key, w, source=source, n_samples=n,
+                confidence=("high" if n >= 20 else "medium" if n >= 10 else "low"),
+            )
+            return {"value": w, "source": source, "n_samples": n,
+                    "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
+
+    elif key == "charge_efficiency":
+        try:
+            cap = (state.energy.get_capacity_override(device_sn)
+                   or _total_capacity_wh(device_sn, None))
+            v, n = forecaster.fit_charge_efficiency(_cached_history(device_sn), cap)
+            source = "fit" if n >= 5 else "default"
+            state.energy.set_device_param(
+                device_sn, key, v, source=source, n_samples=n,
+                confidence=("high" if n >= 20 else "medium" if n >= 10 else "low"),
+            )
+            return {"value": v, "source": source, "n_samples": n,
+                    "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
+
+    # Step 3: stored value with stale fit — better than nothing.
+    if stored and stored.get("value") is not None:
+        return {**stored, "source": stored.get("source") or "unknown"}
+
+    # Step 4: nothing available — caller surfaces "ask user" UI.
+    return {"value": None, "source": "unknown"}
 
 
 def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
@@ -1741,6 +1875,59 @@ async def api_reconnect():
     state.device = None
     ok = await connect_device()
     return {"ok": ok, "error": state.connection_error, "backend": state.backend}
+
+
+@app.get("/api/devices/params")
+def api_devices_params(device_sn: str | None = None):
+    """Return every resolvable per-device parameter, with source +
+    confidence. The Device tab renders this as a "Learned parameters"
+    panel: each row shows the value, where it came from
+    (user/fit/probe/catalog/default/unknown), and an override field.
+
+    The resolution ladder lives in `resolve_device_param`. The keys
+    exposed here are `energy_db.DEVICE_PARAM_KEYS`, so adding a new
+    resolvable param automatically gets it into the UI."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    out = []
+    for key, meta in energy_db.DEVICE_PARAM_KEYS.items():
+        resolved = resolve_device_param(device_sn, key)
+        out.append({"key": key, **meta, **resolved})
+    return {"device_sn": device_sn, "params": out}
+
+
+@app.post("/api/devices/params")
+async def api_devices_params_set(req: Request):
+    """Manually override a per-device parameter. Body: {device_sn, key,
+    value}. Writes a 'user' row that takes priority over fit/probe/
+    catalog. Pass value=null to clear (resolver falls back to next
+    ladder step)."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body") from None
+    device_sn = body.get("device_sn")
+    key = body.get("key")
+    value = body.get("value")
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn or not key:
+        raise HTTPException(400, "device_sn and key required")
+    if key not in energy_db.DEVICE_PARAM_KEYS:
+        raise HTTPException(400, f"unknown param key: {key!r}")
+    if value is None:
+        state.energy.clear_device_param(device_sn, key)
+    else:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "value must be numeric or null") from None
+        state.energy.set_device_param(device_sn, key, v, source="user",
+                                      note="set via Device tab")
+    return {"device_sn": device_sn, "key": key,
+            **resolve_device_param(device_sn, key)}
 
 
 @app.get("/api/devices/probe_results")

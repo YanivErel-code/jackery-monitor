@@ -357,7 +357,7 @@ function switchTab(name) {
     // User is now looking — clear the "new insights" dot.
     setAutomationDot(false);
   }
-  if (name === 'device')   { loadDeviceCapacity(); }
+  if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); }
 }
 
 // Tab-level "new insights pending" badge. Lights up when the daily
@@ -425,6 +425,120 @@ async function loadDeviceCapacity() {
 // a reload still re-flags the unknown model (intentional; we want it
 // visible until the user actually fixes it).
 const UNKNOWN_MODEL_DISMISS_KEY = 'jackery-umb-dismissed';
+
+// ============================================================
+// DEVICE TAB: per-device learned parameters panel
+// ============================================================
+// Renders the resolution-ladder result for every key in
+// energy_db.DEVICE_PARAM_KEYS. Each row shows where the value came
+// from (user override / fit / probe / catalog / default / unknown),
+// with inline override + reset controls. Same data is exposed to the
+// AI advisor so the parameter story is uniform across the app.
+
+async function loadDeviceParams() {
+  const list = $('device-params-list');
+  if (!list) return;
+  const dev = activeJackeryDevice();
+  if (!dev?.device_sn) {
+    list.innerHTML = '<div class="hint">No active device.</div>';
+    return;
+  }
+  list.innerHTML = '<div class="hint">Loading…</div>';
+  try {
+    const r = await fetch(`/api/devices/params?device_sn=${encodeURIComponent(dev.device_sn)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    renderDeviceParams(j.params || [], dev.device_sn);
+  } catch (e) {
+    list.innerHTML = `<div class="hint">Failed to load: ${e.message || e}</div>`;
+  }
+}
+
+function renderDeviceParams(rows, deviceSn) {
+  const list = $('device-params-list');
+  if (!list) return;
+  if (!rows.length) {
+    list.innerHTML = '<div class="hint">No parameters available yet.</div>';
+    return;
+  }
+  const safe = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  const fmtVal = (v, unit) => v == null ? '—' : (
+    unit === 'ratio' ? Number(v).toFixed(3) : `${Math.round(Number(v))} ${safe(unit)}`
+  );
+  const sourceTag = (src) => `<span class="device-param-source device-param-source-${safe(src)}">${safe(src)}</span>`;
+  list.innerHTML = rows.map((p) => `
+    <div class="device-param-row" data-key="${safe(p.key)}">
+      <div>
+        <div class="device-param-label">${safe(p.label || p.key)}</div>
+        <div class="device-param-desc">${safe(p.description || '')}${
+          p.n_samples ? ` · fit from ${p.n_samples} samples` : ''
+        }</div>
+      </div>
+      <div class="device-param-value">${fmtVal(p.value, p.unit)}</div>
+      <div class="device-param-edit" style="display:flex; gap:6px; align-items:center">
+        ${sourceTag(p.source || 'unknown')}
+        <button class="btn btn-ghost btn-small" data-action="override" type="button">Override</button>
+        ${p.source === 'user' ? '<button class="btn btn-ghost btn-small" data-action="reset" type="button">Reset</button>' : ''}
+      </div>
+    </div>`).join('');
+  list.querySelectorAll('[data-action="override"]').forEach((btn) => {
+    btn.addEventListener('click', () => promptOverrideParam(btn, deviceSn, rows));
+  });
+  list.querySelectorAll('[data-action="reset"]').forEach((btn) => {
+    btn.addEventListener('click', () => resetParam(btn, deviceSn));
+  });
+}
+
+async function promptOverrideParam(btn, deviceSn, rows) {
+  const row = btn.closest('.device-param-row');
+  const key = row?.dataset.key;
+  if (!key) return;
+  const meta = rows.find(p => p.key === key) || {};
+  const cur = meta.value != null ? Number(meta.value).toString() : '';
+  const v = prompt(
+    `Override ${meta.label || key} (in ${meta.unit || 'units'}).\n\n` +
+    `Current: ${cur || '(unknown)'}\nLeave blank to cancel.`,
+    cur,
+  );
+  if (v === null || v.trim() === '') return;
+  const num = parseFloat(v);
+  if (Number.isNaN(num)) { alert('Not a number.'); return; }
+  await saveDeviceParam(deviceSn, key, num);
+}
+
+async function resetParam(btn, deviceSn) {
+  const row = btn.closest('.device-param-row');
+  const key = row?.dataset.key;
+  if (!key) return;
+  if (!confirm('Clear your override and let the dashboard auto-learn this value?')) return;
+  await saveDeviceParam(deviceSn, key, null);
+}
+
+async function saveDeviceParam(deviceSn, key, value) {
+  const status = $('device-params-status');
+  if (status) {
+    status.hidden = false;
+    status.textContent = value == null ? 'Resetting…' : 'Saving…';
+  }
+  try {
+    const r = await fetch('/api/devices/params', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_sn: deviceSn, key, value }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    if (status) {
+      status.textContent = 'Saved.';
+      setTimeout(() => { status.hidden = true; }, 2000);
+    }
+    loadDeviceParams();  // re-render so "Reset" button appears/disappears
+  } catch (e) {
+    if (status) status.textContent = `Failed: ${e.message || e}`;
+  }
+}
+
 
 async function refreshUnknownModelBanner() {
   const banner = $('unknown-model-banner');

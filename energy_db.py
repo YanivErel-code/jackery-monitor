@@ -187,7 +187,57 @@ CREATE TABLE IF NOT EXISTS algorithm_changes (
 
 CREATE INDEX IF NOT EXISTS idx_alg_changes_device_ts
     ON algorithm_changes(device_sn, applied_at);
+
+-- Generic per-device parameter store. Keyed by (device_sn, key) with
+-- exactly one row per param; the resolution ladder (user override >
+-- fitted value > catalog/probe > default) collapses into a single
+-- write that records the source. UI / forecaster reads via
+-- resolve_device_param(...) so all per-device parameters share the
+-- same resolution policy: DB → live fit → catalog/probe → default →
+-- ask user. See DEVICE_PARAM_KEYS below for the canonical list.
+CREATE TABLE IF NOT EXISTS device_params (
+    device_sn   TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       REAL,
+    source      TEXT NOT NULL,    -- 'user' | 'fit' | 'probe' | 'catalog' | 'default'
+    n_samples   INTEGER,          -- fit-source: how many windows; null otherwise
+    confidence  TEXT,             -- 'low' | 'medium' | 'high' | NULL
+    note        TEXT,             -- optional free-text (e.g. cloud probe key path)
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (device_sn, key)
+);
 """
+
+# Canonical list of per-device parameter keys the resolver knows about.
+# Adding a new key here gets it into the Device-tab "Learned parameters"
+# panel + the AI advisor's per-device context automatically.
+DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
+    "battery_capacity_wh": {
+        "label": "Battery capacity",
+        "unit": "Wh",
+        "description": "Total system capacity used by the SOC simulator.",
+    },
+    "max_charge_w": {
+        "label": "Max AC charge rate",
+        "unit": "W",
+        "description": "Peak wattage the device pulls from the wall when smart-charge engages.",
+    },
+    "idle_overhead_w": {
+        "label": "Parasitic / idle overhead",
+        "unit": "W",
+        "description": "Inverter idle + DC-bus draw the `op` field doesn't capture.",
+    },
+    "charge_efficiency": {
+        "label": "Charge efficiency",
+        "unit": "ratio",
+        "description": "Stored Wh per input Wh. 0.85-0.95 is typical.",
+    },
+    "solar_coefficient": {
+        "label": "Solar coefficient",
+        "unit": "W per W/m²",
+        "description": "Effective panel array size — fitted from observed solar vs irradiance.",
+    },
+}
 
 
 class EnergyDB:
@@ -914,6 +964,77 @@ class EnergyDB:
              "reasoning": r[7]}
             for r in rows
         ]
+
+    # ---------- device_params ----------
+    def set_device_param(self, device_sn: str, key: str, value: float | None, *,
+                          source: str, n_samples: int | None = None,
+                          confidence: str | None = None,
+                          note: str | None = None) -> None:
+        """Upsert a per-device parameter. `source` records the resolution
+        ladder rung that produced the value: 'user' | 'fit' | 'probe' |
+        'catalog' | 'default'. The resolver in server.py decides which
+        source wins on read."""
+        if not device_sn or not key:
+            return
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO device_params
+                       (device_sn, key, value, source, n_samples,
+                        confidence, note, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(device_sn, key) DO UPDATE SET
+                     value = excluded.value,
+                     source = excluded.source,
+                     n_samples = excluded.n_samples,
+                     confidence = excluded.confidence,
+                     note = excluded.note,
+                     updated_at = excluded.updated_at""",
+                (device_sn, key,
+                 None if value is None else float(value),
+                 source, n_samples, confidence, note,
+                 int(time.time())),
+            )
+
+    def get_device_param(self, device_sn: str, key: str) -> dict | None:
+        if not device_sn or not key:
+            return None
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT value, source, n_samples, confidence, note, updated_at
+                     FROM device_params
+                    WHERE device_sn = ? AND key = ?""",
+                (device_sn, key),
+            ).fetchone()
+        if not row:
+            return None
+        return {"value": row[0], "source": row[1], "n_samples": row[2],
+                "confidence": row[3], "note": row[4], "updated_at": row[5]}
+
+    def list_device_params(self, device_sn: str) -> list[dict]:
+        if not device_sn:
+            return []
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT key, value, source, n_samples, confidence,
+                          note, updated_at
+                     FROM device_params
+                    WHERE device_sn = ?
+                    ORDER BY key""",
+                (device_sn,),
+            ).fetchall()
+        return [{"key": r[0], "value": r[1], "source": r[2],
+                 "n_samples": r[3], "confidence": r[4], "note": r[5],
+                 "updated_at": r[6]} for r in rows]
+
+    def clear_device_param(self, device_sn: str, key: str) -> None:
+        """Remove a stored param so the resolver falls through to the
+        next ladder step. Used when the user clicks 'reset to auto-fit'
+        after a manual override."""
+        with self._conn() as c:
+            c.execute(
+                "DELETE FROM device_params WHERE device_sn = ? AND key = ?",
+                (device_sn, key),
+            )
 
     def expire_old_suggestions(self, max_age_s: int = 7 * 86400) -> int:
         """Auto-dismiss pending suggestions older than max_age_s. Run

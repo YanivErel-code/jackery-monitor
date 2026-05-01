@@ -1447,6 +1447,52 @@ main {
 .probe-cap-source { font-size: 12px; }
 .btn-small { padding: 4px 10px; font-size: 12px; }
 
+/* Per-device "Learned parameters" panel on the Device tab. One row
+   per resolvable param showing source, value, and override controls. */
+.device-params-list { display: flex; flex-direction: column; gap: 8px; }
+.device-param-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.device-param-label { font-weight: 500; color: var(--text); font-size: 14px; }
+.device-param-desc { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+.device-param-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.device-param-source {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.device-param-source-user { color: var(--accent); }
+.device-param-source-fit { color: var(--accent-2); }
+.device-param-source-unknown { color: #f59e0b; }
+.device-param-edit input {
+  width: 110px;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-align: right;
+}
+
 .device-card dl {
   display: grid;
   grid-template-columns: 180px 1fr;

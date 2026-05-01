@@ -377,6 +377,19 @@
 
       <section class="card device-card">
         <div class="card-header">
+          <h2>Learned parameters</h2>
+          <span id="device-params-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Per-device values the dashboard learns from your data. Resolution order: <strong>your override → cached fit → live fit → catalog/probe → default → ask you</strong>. Click "Override" on any row to pin a manual value, "Reset" to fall back to the auto-learned value.
+        </p>
+        <div id="device-params-list" class="device-params-list">
+          <div class="hint">Loading…</div>
+        </div>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
           <h2>Cloud properties (debug)</h2>
           <button id="raw-props-toggle" class="btn btn-ghost" type="button">Show</button>
         </div>
