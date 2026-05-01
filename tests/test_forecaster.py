@@ -155,21 +155,22 @@ def test_load_profile_caps_runaway_buckets_against_overall_mean():
 
 def test_expected_load_uses_idle_default_when_no_data():
     # Empty profile → forecast hour gets IDLE_LOAD_W (the per-hour
-    # fallback) PLUS IDLE_OVERHEAD_W (the inverter idle / DC-bus draw
-    # that doesn't show up in `op` but still drains the battery — added
-    # universally so the load model matches SOC slope reality).
-    # This is the regression test for the 0%-predicted-vs-44%-actual bug.
+    # fallback) inflated by INVERTER_OVERHEAD_PCT (the heat-loss share
+    # in DC→AC conversion that doesn't show up in `op` but still drains
+    # the battery). Multiplicative model: the heavier the load, the
+    # more overhead.
     profile: dict[tuple[int, int], float] = {}
     load = forecaster.expected_load_w(profile, 1_700_000_000)
-    assert load == forecaster.IDLE_LOAD_W + forecaster.IDLE_OVERHEAD_W
+    expected = forecaster.IDLE_LOAD_W * (1.0 + forecaster.INVERTER_OVERHEAD_PCT)
+    assert load == expected
 
 
 def test_expected_load_falls_back_to_neighbor_hour_not_global_mean():
     # User has heavy daytime activity (avg ~500W) but quiet evenings
     # (~50W). A missing 2am bucket should inherit from neighboring night
-    # hours (1am, 3am) — NOT the global mean. The IDLE_OVERHEAD_W term
-    # is added uniformly so it doesn't affect WHICH bucket is selected,
-    # only the absolute value.
+    # hours (1am, 3am) — NOT the global mean. The overhead percentage
+    # is applied uniformly so it doesn't affect WHICH bucket is
+    # selected, only the absolute value.
     from datetime import datetime
     profile = {
         # Daytime: high load
@@ -177,13 +178,10 @@ def test_expected_load_falls_back_to_neighbor_hour_not_global_mean():
         # Evening: quiet
         (1, 0): 40.0, (3, 0): 50.0,  # 2am missing
     }
-    # Pick a weekday-Tuesday 2am for the lookup
     target = int(datetime(2024, 7, 2, 2, 0, 0).timestamp())
     load = forecaster.expected_load_w(profile, target)
-    # Should pick a night neighbor (40 or 50), with overhead added on
-    # top — NOT 500-ish (which would be daytime leakage).
-    expected = {40.0 + forecaster.IDLE_OVERHEAD_W,
-                50.0 + forecaster.IDLE_OVERHEAD_W}
+    pct = forecaster.INVERTER_OVERHEAD_PCT
+    expected = {40.0 * (1.0 + pct), 50.0 * (1.0 + pct)}
     assert load in expected, f"got {load} — leaked from daytime?"
 
 
@@ -307,72 +305,67 @@ def test_idle_overhead_returns_default_when_too_few_windows():
     assert n == 1
 
 
-def test_idle_overhead_recovers_known_parasitic():
+def test_inverter_overhead_pct_recovers_known_value():
     # Synthetic: SOC drops 1pp/hour on a 30000 Wh pack = 300 W observed
-    # drain. Reported out_w is 100 W. Implied parasitic = 200 W.
+    # drain. Reported out_w = 273 W → implied pct ≈ (300-273)/273 = 0.099.
     history = []
     base = 1_700_000_000
     for i in range(8):
         history.extend(_discharge_window(base + i * 3600 * 2,
-                                          80 - i, 79 - i, out_w=100))
-    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+                                          80 - i, 79 - i, out_w=273))
+    pct, n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=30000)
     assert n >= 5
-    assert 180 <= overhead <= 220, f"got {overhead}, expected ~200"
+    assert 0.08 <= pct <= 0.12, f"got {pct}, expected ~0.10"
 
 
-def test_idle_overhead_skips_solar_polluted_windows():
+def test_inverter_overhead_pct_skips_solar_polluted_windows():
     # Windows with solar should be excluded — otherwise the fit would
-    # mis-attribute solar charging as negative drain. Synthesize 6 clean
-    # discharge windows (200W parasitic) and 6 solar-polluted ones with
-    # bogus high gaps; the fit should only use the clean set.
+    # see "negative drain" (solar charging counted as load reduction)
+    # and skew low. Mix 6 clean windows (10% pct) with 6 solar-polluted.
     history = []
     base = 1_700_000_000
-    # Clean: 1pp/hour drop + 100W out_w on 30000Wh = 200W parasitic
+    # Clean: 1pp/hour drop + 273W out_w on 30000Wh = ~10% pct
     for i in range(6):
         history.extend(_discharge_window(base + i * 3600 * 3,
-                                          80 - i, 79 - i, out_w=100))
+                                          80 - i, 79 - i, out_w=273))
     # Polluted: same SOC drop + same out_w but with solar present
     for i in range(6):
         ts = base + (100 + i) * 3600
-        history.append({"ts": ts, "battery_pct": 70 - i, "output_wh": 100,
+        history.append({"ts": ts, "battery_pct": 70 - i, "output_wh": 273,
                         "solar_wh": 1500, "ac_input_wh": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 69 - i, "output_wh": 100,
+        history.append({"ts": ts + 3600, "battery_pct": 69 - i, "output_wh": 273,
                         "solar_wh": 1500, "ac_input_wh": 0})
-    overhead, _n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
-    # Fit should land around 200W — solar windows excluded.
-    assert 180 <= overhead <= 220, f"got {overhead}, expected ~200"
+    pct, _n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=30000)
+    assert 0.08 <= pct <= 0.12, f"got {pct}, expected ~0.10 (solar excluded)"
 
 
-def test_idle_overhead_clamps_negative_to_zero():
-    # If reported out_w exceeds the SOC-implied drain (a noisy sensor
-    # reading), the gap is negative — we clamp to 0 rather than letting
-    # bad samples push the median down.
+def test_inverter_overhead_pct_clamps_negative_to_zero():
+    # If reported out_w exceeds the SOC-implied drain (sensor noise),
+    # the ratio goes negative — we clamp to 0.
     history = []
     base = 1_700_000_000
     for i in range(8):
         # 1pp drop on 30000Wh = 300W observed, but report 800W out_w.
-        # Gap would be -500W; should be clamped to 0.
+        # Ratio = -0.625; should be clamped to 0.
         history.extend(_discharge_window(base + i * 3600 * 2,
                                           80 - i, 79 - i, out_w=800))
-    overhead, n = forecaster.fit_idle_overhead_w(history, capacity_wh=30000)
+    pct, n = forecaster.fit_inverter_overhead_pct(history, capacity_wh=30000)
     assert n >= 5
-    assert overhead == 0.0
+    assert pct == 0.0
 
 
-def test_idle_overhead_used_by_build_forecast():
-    # End-to-end: a history with a clear 200W parasitic should make
-    # build_forecast surface idle_overhead_w ≈ 200 in its result. We
-    # spread 15 windows across ~30h so the new readiness gate passes
-    # (≥24h of history span + ≥5 discharge windows).
+def test_inverter_overhead_pct_used_by_build_forecast():
+    # End-to-end: a history with a clear 10% overhead should make
+    # build_forecast surface inverter_overhead_pct ≈ 0.10 in its result.
     now = int(time.time())
     history = []
     for i in range(15):
         ts = now - 30 * 3600 + i * 3600 * 2
-        history.append({"ts": ts, "battery_pct": 90 - i, "output_w": 100,
-                        "output_wh": 100, "solar_w": 0, "solar_wh": 0,
+        history.append({"ts": ts, "battery_pct": 90 - i, "output_w": 273,
+                        "output_wh": 273, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 89 - i, "output_w": 100,
-                        "output_wh": 100, "solar_w": 0, "solar_wh": 0,
+        history.append({"ts": ts + 3600, "battery_pct": 89 - i, "output_w": 273,
+                        "output_wh": 273, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
     weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
                for i in range(48)]
@@ -382,10 +375,10 @@ def test_idle_overhead_used_by_build_forecast():
         horizon_hours=24,
     )
     assert res.get("ready") is True
-    assert "idle_overhead_w" in res
-    assert "idle_overhead_n_windows" in res
-    assert res["idle_overhead_n_windows"] >= 5
-    assert 180 <= res["idle_overhead_w"] <= 220
+    assert "inverter_overhead_pct" in res
+    assert "inverter_overhead_n_windows" in res
+    assert res["inverter_overhead_n_windows"] >= 5
+    assert 0.08 <= res["inverter_overhead_pct"] <= 0.12
 
 
 def test_build_forecast_blocks_when_history_too_short():

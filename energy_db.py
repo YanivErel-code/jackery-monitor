@@ -222,10 +222,10 @@ DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
         "unit": "W",
         "description": "Peak wattage the device pulls from the wall when smart-charge engages.",
     },
-    "idle_overhead_w": {
-        "label": "Parasitic / idle overhead",
-        "unit": "W",
-        "description": "Inverter idle + DC-bus draw the `op` field doesn't capture.",
+    "inverter_overhead_pct": {
+        "label": "Inverter overhead",
+        "unit": "ratio",
+        "description": "Fraction of throughput lost as heat in DC→AC conversion. 0.10 (10%) is typical for modern LiFePO4 inverters.",
     },
     "charge_efficiency": {
         "label": "Charge efficiency",

@@ -91,16 +91,20 @@ SOLAR_RECENT_CAP_MULT = 1.5
 # forecasts and caused the 44pp overnight error.
 IDLE_LOAD_W = 30.0
 
-# Default for the per-device parasitic overhead (inverter idle / DC-bus /
-# balancing draw not captured by `op` AC output). 200W is the population
-# average across observed Jackery 5000 Plus setups; it's only used as a
-# cold-start fallback. On every forecast we run `fit_idle_overhead_w()`
-# against the user's own discharge history and use that value instead —
-# inverter idle varies meaningfully between users (different model, different
-# expansion-pack count, different ambient temperature) so a single hardcoded
-# constant would be wrong for everyone except the person who set it.
-DEFAULT_IDLE_OVERHEAD_W = 200.0
-# Back-compat alias — older tests and any external imports keep working.
+# Inverter overhead modeled as a percentage of reported out_w rather
+# than a flat watt constant. Modern LiFePO4 portable-power inverters
+# (Jackery, Bluetti, EcoFlow et al.) advertise 90-95% AC efficiency,
+# so ~10% of throughput is lost as heat / DC-bus draw / control
+# electronics that don't show up in the `op` field. This scales
+# correctly with load: heavy hours have more overhead than idle hours.
+# Per-device fits override this default once data accumulates.
+DEFAULT_INVERTER_OVERHEAD_PCT = 0.10
+INVERTER_OVERHEAD_PCT = DEFAULT_INVERTER_OVERHEAD_PCT
+
+# Back-compat aliases for any external code that imported the old
+# flat-watt API. Computed from the percentage at a typical load
+# (~500W) so the order of magnitude matches the previous default.
+DEFAULT_IDLE_OVERHEAD_W = 50.0  # was 200 (flat); now 10pct of 500W typical
 IDLE_OVERHEAD_W = DEFAULT_IDLE_OVERHEAD_W
 
 # Cutoff for "recent" samples in load-profile recency weighting (seconds).
@@ -204,47 +208,52 @@ def fit_solar_coefficient(
 
 
 # ---------- idle overhead ----------
-def fit_idle_overhead_w(
+def fit_inverter_overhead_pct(
     energy_history: list[dict[str, Any]],
     capacity_wh: int,
     *,
-    default: float = DEFAULT_IDLE_OVERHEAD_W,
+    default: float = DEFAULT_INVERTER_OVERHEAD_PCT,
     min_windows: int = 5,
 ) -> tuple[float, int]:
-    """Fit the per-device parasitic overhead by reconciling reported `op`
-    against observed SOC slope on pure-discharge windows.
+    """Fit the per-device inverter overhead PERCENTAGE by reconciling
+    reported `op` against observed SOC slope on pure-discharge windows.
 
-    The Jackery's `op` (AC output) field doesn't capture inverter idle,
-    DC-bus, or balancing draws that still pull from the battery. Each
-    user's setup has a different gap depending on inverter model,
-    expansion-pack count, ambient temperature, etc. We fit it from each
-    user's own history rather than hard-coding.
+    Modern LiFePO4 inverters lose ~10% of throughput as heat in the
+    DC→AC conversion — that share doesn't show up in `op` but does
+    drain the battery. The exact percentage varies by inverter
+    model, age, and operating temperature. We fit it from each user's
+    own history rather than hard-coding.
 
     Algorithm: walk adjacent hourly buckets and keep only "clean
     discharge" windows where:
       - `solar_wh` is below a noise floor (no solar muddying SOC slope),
       - `ac_input_wh` is below the same floor (no Kasa-driven grid charge),
       - SOC actually dropped (≥1pp — the device's own sensor resolution),
-      - both endpoints have a `battery_pct` reading.
+      - reported out_w >= MIN_OUT_W (need throughput to compute a ratio).
 
-    For each qualifying window we compute the implied drain from SOC slope
-    and subtract the reported avg `op` to get the parasitic gap; the
-    median across windows is robust against single noisy samples.
+    For each qualifying window:
+      observed_drain_w = SOC_drop * capacity_wh / 100 / dt_h
+      pct = (observed_drain_w - reported_out_w) / reported_out_w
 
-    Falls back to `default` when fewer than `min_windows` qualifying
-    pairs are available — typical on a fresh install with <24h of data.
+    Median across windows for robustness; clamped to a physically
+    plausible [0.0, 0.50] band (50% loss is the worst case for a
+    decent inverter; anything higher is measurement error).
 
-    Returns (overhead_w, n_windows_used).
+    Falls back to `default` (10%) when fewer than `min_windows`
+    qualifying pairs are available.
+
+    Returns (overhead_pct_decimal, n_windows_used). 0.10 means 10%.
     """
     SOLAR_NOISE_WH = 50.0   # noise floor below which we treat solar as 0
     AC_NOISE_WH = 50.0      # same for AC charging
     MIN_SOC_DROP_PCT = 1.0  # below this it's sensor jitter, not real drain
+    MIN_OUT_W = 50.0        # need real throughput to compute a ratio
 
     rows = sorted(
         (r for r in (energy_history or []) if r.get("ts") is not None),
         key=lambda r: r["ts"],
     )
-    gaps: list[float] = []
+    pcts: list[float] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
         soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
@@ -252,35 +261,51 @@ def fit_idle_overhead_w(
             continue
         soc_drop = soc_a - soc_b
         if soc_drop < MIN_SOC_DROP_PCT:
-            continue  # not a discharge window (or below sensor resolution)
+            continue
         if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
             continue
         if (a.get("ac_input_wh") or 0) > AC_NOISE_WH:
             continue
         dt_h = (b["ts"] - a["ts"]) / 3600.0
         if dt_h <= 0 or dt_h > 6.0:
-            # Skip multi-hour gaps (likely a poll outage) — mixing
-            # different load regimes within the gap would skew the fit.
             continue
         observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
         reported_out_w = (a.get("output_wh") or 0) / dt_h
-        gap = observed_drain_w - reported_out_w
-        # Negative gap means out_w exceeded the SOC-slope drain, which
-        # usually means a noisy SOC reading or the device just topped a
-        # pack. Clamp at 0 — the parasitic can't be negative.
-        if gap < 0:
-            gap = 0.0
-        gaps.append(gap)
+        if reported_out_w < MIN_OUT_W:
+            continue
+        pct = (observed_drain_w - reported_out_w) / reported_out_w
+        # Negative ratio = SOC drained slower than out_w would imply
+        # (sensor noise / pack-balancing artifact). Clamp to 0.
+        if pct < 0:
+            pct = 0.0
+        pcts.append(pct)
 
-    if len(gaps) < min_windows:
-        return float(default), len(gaps)
-    gaps.sort()
-    median = gaps[len(gaps) // 2]
-    # Sanity-clamp: anything above ~2kW is almost certainly a measurement
-    # error (a pack failing, or a clock skew between SOC samples).
-    if median > 2000.0:
-        return float(default), len(gaps)
-    return float(median), len(gaps)
+    if len(pcts) < min_windows:
+        return float(default), len(pcts)
+    pcts.sort()
+    median = pcts[len(pcts) // 2]
+    # Sanity-clamp: above 50% loss is measurement error.
+    if median > 0.50:
+        return float(default), len(pcts)
+    return float(median), len(pcts)
+
+
+# Back-compat alias for callers / tests that import the old name.
+# Same data, just returns a watt-equivalent at a typical 500W load.
+def fit_idle_overhead_w(
+    energy_history: list[dict[str, Any]],
+    capacity_wh: int,
+    *,
+    default: float = DEFAULT_IDLE_OVERHEAD_W,
+    min_windows: int = 5,
+) -> tuple[float, int]:
+    """Deprecated: use fit_inverter_overhead_pct. Kept so older imports
+    don't break. Returns the proportional fit converted to watts at a
+    typical 500W load."""
+    pct, n = fit_inverter_overhead_pct(
+        energy_history, capacity_wh, min_windows=min_windows,
+    )
+    return pct * 500.0, n
 
 
 # ---------- observed AC charging rate ----------
@@ -587,27 +612,34 @@ def expected_load_w(
     ts: int,
     *,
     idle_overhead_w: float | None = None,
+    inverter_overhead_pct: float | None = None,
 ) -> float:
     """Look up the expected load for a forecast hour.
 
-    Returns out_w_bucket + idle_overhead_w. The overhead term covers the
-    inverter idle / DC-bus / balancing draw that doesn't show up in the
-    `op` (AC output) field but does drain the battery. Pass
-    `idle_overhead_w` from `fit_idle_overhead_w()` so it reflects the
-    user's actual setup; `None` falls back to the population default
-    `IDLE_OVERHEAD_W`, used during cold start before there's enough
-    history to fit.
+    Returns base_load * (1 + inverter_overhead_pct). The overhead term
+    represents the share of battery throughput that's lost as heat in
+    the inverter's DC→AC conversion (modern LiFePO4 inverters are
+    ~90% efficient → ~10% lost). Scales with load so heavy hours
+    incur more overhead than idle hours — which matches reality
+    better than the old flat-watts model.
+
+    Pass `inverter_overhead_pct` from `fit_inverter_overhead_pct()` so
+    it reflects the user's actual setup; `None` falls back to the
+    population default `INVERTER_OVERHEAD_PCT` (0.10).
+
+    `idle_overhead_w` is the back-compat kwarg. When provided, it's
+    interpreted as additive watts on top of the proportional term —
+    rare, only used by tests that pre-date the proportional model.
 
     Fallback hierarchy when the (hour, weekend) bucket is empty:
       1. Same hour, opposite weekend-flag.
       2. Neighboring hours within ±3, same weekend-flag (preserves day/night).
       3. Neighboring hours within ±3, opposite weekend-flag.
       4. IDLE_LOAD_W (30W) — never the global mean.
-
-    Step 2 is the critical fix: a missing 2am bucket should be guessed
-    from 1am or 3am, NOT from the global daytime-skewed average.
     """
-    overhead = IDLE_OVERHEAD_W if idle_overhead_w is None else float(idle_overhead_w)
+    pct = (INVERTER_OVERHEAD_PCT if inverter_overhead_pct is None
+           else float(inverter_overhead_pct))
+    flat = float(idle_overhead_w or 0.0)
     d = datetime.fromtimestamp(ts)
     h = d.hour
     w = 1 if d.weekday() >= 5 else 0
@@ -631,7 +663,7 @@ def expected_load_w(
                     break
         if base is None:
             base = IDLE_LOAD_W
-    return base + overhead
+    return base * (1.0 + pct) + flat
 
 
 # ---------- simulation ----------
@@ -777,10 +809,13 @@ def build_forecast(
 
     k, n_fit = fit_solar_coefficient(energy_history, weather_hourly)
     profile = fit_load_profile(energy_history, now_ts=now_ts)
-    # Per-device parasitic overhead — fit from the user's own discharge
-    # history rather than a hardcoded constant. Falls back to the
-    # population default during the first ~24h of operation.
-    overhead_w, overhead_n = fit_idle_overhead_w(energy_history, capacity_wh)
+    # Per-device inverter overhead as a percentage of throughput
+    # (modern inverters lose ~10% to heat in DC→AC conversion).
+    # Fit from the user's own discharge history; falls back to 10%
+    # default during the first ~24h of operation.
+    overhead_pct, overhead_n = fit_inverter_overhead_pct(
+        energy_history, capacity_wh,
+    )
     # Per-device charge efficiency, same idea: fit from the ratio of
     # observed SOC gain to reported input_wh on clean charging windows.
     charge_eff, charge_eff_n = fit_charge_efficiency(energy_history, capacity_wh)
@@ -812,7 +847,7 @@ def build_forecast(
         solar_w = max(0.0, k * ghi)
         if solar_cap is not None:
             solar_w = min(solar_w, solar_cap)
-        load_w = expected_load_w(profile, ts, idle_overhead_w=overhead_w)
+        load_w = expected_load_w(profile, ts, inverter_overhead_pct=overhead_pct)
         forecast_hours.append({
             "ts": ts,
             "solar_w": round(solar_w, 1),
@@ -833,10 +868,13 @@ def build_forecast(
         "solar_coefficient": round(k, 4),
         "fit_samples": n_fit,
         "overall_load_w": round(overall_load, 1),
-        # Auto-fitted per-device parasitic. `_n` reports how many clean
-        # discharge windows the fit had to work with — when it's small,
-        # the value is just the population default.
-        "idle_overhead_w": round(overhead_w, 1),
+        # Auto-fitted per-device inverter overhead as a fraction of
+        # throughput. _n reports how many clean discharge windows the
+        # fit used — when small, value is the 10% default.
+        "inverter_overhead_pct": round(overhead_pct, 4),
+        "inverter_overhead_n_windows": overhead_n,
+        # Back-compat: report watt-equivalent at typical 500W load too.
+        "idle_overhead_w": round(overhead_pct * 500.0, 1),
         "idle_overhead_n_windows": overhead_n,
         # Auto-fitted per-device charge efficiency (input_wh → stored_wh
         # ratio). Same n_windows convention as idle_overhead.

@@ -987,17 +987,19 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
 
-    elif key == "idle_overhead_w":
+    elif key == "inverter_overhead_pct":
         try:
             cap = (state.energy.get_capacity_override(device_sn)
                    or _total_capacity_wh(device_sn, None))
-            w, n = forecaster.fit_idle_overhead_w(_cached_history(device_sn), cap)
+            pct, n = forecaster.fit_inverter_overhead_pct(
+                _cached_history(device_sn), cap,
+            )
             source = "fit" if n >= 5 else "default"
             state.energy.set_device_param(
-                device_sn, key, w, source=source, n_samples=n,
+                device_sn, key, pct, source=source, n_samples=n,
                 confidence=("high" if n >= 20 else "medium" if n >= 10 else "low"),
             )
-            return {"value": w, "source": source, "n_samples": n,
+            return {"value": pct, "source": source, "n_samples": n,
                     "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
