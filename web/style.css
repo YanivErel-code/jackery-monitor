@@ -1407,6 +1407,21 @@ main {
 .data-table tr:last-child td { border-bottom: none; }
 
 /* ============== Device tab ============== */
+/* "Unknown model detected" banner — accent-colored card the user sees
+   the first time they connect a Jackery model that isn't in models.json. */
+.unknown-model-banner {
+  border: 1px solid var(--accent);
+  background: linear-gradient(180deg, rgba(74,222,128,.08) 0%, var(--bg-elev) 100%);
+}
+.unknown-model-banner h2 { color: var(--accent); }
+.unknown-model-banner code {
+  background: var(--bg-elev-2);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.unknown-model-banner button + button { margin-left: 8px; }
+
 .device-card dl {
   display: grid;
   grid-template-columns: 180px 1fr;

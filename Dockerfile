@@ -29,10 +29,11 @@ RUN pip install -r requirements.txt
 # the image (we got bitten once by forgetting to add settings.py here).
 COPY *.py ./
 COPY web ./web
-# Static reference data shipped with the image — currently the
-# model_code → battery capacity catalog. Loaded by forecaster.py at
-# import time. Keep separate from /data (which is a runtime volume).
-COPY models.json ./
+# Static reference data shipped with the image — model_code → capacity
+# catalog (forecaster.py) and the AI advisor's allowed-tunables list
+# (claude_advisor.py). Both loaded at import time. Keep separate from
+# /data (which is a runtime volume).
+COPY models.json tunables.json ./
 
 # Persistent data lives here (energy.db, jackery-creds.json on Linux hosts).
 RUN mkdir -p /data

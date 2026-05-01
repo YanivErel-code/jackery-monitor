@@ -417,7 +417,97 @@ async function loadDeviceCapacity() {
   } catch (e) {
     console.warn('capacity load failed', e);
   }
+  // Refresh the unknown-model banner alongside the capacity widget.
+  refreshUnknownModelBanner();
 }
+
+// Banner state — sessionStorage so a dismiss survives tab switches but
+// a reload still re-flags the unknown model (intentional; we want it
+// visible until the user actually fixes it).
+const UNKNOWN_MODEL_DISMISS_KEY = 'jackery-umb-dismissed';
+
+async function refreshUnknownModelBanner() {
+  const banner = $('unknown-model-banner');
+  if (!banner) return;
+  if (sessionStorage.getItem(UNKNOWN_MODEL_DISMISS_KEY) === '1') {
+    banner.hidden = true;
+    return;
+  }
+  try {
+    const r = await fetch('/api/devices');
+    if (!r.ok) { banner.hidden = true; return; }
+    const j = await r.json();
+    const active = activeJackeryDevice();
+    const sn = active?.device_sn;
+    const dev = (j.devices || []).find(d => d.device_sn === sn) || (j.devices || [])[0];
+    if (!dev || dev.model_recognized !== false) {
+      banner.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    $('umb-name').textContent = dev.model_name || dev.name || 'this device';
+    $('umb-code').textContent = String(dev.model_code ?? '?');
+    $('umb-fallback').textContent = `${dev.inferred_capacity_wh ?? '—'} Wh`;
+    // Stash the data the Copy button will use.
+    banner.dataset.modelCode = String(dev.model_code ?? '');
+    banner.dataset.modelName = dev.model_name || '';
+    banner.dataset.deviceSn  = dev.device_sn || '';
+    void safe;  // reserved for if we add user-rendered fields later
+  } catch (e) {
+    console.warn('unknown-model banner refresh failed', e);
+    banner.hidden = true;
+  }
+}
+
+document.getElementById('umb-dismiss')?.addEventListener('click', () => {
+  sessionStorage.setItem(UNKNOWN_MODEL_DISMISS_KEY, '1');
+  const banner = $('unknown-model-banner');
+  if (banner) banner.hidden = true;
+});
+
+document.getElementById('umb-copy')?.addEventListener('click', async () => {
+  const banner = $('unknown-model-banner');
+  if (!banner) return;
+  const mc = banner.dataset.modelCode || '?';
+  const mn = banner.dataset.modelName || 'Unknown model';
+  const inp = $('capacity-input');
+  const guessedCap = inp?.value?.trim() || '<TODO: look up your model\'s nominal Wh>';
+  const today = new Date().toISOString().slice(0, 10);
+  const snippet = [
+    `// Add this entry to models.json under "models":`,
+    `"${mc}": {`,
+    `  "capacity_wh": ${guessedCap},`,
+    `  "name": "${mn}",`,
+    `  "comment": "Auto-detected on ${today} via Device tab"`,
+    `}`,
+  ].join('\n');
+  const status = $('capacity-status');
+  try {
+    await navigator.clipboard.writeText(snippet);
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'PR snippet copied — paste into models.json and open a PR.';
+      setTimeout(() => { status.hidden = true; }, 5000);
+    }
+  } catch {
+    // Clipboard blocked — drop into a textarea fallback.
+    const ta = document.createElement('textarea');
+    ta.value = snippet;
+    ta.style.cssText = 'position:fixed;top:10vh;left:5vw;width:90vw;height:30vh;z-index:9999;font-family:monospace;font-size:13px';
+    document.body.appendChild(ta);
+    ta.select();
+    setTimeout(() => {
+      const dismiss = (ev) => {
+        if (ev.target === ta) return;
+        ta.remove();
+        document.removeEventListener('click', dismiss, true);
+      };
+      document.addEventListener('click', dismiss, true);
+    }, 50);
+  }
+});
 
 document.getElementById('capacity-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();

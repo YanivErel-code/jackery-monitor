@@ -78,22 +78,39 @@ MAX_TURNS = int(os.environ.get("JACKERY_ADVISOR_MAX_TURNS", "20"))
 # windows or coarser bucket_s.
 MAX_QUERY_ROWS = 500
 
-# Whitelist of parameters Claude is allowed to propose changes to.
-# Anything outside this falls back to an anomaly callout (no auto-apply).
-ALLOWED_TARGETS: dict[str, dict[str, Any]] = {
-    "smart_charge.max_charge_w": {
-        "scope": "device",
-        "min": 50, "max": 3000,
-    },
-    "smart_charge.target_sunrise_soc_pct": {
-        "scope": "device",
-        "min": 15, "max": 60,
-    },
-    "smart_charge.max_on_duration_minutes": {
-        "scope": "device",
-        "min": 30, "max": 720,
-    },
-}
+# Whitelist of parameters Claude is allowed to propose changes to,
+# loaded from `tunables.json` at module import. Keeping the catalog in
+# JSON rather than inline lets community contributors add new tunables
+# without touching the advisor logic. Anything outside this list falls
+# back to an anomaly callout (no auto-apply ever).
+def _load_tunables_catalog() -> dict[str, dict[str, Any]]:
+    import json
+    from pathlib import Path
+    path = Path(__file__).parent / "tunables.json"
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        log.warning("tunables.json unreadable (%s); advisor whitelist is empty", e)
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in (data.get("targets") or {}).items():
+        if not isinstance(v, dict):
+            continue
+        # Required: scope, min, max. Optional: comment.
+        try:
+            out[str(k)] = {
+                "scope": str(v["scope"]),
+                "min": float(v["min"]),
+                "max": float(v["max"]),
+                "comment": str(v.get("comment") or ""),
+            }
+        except (KeyError, TypeError, ValueError) as ee:
+            log.warning("tunables.json: skipping bad target %r (%s)", k, ee)
+    return out
+
+
+ALLOWED_TARGETS: dict[str, dict[str, Any]] = _load_tunables_catalog()
 
 
 def _resolve_key() -> str | None:

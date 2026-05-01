@@ -1,0 +1,24 @@
+{
+  "_comment": "Whitelist of parameters the AI advisor is allowed to propose changes to. Anything outside this list falls back to an anomaly callout — never auto-applied. Loaded by claude_advisor.py at startup. PR additions here when you want to expose a new tunable to Claude.",
+  "_format": "Each entry has scope (device|global), min, max (inclusive bounds enforced server-side at apply time), and an optional comment for human reviewers + the advisor's prompt context.",
+  "targets": {
+    "smart_charge.max_charge_w": {
+      "scope": "device",
+      "min": 50,
+      "max": 3000,
+      "comment": "Maximum AC charge wattage the smart-charge controller will pull from the grid via the Kasa plug."
+    },
+    "smart_charge.target_sunrise_soc_pct": {
+      "scope": "device",
+      "min": 15,
+      "max": 60,
+      "comment": "Target SOC at sunrise — controller grid-charges overnight to hit this."
+    },
+    "smart_charge.max_on_duration_minutes": {
+      "scope": "device",
+      "min": 30,
+      "max": 720,
+      "comment": "Hard cap on a single AC charging window so a forecasting bug can't lock the plug on indefinitely."
+    }
+  }
+}

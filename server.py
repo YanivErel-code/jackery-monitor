@@ -211,6 +211,11 @@ async def poll_loop() -> None:
                 state.last_status = status_dict
                 state.last_update_ts = ts
 
+                # Log unknown model_codes ONCE per process so server logs
+                # become a contribution channel — paste the warning into
+                # a PR adding the model to models.json.
+                _flag_unknown_models(cloud_meta)
+
                 # Persist the device-reported UTC offset (`uo` field) so
                 # _start_of_day buckets "today" at the user's local
                 # midnight even when no location/Open-Meteo is configured.
@@ -625,6 +630,41 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
         predicted_sunrise_soc_pct=pred_sunrise,
         actual_sunrise_soc_pct=actual_sunrise,
     )
+
+
+_unknown_models_warned: set[int] = set()
+
+
+def _flag_unknown_models(cloud_meta: dict | None) -> None:
+    """Loudly log devices whose model_code isn't in the catalog. Once
+    per process per model_code so the warning stays useful instead of
+    spamming. The Device tab also surfaces this in the UI."""
+    if not isinstance(cloud_meta, dict):
+        return
+    for d in cloud_meta.get("devices") or []:
+        if not isinstance(d, dict):
+            continue
+        mc = d.get("model_code")
+        if mc is None:
+            continue
+        try:
+            mc_int = int(mc)
+        except (TypeError, ValueError):
+            continue
+        if mc_int in forecaster.BATTERY_CAPACITY_WH:
+            continue
+        if mc_int in _unknown_models_warned:
+            continue
+        _unknown_models_warned.add(mc_int)
+        log.warning(
+            "Unknown Jackery model_code=%s (model_name=%r, name=%r, "
+            "device_sn=%s); using fallback capacity %d Wh. Consider "
+            "adding it to models.json — see README's 'Adding a new "
+            "Jackery model' section.",
+            mc_int, d.get("model_name"), d.get("name"),
+            d.get("device_sn") or "?",
+            forecaster.DEFAULT_BATTERY_CAPACITY_WH,
+        )
 
 
 def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
@@ -1514,10 +1554,32 @@ async def api_reconnect():
 
 @app.get("/api/devices")
 def api_devices():
-    """Return the list of devices on the user's Jackery account."""
+    """Return the list of devices on the user's Jackery account.
+
+    Each device is annotated with `model_recognized` (whether its
+    model_code is in the bundled `models.json` catalog) and
+    `inferred_capacity_wh` (the capacity we'd use if no per-device
+    override exists). The Device tab uses these to show a "help us add
+    this model" banner when a new device shows up that isn't yet in the
+    catalog — see README's "Adding a new Jackery model" for the PR
+    workflow."""
     cloud_meta = state.last_cloud_meta or {}
+    raw = cloud_meta.get("devices") or []
+    annotated = []
+    for d in raw:
+        if not isinstance(d, dict):
+            annotated.append(d)
+            continue
+        mc = d.get("model_code")
+        recognized = (mc is not None
+                      and int(mc) in forecaster.BATTERY_CAPACITY_WH)
+        annotated.append({
+            **d,
+            "model_recognized": recognized,
+            "inferred_capacity_wh": forecaster.battery_capacity_wh(mc),
+        })
     return {
-        "devices": cloud_meta.get("devices") or [],
+        "devices": annotated,
         "selected_device_id": cloud_meta.get("selected_device_id"),
     }
 
