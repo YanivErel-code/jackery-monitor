@@ -599,6 +599,12 @@ main {
 .pack-flow.flow-out  { color: #ef4444; }
 .pack-flow.flow-idle { color: var(--text-mute); }
 .pack-temp { color: var(--text-mute); font-size: 12px; text-align: right; }
+.pack-temp-fault {
+  color: #f59e0b;
+  font-weight: 600;
+  cursor: help;
+  border-bottom: 1px dotted currentColor;
+}
 .pack-sn { color: var(--text-mute); font-size: 11px; text-align: right; }
 
 /* Smart-charge: current plan card + decision history. Compact, mono

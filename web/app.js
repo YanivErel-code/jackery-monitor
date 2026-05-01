@@ -3153,7 +3153,7 @@ function renderBatteryPacks() {
       soc: mainPct,
       flow: '',
       flowClass: 'flow-idle',
-      temp: mainTempC != null ? formatTemp(mainTempC) : '',
+      temp: formatPackTempHtml(mainTempC, 'main'),
       label: 'Main',
       snTitle: 'Host unit (cloud-reported SOC)',
       isMain: true,
@@ -3168,7 +3168,7 @@ function renderBatteryPacks() {
       soc: p.rb,
       flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
       flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
-      temp: (p.it != null && p.it !== 999) ? formatTemp(p.it) : '',
+      temp: formatPackTempHtml(p.it, sn.slice(-6) || sn),
       label: `…${sn.slice(-6)}`,
       snTitle: sn,
       isMain: false,
@@ -3415,6 +3415,48 @@ function formatTemp(celsius, decimals = 0) {
     return `${f.toFixed(decimals)}°F`;
   }
   return `${c.toFixed(decimals)}°C`;
+}
+
+// Plausible Li-ion operating range. Anything outside is almost
+// certainly a fault code or unit-confused register from the BMS — the
+// AI advisor's 2026-05-01 review caught two packs reporting 135°C
+// while others read 76-79°C, which is thermodynamically impossible
+// without thermal runaway (and the BMS would have already disconnected
+// the pack at that point). We display these as "⚠?" with a tooltip
+// rather than the raw number, so they don't mask real thermal issues.
+const PACK_TEMP_PLAUSIBLE_C = { min: -20, max: 80 };
+
+// Track which (pack_sn, value) combos we've already warned about so
+// the console doesn't spam every render tick.
+const _packTempWarned = new Set();
+
+// Returns an HTML snippet for the pack-temp cell. Out-of-range values
+// render as a "?" with a tooltip + console warning; in-range values
+// pass through formatTemp so the C/F preference applies.
+function formatPackTempHtml(celsius, packSn) {
+  if (celsius == null || celsius === 999 || Number.isNaN(Number(celsius))) {
+    return '';  // unknown / not-applicable sentinel — empty cell
+  }
+  const c = Number(celsius);
+  if (c < PACK_TEMP_PLAUSIBLE_C.min || c > PACK_TEMP_PLAUSIBLE_C.max) {
+    const key = `${packSn || 'main'}:${c}`;
+    if (!_packTempWarned.has(key)) {
+      _packTempWarned.add(key);
+      console.warn(
+        `pack temp out of range — pack ${packSn || 'main'}: ${c}°C ` +
+        `(plausible band ${PACK_TEMP_PLAUSIBLE_C.min}–${PACK_TEMP_PLAUSIBLE_C.max}°C). ` +
+        `Likely a BMS fault code or units mismatch on this pack's firmware.`
+      );
+    }
+    const safe = String(c).replace(/[<>&"]/g, (ch) =>
+      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[ch]));
+    const title = `Reported value ${safe}°C is outside the plausible Li-ion ` +
+                  `operating range (${PACK_TEMP_PLAUSIBLE_C.min} to ${PACK_TEMP_PLAUSIBLE_C.max}°C). ` +
+                  `Probably a BMS fault code or sensor glitch on this pack — ` +
+                  `not a real temperature reading.`;
+    return `<span class="pack-temp-fault" title="${title}">⚠?</span>`;
+  }
+  return formatTemp(c);
 }
 
 document.addEventListener('click', (e) => {
