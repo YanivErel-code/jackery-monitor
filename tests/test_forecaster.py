@@ -411,3 +411,117 @@ def test_build_forecast_blocks_when_history_too_short():
     r = res["readiness"]
     assert r["reason"] == "calibrating"
     assert r["have_hours"] < r["needed_hours"]
+
+
+# ---------- fit_charge_efficiency ----------
+
+def _charge_window(ts0: int, soc0: int, soc1: int, input_wh: int):
+    """Two adjacent hourly buckets describing a clean charging window."""
+    return [
+        {"ts": ts0, "battery_pct": soc0, "input_wh": input_wh,
+         "solar_wh": 0, "ac_input_wh": 0, "output_wh": 0},
+        {"ts": ts0 + 3600, "battery_pct": soc1, "input_wh": input_wh,
+         "solar_wh": 0, "ac_input_wh": 0, "output_wh": 0},
+    ]
+
+
+def test_charge_efficiency_default_when_no_data():
+    eff, n = forecaster.fit_charge_efficiency([], capacity_wh=30000)
+    assert eff == forecaster.DEFAULT_CHARGE_EFFICIENCY
+    assert n == 0
+
+
+def test_charge_efficiency_recovers_known_value():
+    # 30000 Wh pack. Charge 1pp/hour = 300 Wh stored. With 333 Wh of
+    # input that's an efficiency of 300/333 ≈ 0.90.
+    history = []
+    base = 1_700_000_000
+    for i in range(8):
+        history.extend(_charge_window(base + i * 3600 * 2,
+                                      50 + i, 51 + i, input_wh=333))
+    eff, n = forecaster.fit_charge_efficiency(history, capacity_wh=30000)
+    assert n >= 5
+    assert 0.85 <= eff <= 0.95, f"got {eff}, expected ~0.90"
+
+
+def test_charge_efficiency_skips_top_balance_regime():
+    # Above 95% SOC, charge tapers — using these windows would
+    # under-estimate efficiency. Mix some clean windows (gives 0.90)
+    # with some top-balance windows (would falsely indicate 0.30) and
+    # verify the fit stays near 0.90.
+    history = []
+    base = 1_700_000_000
+    # Clean windows: 50→51%, input 333Wh → 0.90 efficiency
+    for i in range(6):
+        history.extend(_charge_window(base + i * 3600 * 3,
+                                      50 + i, 51 + i, input_wh=333))
+    # Top-balance: 96→97% but huge input (BMS throttling) → bogus 0.30
+    for i in range(6):
+        ts = base + (100 + i) * 3600
+        history.extend(_charge_window(ts, 96, 97, input_wh=1000))
+    eff, _n = forecaster.fit_charge_efficiency(history, capacity_wh=30000)
+    assert 0.85 <= eff <= 0.95, f"got {eff}, expected ~0.90"
+
+
+def test_charge_efficiency_clamps_implausible_values():
+    # If the fit lands outside [0.50, 0.99] it's almost certainly bad
+    # data — fall back to the default rather than feeding garbage into
+    # the simulator.
+    history = []
+    base = 1_700_000_000
+    for i in range(8):
+        # Reports 100 Wh input but SOC jumped 5pp = 1500 Wh "stored" —
+        # implies efficiency 15.0 (impossible).
+        history.extend(_charge_window(base + i * 3600 * 2,
+                                      50 + i * 5, 55 + i * 5, input_wh=100))
+    eff, n = forecaster.fit_charge_efficiency(history, capacity_wh=30000)
+    assert eff == forecaster.DEFAULT_CHARGE_EFFICIENCY
+    assert n >= 5  # we DID find windows, just rejected the median
+
+
+def test_charge_efficiency_used_by_build_forecast():
+    # End-to-end: a history with a clear ~0.85 efficiency makes
+    # build_forecast surface charge_efficiency near that value. Need
+    # both charging windows (for the efficiency fit) AND discharge
+    # windows (for the readiness gate's idle_overhead requirement).
+    now = int(time.time())
+    history = []
+    # Charging windows: 8 of them across 16h. 1pp gain → 300Wh stored,
+    # input 353Wh → 0.85 efficiency.
+    for i in range(8):
+        ts = now - 30 * 3600 + i * 3600 * 2
+        history.append({"ts": ts, "battery_pct": 50 + i,
+                        "input_wh": 353, "input_w": 353,
+                        "solar_w": 0, "solar_wh": 0,
+                        "output_w": 0, "output_wh": 0,
+                        "ac_input_wh": 0, "ac_input_w": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 51 + i,
+                        "input_wh": 353, "input_w": 353,
+                        "solar_w": 0, "solar_wh": 0,
+                        "output_w": 0, "output_wh": 0,
+                        "ac_input_wh": 0, "ac_input_w": 0})
+    # Discharge windows: 8 more across 16h to satisfy the readiness gate.
+    for i in range(8):
+        ts = now - 14 * 3600 + i * 3600 * 2
+        history.append({"ts": ts, "battery_pct": 70 - i,
+                        "input_wh": 0, "input_w": 0,
+                        "solar_w": 0, "solar_wh": 0,
+                        "output_w": 100, "output_wh": 100,
+                        "ac_input_wh": 0, "ac_input_w": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 69 - i,
+                        "input_wh": 0, "input_w": 0,
+                        "solar_w": 0, "solar_wh": 0,
+                        "output_w": 100, "output_wh": 100,
+                        "ac_input_wh": 0, "ac_input_w": 0})
+    weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
+               for i in range(48)]
+    res = forecaster.build_forecast(
+        energy_history=history, weather_hourly=weather,
+        starting_soc_pct=50.0, capacity_wh=30000, now_ts=now,
+        horizon_hours=24,
+    )
+    assert res["ready"] is True
+    assert "charge_efficiency" in res
+    assert "charge_efficiency_n_windows" in res
+    assert res["charge_efficiency_n_windows"] >= 5
+    assert 0.80 <= res["charge_efficiency"] <= 0.90

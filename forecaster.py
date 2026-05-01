@@ -68,10 +68,15 @@ MIN_FIT_SAMPLES = 2
 # replace this within a day or so of running.
 DEFAULT_SOLAR_COEFF = 0.32
 
-# Charge efficiency: not all solar Wh ends up as stored Wh. LiFePO4 chemistry
-# + inverter/charger losses typically combine to ~5-10%. 0.90 is the
-# conservative end so the simulator doesn't overpromise SOC headroom.
-CHARGE_EFFICIENCY = 0.90
+# Default charge efficiency: not all solar Wh ends up as stored Wh.
+# LiFePO4 chemistry + inverter/charger losses typically combine to
+# ~5-10%. The default below is a conservative cold-start fallback.
+# `fit_charge_efficiency()` recovers the per-user value from observed
+# input_wh vs SOC gain on clean charging windows; that fitted value
+# is what `simulate_soc()` actually uses on each forecast.
+DEFAULT_CHARGE_EFFICIENCY = 0.90
+# Back-compat alias — older tests / external imports keep working.
+CHARGE_EFFICIENCY = DEFAULT_CHARGE_EFFICIENCY
 
 # Solar overshoot guard: cap forecast solar at this multiple of the device's
 # recent (last 48h) observed peak. Prevents an overfit regression from
@@ -278,6 +283,81 @@ def fit_idle_overhead_w(
     return float(median), len(gaps)
 
 
+# ---------- charge efficiency ----------
+def fit_charge_efficiency(
+    energy_history: list[dict[str, Any]],
+    capacity_wh: int,
+    *,
+    default: float = DEFAULT_CHARGE_EFFICIENCY,
+    min_windows: int = 5,
+) -> tuple[float, int]:
+    """Fit the per-device charge efficiency by reconciling input_wh
+    against the SOC gain it produced on clean charging windows.
+
+    Charge efficiency varies between users: different inverter model,
+    different battery chemistry/age, different ambient temperature all
+    move it. Hard-coding 0.90 is a guess that's wrong for everyone
+    except whoever set it.
+
+    Algorithm: walk adjacent hourly buckets and keep windows where:
+      - SOC actually rose (≥1pp — sensor resolution),
+      - SOC at start < 95% (avoid the top-balance regime where charge
+        tapers and the BMS reports input that isn't really stored),
+      - SOC at end ≤ 99% (no clipping at the 100% ceiling),
+      - input_wh ≥ 100Wh in the window (enough signal vs noise),
+      - dt 1-6h (longer than that mixes regimes).
+
+    For each qualifying window:
+      stored_wh = ΔSOC% * capacity_wh / 100
+      efficiency = stored_wh / input_wh
+
+    Take the median across windows for robustness. Clamp to a sane
+    physical range [0.50, 0.99] — anything outside that band is almost
+    certainly bad data (sensor glitch or mis-attributed energy flow).
+    Falls back to `default` when too few windows are available.
+
+    Returns (efficiency, n_windows_used).
+    """
+    MIN_INPUT_WH = 100.0
+    MIN_SOC_GAIN_PCT = 1.0
+    MAX_START_SOC_PCT = 95.0   # below the top-balance taper regime
+    MAX_END_SOC_PCT = 99.0     # below the 100% ceiling clip
+
+    rows = sorted(
+        (r for r in (energy_history or []) if r.get("ts") is not None),
+        key=lambda r: r["ts"],
+    )
+    effs: list[float] = []
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
+        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        if soc_a is None or soc_b is None:
+            continue
+        soc_gain = soc_b - soc_a
+        if soc_gain < MIN_SOC_GAIN_PCT:
+            continue
+        if soc_a > MAX_START_SOC_PCT or soc_b > MAX_END_SOC_PCT:
+            continue
+        input_wh = a.get("input_wh") or 0
+        if input_wh < MIN_INPUT_WH:
+            continue
+        dt_h = (b["ts"] - a["ts"]) / 3600.0
+        if dt_h <= 0 or dt_h > 6.0:
+            continue
+        stored_wh = soc_gain * capacity_wh / 100.0
+        eff = stored_wh / input_wh
+        effs.append(eff)
+
+    if len(effs) < min_windows:
+        return float(default), len(effs)
+    effs.sort()
+    median = effs[len(effs) // 2]
+    # Clamp to physically plausible range — outside this band is bad data.
+    if median < 0.50 or median > 0.99:
+        return float(default), len(effs)
+    return float(median), len(effs)
+
+
 # ---------- load model ----------
 def fit_load_profile(
     energy_history: list[dict[str, Any]],
@@ -421,13 +501,15 @@ def simulate_soc(
     forecast_hours: list[dict[str, Any]],
     *,
     ac_charge_floor_pct: float | None = None,
+    charge_efficiency: float | None = None,
 ) -> list[dict[str, Any]]:
     """Walk SOC forward through the forecast window.
 
     `forecast_hours` is a list of {ts, solar_w, load_w, cloud_cover_pct}.
     Output adds `predicted_soc` (clamped 0-100) per hour. Net positive
-    inflow has CHARGE_EFFICIENCY applied; the simulator was previously
-    over-predicting SOC by ignoring real-world charge losses.
+    inflow is multiplied by `charge_efficiency` (None falls back to the
+    population default `CHARGE_EFFICIENCY = 0.90`); pass the fitted
+    per-user value from `fit_charge_efficiency()` for accuracy.
 
     `ac_charge_floor_pct`: when set, simulate the user's smart-charge /
     Kasa-driven AC top-up — if SOC would drop below this floor in any
@@ -438,6 +520,7 @@ def simulate_soc(
     and produced a persistent negative bias at short lead times. Pass
     None to keep the original "solar-only" behavior.
     """
+    eff = CHARGE_EFFICIENCY if charge_efficiency is None else float(charge_efficiency)
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
     floor = (max(0.0, min(100.0, float(ac_charge_floor_pct)))
              if ac_charge_floor_pct is not None else None)
@@ -450,7 +533,7 @@ def simulate_soc(
         # losses on the load side.
         net = solar - load
         if net > 0:
-            net *= CHARGE_EFFICIENCY
+            net *= eff
         soc += net / capacity_wh * 100.0
         soc = max(0.0, min(100.0, soc))
         # Smart-charge floor — the user has Kasa-driven grid top-up that
@@ -558,6 +641,9 @@ def build_forecast(
     # history rather than a hardcoded constant. Falls back to the
     # population default during the first ~24h of operation.
     overhead_w, overhead_n = fit_idle_overhead_w(energy_history, capacity_wh)
+    # Per-device charge efficiency, same idea: fit from the ratio of
+    # observed SOC gain to reported input_wh on clean charging windows.
+    charge_eff, charge_eff_n = fit_charge_efficiency(energy_history, capacity_wh)
     out_vals = [r["output_w"] for r in energy_history if r.get("output_w") is not None]
     # Reported as a debug stat only — NOT used as a fallback for missing
     # hours. Mixing daytime samples into nighttime forecasts was the bug.
@@ -597,6 +683,7 @@ def build_forecast(
     simulated = simulate_soc(
         starting_soc_pct, capacity_wh, forecast_hours,
         ac_charge_floor_pct=ac_charge_floor_pct,
+        charge_efficiency=charge_eff,
     )
     return {
         "ready": True,
@@ -611,5 +698,9 @@ def build_forecast(
         # the value is just the population default.
         "idle_overhead_w": round(overhead_w, 1),
         "idle_overhead_n_windows": overhead_n,
+        # Auto-fitted per-device charge efficiency (input_wh → stored_wh
+        # ratio). Same n_windows convention as idle_overhead.
+        "charge_efficiency": round(charge_eff, 3),
+        "charge_efficiency_n_windows": charge_eff_n,
         "forecast": simulated,
     }
