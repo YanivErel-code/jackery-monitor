@@ -936,6 +936,26 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
             log.debug("resolve %s/%s catalog failed: %s", device_sn, key, e)
 
     elif key == "max_charge_w":
+        # Step 0: an explicit value in smart_charge config (set by the
+        # user via the Smart-charge form on the Automation tab) wins
+        # over the auto-fit. The Device-tab `device_params` 'user'
+        # override is already handled by the early-return at the top
+        # of this function — this is the SECOND user channel.
+        try:
+            if smart_charge.has_user_set_field(device_sn, "max_charge_w"):
+                cfg = smart_charge.get_config(device_sn)
+                cfg_w = float(cfg.get("max_charge_w") or 0)
+                if cfg_w > 0:
+                    state.energy.set_device_param(
+                        device_sn, key, cfg_w, source="user",
+                        note="from smart_charge config (Automation tab)",
+                    )
+                    return {"value": cfg_w, "source": "user",
+                            "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s smart_charge lookup failed: %s",
+                      device_sn, key, e)
+
         try:
             tz_off = int(device_location.get_tz_offset() or 0)
             wx = state.energy.list_weather_observations(

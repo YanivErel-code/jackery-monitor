@@ -119,6 +119,27 @@ def _is_per_device_shape(data: dict[str, Any]) -> bool:
     return isinstance(data, dict) and isinstance(data.get("by_device"), dict)
 
 
+def has_user_set_field(device_sn: str | None, field: str) -> bool:
+    """Return True iff `field` has been explicitly persisted on disk
+    for `device_sn` (vs the in-memory default merging through). The
+    device_params resolver uses this to know when the user has
+    expressed a preference via the Smart-charge form, so an auto-fit
+    doesn't silently override it.
+
+    `get_config()` always returns DEFAULT_CONFIG-merged values so it
+    can't be used to distinguish — we have to inspect _load_raw."""
+    if not device_sn or not field:
+        return False
+    with _config_lock:
+        data = _load_raw()
+    if _is_per_device_shape(data):
+        per = data.get("by_device", {}).get(device_sn) or {}
+        return field in per
+    # Legacy single-config — treat as the active device's, if any field
+    # is present we say yes.
+    return field in data
+
+
 def get_config(device_sn: str | None = None) -> dict[str, Any]:
     """Read this device's config. With no device_sn, returns the legacy
     single-config shape — for back-compat with callers that haven't been
