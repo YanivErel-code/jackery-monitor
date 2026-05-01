@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -664,12 +665,138 @@ def _sanitize_pack_telemetry(packs: list[dict]) -> list[dict]:
 
 
 _unknown_models_warned: set[int] = set()
+# In-flight + completed auto-probes, keyed by device_sn. Each value
+# carries the raw probe responses + the extracted capacity candidates
+# so the Device tab can render a "we found this in the cloud — use it?"
+# prompt. Lives in process memory; rebuilds on restart by re-probing
+# any unknown devices we still see.
+_auto_probe_results: dict[str, dict[str, Any]] = {}
+_auto_probe_in_flight: set[str] = set()
+
+
+# Plausible Wh range for any "capacity-shaped" number we find. Below
+# the floor it's probably a setting in some other unit (Ah, V); above
+# the ceiling it's probably a counter or a timestamp leaked through.
+_PROBE_WH_MIN = 500.0
+_PROBE_WH_MAX = 200_000.0
+# Keys whose name suggests battery capacity. Case-insensitive substring.
+_PROBE_CAPACITY_KEY_RE = re.compile(
+    r"capacity|battery_?wh|cell_?wh|nominal_?wh|rated_?wh", re.IGNORECASE,
+)
+_PROBE_KWH_KEY_RE = re.compile(r"kwh|kw_?h", re.IGNORECASE)
+
+
+def _extract_capacity_candidates(probe_results: dict | None) -> list[dict]:
+    """Walk a probe-endpoints response tree and find numeric values
+    that look like a battery capacity. Returns a list of candidate
+    dicts {endpoint, key_path, raw_value, capacity_wh, units}, sorted
+    by descending plausibility (currently: prefer 5040, 2042, etc. —
+    "round" Wh figures Jackery uses)."""
+    if not isinstance(probe_results, dict):
+        return []
+    candidates: list[dict] = []
+
+    def _walk(obj: Any, endpoint: str, path: str) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                _walk(v, endpoint, f"{path}.{k}" if path else k)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                _walk(v, endpoint, f"{path}[{i}]")
+        elif isinstance(obj, (int, float)) and obj > 0:
+            leaf = path.rsplit(".", 1)[-1].split("[")[0]
+            if not _PROBE_CAPACITY_KEY_RE.search(leaf):
+                return
+            wh: float | None = None
+            units = "wh"
+            if _PROBE_KWH_KEY_RE.search(leaf) and 0.5 <= obj <= 200:
+                wh = float(obj) * 1000.0
+                units = "kwh"
+            elif _PROBE_WH_MIN <= obj <= _PROBE_WH_MAX:
+                wh = float(obj)
+            if wh is not None:
+                candidates.append({
+                    "endpoint": endpoint,
+                    "key_path": path,
+                    "raw_value": obj,
+                    "capacity_wh": wh,
+                    "units": units,
+                })
+
+    for endpoint, response in probe_results.items():
+        if isinstance(response, dict):
+            _walk(response, endpoint, "")
+
+    # De-duplicate identical (endpoint, value) pairs — the same number
+    # often surfaces multiple times in nested structures.
+    seen: set[tuple[str, float]] = set()
+    deduped = []
+    for c in candidates:
+        key = (c["endpoint"], c["capacity_wh"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+    return deduped
+
+
+async def _auto_probe_device(device_sn: str, device_id: str,
+                              model_code: int, model_name: str) -> None:
+    """Background task: probe the cloud for an unknown device,
+    extract capacity candidates, and stash results in state for the
+    Device tab to render. Idempotent per device_sn so a re-trigger
+    while a probe is in flight is a no-op."""
+    if not device_sn or device_sn in _auto_probe_in_flight:
+        return
+    _auto_probe_in_flight.add(device_sn)
+    try:
+        rpc = getattr(state.client, "_rpc", None)
+        if rpc is None:
+            log.debug("auto-probe skipped: bridge RPC unavailable")
+            return
+        log.info("Auto-probing cloud for unknown model_code=%s "
+                 "(device_sn=%s, name=%r) — looking for capacity hints…",
+                 model_code, device_sn, model_name)
+        try:
+            result = await asyncio.wait_for(
+                rpc("cloud_probe", device_id=device_id), timeout=30.0,
+            )
+        except (TimeoutError, Exception) as e:
+            log.warning("auto-probe failed for device_sn=%s: %s", device_sn, e)
+            _auto_probe_results[device_sn] = {
+                "device_sn": device_sn, "model_code": model_code,
+                "model_name": model_name, "device_id": device_id,
+                "ts": time.time(), "error": str(e)[:200],
+                "candidates": [], "raw": {},
+            }
+            return
+        raw = (result or {}).get("results") or {}
+        candidates = _extract_capacity_candidates(raw)
+        _auto_probe_results[device_sn] = {
+            "device_sn": device_sn, "model_code": model_code,
+            "model_name": model_name, "device_id": device_id,
+            "ts": time.time(), "error": None,
+            "candidates": candidates, "raw": raw,
+        }
+        if candidates:
+            log.info("Auto-probe found %d capacity candidate(s) for "
+                     "device_sn=%s: %s", len(candidates), device_sn,
+                     [(c["endpoint"], c["key_path"], c["capacity_wh"])
+                      for c in candidates[:5]])
+        else:
+            log.info("Auto-probe found no capacity candidates for "
+                     "device_sn=%s; user will need to set a per-device "
+                     "override or PR models.json. Probed endpoints: %s",
+                     device_sn, list(raw.keys()))
+    finally:
+        _auto_probe_in_flight.discard(device_sn)
 
 
 def _flag_unknown_models(cloud_meta: dict | None) -> None:
     """Loudly log devices whose model_code isn't in the catalog. Once
     per process per model_code so the warning stays useful instead of
-    spamming. The Device tab also surfaces this in the UI."""
+    spamming. Also kicks off a background auto-probe of the cloud for
+    capacity hints. The Device tab surfaces both in the UI."""
     if not isinstance(cloud_meta, dict):
         return
     for d in cloud_meta.get("devices") or []:
@@ -696,6 +823,13 @@ def _flag_unknown_models(cloud_meta: dict | None) -> None:
             d.get("device_sn") or "?",
             forecaster.DEFAULT_BATTERY_CAPACITY_WH,
         )
+        device_sn = d.get("device_sn") or ""
+        device_id = d.get("device_id") or ""
+        if device_sn and device_id:
+            asyncio.create_task(_auto_probe_device(
+                device_sn, device_id, mc_int,
+                d.get("model_name") or d.get("name") or "",
+            ))
 
 
 def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
@@ -1607,6 +1741,48 @@ async def api_reconnect():
     state.device = None
     ok = await connect_device()
     return {"ok": ok, "error": state.connection_error, "backend": state.backend}
+
+
+@app.get("/api/devices/probe_results")
+def api_devices_probe_results(device_sn: str | None = None):
+    """Return the latest auto-probe results for one device — the raw
+    cloud responses we collected when we first noticed an unknown
+    model_code, plus any capacity candidates the heuristic extractor
+    found. The Device tab uses this to render a "we found 5040 Wh in
+    /v1/device/info, use it?" prompt for unknown-model setups."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"error": "no device", "found": False}
+    result = _auto_probe_results.get(device_sn)
+    if not result:
+        return {"device_sn": device_sn, "found": False,
+                "in_flight": device_sn in _auto_probe_in_flight}
+    return {"device_sn": device_sn, "found": True,
+            "in_flight": device_sn in _auto_probe_in_flight, **result}
+
+
+@app.post("/api/devices/probe_now")
+async def api_devices_probe_now(device_sn: str | None = None):
+    """Manually trigger an auto-probe for one device. Useful when the
+    automatic trigger missed (e.g. the bridge wasn't ready when the
+    device was first seen)."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    cloud_meta = state.last_cloud_meta or {}
+    devs = cloud_meta.get("devices") or []
+    target = next((d for d in devs if d.get("device_sn") == device_sn), None)
+    if not target:
+        raise HTTPException(404, "device not found in current cloud_meta")
+    mc = target.get("model_code")
+    device_id = target.get("device_id")
+    if not device_id:
+        raise HTTPException(400, "no device_id available for this device")
+    asyncio.create_task(_auto_probe_device(
+        device_sn, device_id, int(mc) if mc is not None else 0,
+        target.get("model_name") or target.get("name") or "",
+    ))
+    return {"device_sn": device_sn, "started": True}
 
 
 @app.get("/api/devices")

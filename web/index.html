@@ -321,20 +321,23 @@
     <!-- ============== DEVICE TAB ============== -->
     <section id="tab-device" class="tab-panel" hidden>
       <!-- Unknown-model banner: shown only when /api/devices reports
-           the active device's model_code isn't in models.json. The
-           "Copy PR snippet" button generates a paste-ready entry the
-           user can drop into a PR; the per-device capacity override
-           below is the immediate workaround. -->
+           the active device's model_code isn't in models.json. We
+           auto-probe the cloud for capacity hints; if any are found
+           they show up below as one-click "use this value" buttons.
+           Falls back to a manual override + PR-snippet path. -->
       <section id="unknown-model-banner" class="card device-card unknown-model-banner" hidden>
         <h2 style="margin:0 0 8px">🔍 New Jackery model detected</h2>
         <p class="hint" style="margin:0 0 10px">
-          We don't recognize <strong id="umb-name">this device</strong> (model_code <code id="umb-code">?</code>) yet, so the forecaster is using a <strong id="umb-fallback">3024 Wh</strong> fallback capacity. Two ways to fix it:
+          We don't recognize <strong id="umb-name">this device</strong> (model_code <code id="umb-code">?</code>) yet, so the forecaster is using a <strong id="umb-fallback">3024 Wh</strong> fallback capacity.
         </p>
+        <div id="umb-probe-status" class="hint" style="margin:6px 0 10px">Probing cloud for capacity hints…</div>
+        <div id="umb-candidates" style="margin:0 0 12px"></div>
         <ol class="hint" style="margin:0 0 12px 18px; line-height:1.6">
-          <li><strong>For you, right now:</strong> set a per-device capacity override below. Takes effect immediately.</li>
-          <li><strong>For everyone:</strong> open a PR adding this model to <code>models.json</code> so the next user with one gets it free. Click "Copy PR snippet" for a paste-ready template.</li>
+          <li><strong>If a candidate above looks right,</strong> click "Use this value" to apply it as a per-device override. Takes effect immediately.</li>
+          <li><strong>If nothing looks right,</strong> set a per-device capacity override below (read off the device label) and optionally open a PR adding this model to <code>models.json</code> so the next user with one gets it free.</li>
         </ol>
         <button id="umb-copy" class="btn btn-primary" type="button">Copy PR snippet</button>
+        <button id="umb-reprobe" class="btn btn-ghost" type="button">Probe again</button>
         <button id="umb-dismiss" class="btn btn-ghost" type="button">Dismiss for this session</button>
       </section>
 

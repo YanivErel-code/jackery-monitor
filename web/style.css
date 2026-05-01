@@ -1427,6 +1427,25 @@ main {
   font-size: 12px;
 }
 .unknown-model-banner button + button { margin-left: 8px; }
+.probe-candidate {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+}
+.probe-cap-value {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 14px;
+}
+.probe-cap-source { font-size: 12px; }
+.btn-small { padding: 4px 10px; font-size: 12px; }
 
 .device-card dl {
   display: grid;

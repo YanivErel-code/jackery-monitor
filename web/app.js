@@ -445,21 +445,107 @@ async function refreshUnknownModelBanner() {
       return;
     }
     banner.hidden = false;
-    const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
-      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
     $('umb-name').textContent = dev.model_name || dev.name || 'this device';
     $('umb-code').textContent = String(dev.model_code ?? '?');
     $('umb-fallback').textContent = `${dev.inferred_capacity_wh ?? '—'} Wh`;
-    // Stash the data the Copy button will use.
     banner.dataset.modelCode = String(dev.model_code ?? '');
     banner.dataset.modelName = dev.model_name || '';
     banner.dataset.deviceSn  = dev.device_sn || '';
-    void safe;  // reserved for if we add user-rendered fields later
+    refreshProbeCandidates(dev.device_sn);
   } catch (e) {
     console.warn('unknown-model banner refresh failed', e);
     banner.hidden = true;
   }
 }
+
+let _probePollTimer = null;
+async function refreshProbeCandidates(deviceSn) {
+  const status = $('umb-probe-status');
+  const list = $('umb-candidates');
+  if (!status || !list || !deviceSn) return;
+  if (_probePollTimer) { clearTimeout(_probePollTimer); _probePollTimer = null; }
+  try {
+    const params = `?device_sn=${encodeURIComponent(deviceSn)}`;
+    const r = await fetch(`/api/devices/probe_results${params}`);
+    if (!r.ok) { status.textContent = 'Probe results unavailable.'; list.innerHTML = ''; return; }
+    const j = await r.json();
+    const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    if (!j.found && j.in_flight) {
+      status.textContent = 'Probing cloud for capacity hints… (~10-30s)';
+      list.innerHTML = '';
+      _probePollTimer = setTimeout(() => refreshProbeCandidates(deviceSn), 4000);
+      return;
+    }
+    if (!j.found) {
+      status.textContent = 'No probe yet. Click "Probe again" to try.';
+      list.innerHTML = '';
+      return;
+    }
+    if (j.error) {
+      status.textContent = `Probe failed: ${j.error}`;
+      list.innerHTML = '';
+      return;
+    }
+    const cands = j.candidates || [];
+    if (!cands.length) {
+      status.textContent = 'Cloud probe completed but no capacity-shaped fields found. Set a manual override below.';
+      list.innerHTML = '';
+      return;
+    }
+    status.textContent = `Cloud probe found ${cands.length} capacity-shaped value(s):`;
+    list.innerHTML = cands.map((c, i) => `
+      <div class="probe-candidate">
+        <span class="probe-cap-value">${Math.round(c.capacity_wh)} Wh</span>
+        <span class="probe-cap-source hint">${safe(c.endpoint)} → <code>${safe(c.key_path)}</code> (${c.units}: ${safe(c.raw_value)})</span>
+        <button class="btn btn-primary btn-small" data-cand-index="${i}" type="button">Use this value</button>
+      </div>`).join('');
+    list.querySelectorAll('[data-cand-index]').forEach((btn) => {
+      btn.addEventListener('click', () => useProbeCandidate(deviceSn, cands[parseInt(btn.dataset.candIndex, 10)]));
+    });
+  } catch (e) {
+    status.textContent = `Probe lookup failed: ${e.message || e}`;
+    list.innerHTML = '';
+  }
+}
+
+async function useProbeCandidate(deviceSn, candidate) {
+  if (!candidate) return;
+  const wh = Math.round(candidate.capacity_wh);
+  if (!confirm(`Set capacity for this device to ${wh} Wh from ${candidate.endpoint}?`)) return;
+  try {
+    const r = await fetch('/api/devices/capacity', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_sn: deviceSn, capacity_wh: wh }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    const status = $('capacity-status');
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Saved ${wh} Wh from cloud probe.`;
+      setTimeout(() => { status.hidden = true; }, 3000);
+    }
+    loadDeviceCapacity();
+  } catch (e) {
+    alert(`Failed to apply capacity: ${e.message || e}`);
+  }
+}
+
+document.getElementById('umb-reprobe')?.addEventListener('click', async () => {
+  const banner = $('unknown-model-banner');
+  const sn = banner?.dataset?.deviceSn;
+  if (!sn) return;
+  const status = $('umb-probe-status');
+  if (status) status.textContent = 'Re-probing cloud…';
+  try {
+    await fetch(`/api/devices/probe_now?device_sn=${encodeURIComponent(sn)}`, { method: 'POST' });
+    refreshProbeCandidates(sn);
+  } catch (e) {
+    if (status) status.textContent = `Re-probe failed: ${e.message || e}`;
+  }
+});
 
 document.getElementById('umb-dismiss')?.addEventListener('click', () => {
   sessionStorage.setItem(UNKNOWN_MODEL_DISMISS_KEY, '1');
