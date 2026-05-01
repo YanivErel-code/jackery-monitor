@@ -523,10 +523,10 @@
           <div class="settings-row">
             <label class="settings-label" for="sc-max-charge-w">
               <span class="settings-label-text">Max charge W</span>
-              <span class="settings-hint">Observed AC charging rate. 5000 Plus modes: Standard ~600W, <strong>Fast ~1500W</strong> (default for most setups), or up to ~1800W on a dedicated 120V/20A line. Jackery's "Super-fast" 2400W rate needs the separate Smart Transfer Switch accessory — set this to your actual rate, not the marketing max.</span>
+              <span class="settings-hint" id="sc-max-charge-hint">AC charging rate this device pulls from the wall while the smart-charge plug is on. The dashboard learns this from observed charging events on this device — the hint will update once we've seen a few minutes of charging.</span>
             </label>
             <div class="settings-control">
-              <input id="sc-max-charge-w" type="number" min="50" max="5000" step="50" value="1500" /> <small>W</small>
+              <input id="sc-max-charge-w" type="number" min="50" max="5000" step="50" value="800" /> <small>W</small>
             </div>
           </div>
           <div class="settings-row">

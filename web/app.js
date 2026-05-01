@@ -1907,7 +1907,37 @@ async function loadSmartCharge() {
     // Hydrate the form fields. Defaults match smart_charge.DEFAULT_CONFIG.
     $('sc-mode').value = cfg.mode || 'off';
     $('sc-target-soc').value = cfg.target_sunrise_soc_pct ?? 25;
-    $('sc-max-charge-w').value = cfg.max_charge_w ?? 1500;
+    // Prefer a saved value; if unsaved AND the server has observed a
+    // charging rate from this device's own samples, prefill that
+    // instead of the population fallback.
+    const observedW = status?.observed_max_charge_w ?? null;
+    const observedN = status?.observed_max_charge_n ?? 0;
+    const inp = $('sc-max-charge-w');
+    if (cfg.max_charge_w != null) {
+      inp.value = cfg.max_charge_w;
+    } else if (observedW) {
+      inp.value = observedW;
+    } else {
+      inp.value = 800;  // matches DEFAULT_CONFIG.max_charge_w
+    }
+    // Render the hint dynamically — show what THIS device actually
+    // pulled if we've seen enough charging samples; otherwise a
+    // generic "we'll learn this once you charge" message.
+    const hint = $('sc-max-charge-hint');
+    if (hint) {
+      if (observedW && observedN >= 6) {
+        hint.innerHTML =
+          `Observed AC charging rate for this device: <strong>~${observedW} W</strong> ` +
+          `(95th percentile across ${observedN} samples ≥ 100W). ` +
+          `Set this to whatever your unit actually pulls — the prefill is what the dashboard observed, ` +
+          `not the marketing max.`;
+      } else {
+        hint.innerHTML =
+          `AC charging rate this device pulls from the wall while the smart-charge plug is on. ` +
+          `The dashboard learns this from observed charging events on this device ` +
+          `(${observedN}/6 samples so far) — the hint will update once we've seen a few minutes of charging.`;
+      }
+    }
     $('sc-max-on-min').value = cfg.max_on_duration_minutes ?? 480;
     $('sc-claude-toggle').checked = !!cfg.claude_enabled;
 
@@ -2062,7 +2092,7 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
     mode: $('sc-mode').value,
     kasa_device_host: $('sc-kasa-host').value || null,
     target_sunrise_soc_pct: parseInt($('sc-target-soc').value, 10) || 25,
-    max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 1500,
+    max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 800,
     max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
     claude_enabled: $('sc-claude-toggle').checked,
   };

@@ -2001,16 +2001,30 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
 
 @app.get("/api/smart_charge/status")
 def api_smart_charge_status(device_sn: str | None = None):
-    """Latest decision + recent history for the UI status panel.
-    History pulls from the persisted log in energy_db so it survives
-    container restarts."""
+    """Latest decision + recent history + observed AC charging rate for
+    the UI status panel. History pulls from the persisted log in
+    energy_db so it survives container restarts.
+
+    `observed_max_charge_w` is fit from the user's own input_w samples
+    (95th percentile of values >= 100W), so the UI can show their
+    actual charging rate instead of a hardcoded 5000-Plus number. Falls
+    back to None when too few charging observations exist yet."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     history: list[dict] = []
+    observed_w: float | None = None
+    observed_n: int = 0
     if device_sn:
         history = state.energy.list_smart_charge_decisions(device_sn, limit=50)
+        try:
+            ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+            observed_w, observed_n = forecaster.fit_max_charge_w(ehist)
+        except Exception as e:
+            log.debug("observed_max_charge_w fit failed: %s", e)
     return {"device_sn": device_sn,
             "config": smart_charge.get_config(device_sn),
+            "observed_max_charge_w": (round(observed_w) if observed_w is not None else None),
+            "observed_max_charge_n": observed_n,
             "history": history}
 
 

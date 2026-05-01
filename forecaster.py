@@ -283,6 +283,48 @@ def fit_idle_overhead_w(
     return float(median), len(gaps)
 
 
+# ---------- observed AC charging rate ----------
+def fit_max_charge_w(
+    energy_history: list[dict[str, Any]],
+    *,
+    min_input_w: float = 100.0,
+    min_samples: int = 6,
+    percentile: float = 0.95,
+) -> tuple[float | None, int]:
+    """Estimate the AC charging rate this device actually pulls from
+    the wall — read from the user's own telemetry rather than guessed
+    from the model_code. Returns (watts, n_samples_used).
+
+    The 5000 Plus's documented modes (Standard 600W / Fast 1500W /
+    Fast on dedicated 20A 1800W / Super-fast w/ STS 2400W) and similar
+    tables for other models are user-configurable and accessory-
+    dependent — there is no correct answer per model_code, only per
+    deployment. So instead of looking them up, we sample input_w
+    while the device is charging and report the high-end of what the
+    user's specific setup actually does.
+
+    Algorithm: filter to samples with input_w ≥ min_input_w (real
+    charging events, not idle noise), take the `percentile`th value.
+    A 95th percentile is robust to brief startup spikes while still
+    reflecting the steady-state ceiling the user's circuit allows.
+
+    Falls back to (None, n) when fewer than `min_samples` qualifying
+    samples are available — typical on a fresh install before any
+    charging has happened.
+    """
+    vals = [
+        float(r.get("input_w") or 0)
+        for r in (energy_history or [])
+        if r.get("input_w") is not None
+        and float(r.get("input_w") or 0) >= min_input_w
+    ]
+    if len(vals) < min_samples:
+        return None, len(vals)
+    vals.sort()
+    idx = min(len(vals) - 1, int(len(vals) * percentile))
+    return float(vals[idx]), len(vals)
+
+
 # ---------- charge efficiency ----------
 def fit_charge_efficiency(
     energy_history: list[dict[str, Any]],

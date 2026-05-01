@@ -525,3 +525,52 @@ def test_charge_efficiency_used_by_build_forecast():
     assert "charge_efficiency_n_windows" in res
     assert res["charge_efficiency_n_windows"] >= 5
     assert 0.80 <= res["charge_efficiency"] <= 0.90
+
+
+# ---------- fit_max_charge_w ----------
+
+def test_max_charge_w_returns_none_with_no_data():
+    w, n = forecaster.fit_max_charge_w([])
+    assert w is None
+    assert n == 0
+
+
+def test_max_charge_w_filters_idle_samples():
+    # Idle/noise samples (input_w < 100W) should NOT influence the fit;
+    # only real charging events count.
+    base = 1_700_000_000
+    history = [
+        {"ts": base + i * 600, "input_w": v, "battery_pct": 50}
+        for i, v in enumerate([5, 10, 50, 80] * 10)  # 40 idle samples
+    ]
+    w, n = forecaster.fit_max_charge_w(history)
+    assert w is None
+    assert n == 0
+
+
+def test_max_charge_w_recovers_observed_peak():
+    # Synthetic charging history with a clear ~1500W steady-state.
+    # 95th percentile should land near 1500W (a few brief spikes to
+    # 1700 don't dominate).
+    base = 1_700_000_000
+    history = [
+        {"ts": base + i * 600, "input_w": v, "battery_pct": 50}
+        for i, v in enumerate([1500, 1500, 1480, 1520, 1500] * 10
+                              + [1700, 1650])
+    ]
+    w, n = forecaster.fit_max_charge_w(history)
+    assert n >= 6
+    assert 1450 <= w <= 1750, f"got {w}, expected ~1500-1700"
+
+
+def test_max_charge_w_works_for_low_power_users():
+    # A 600W standard-charging user should get back ~600W, not the
+    # 1500W "fast" default we used to hardcode.
+    base = 1_700_000_000
+    history = [
+        {"ts": base + i * 600, "input_w": v, "battery_pct": 50}
+        for i, v in enumerate([580, 600, 620, 600, 595, 605, 600, 610, 590, 600] * 3)
+    ]
+    w, n = forecaster.fit_max_charge_w(history)
+    assert n >= 6
+    assert 580 <= w <= 650, f"got {w}, expected ~600"

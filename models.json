@@ -1,5 +1,6 @@
 {
-  "_comment": "Battery capacity (Wh) by Jackery cloud model_code. PR additions here when you discover a new model_code — see CONTRIBUTING for how to identify yours. Loaded by forecaster.py at startup; runtime per-device overrides via the Device tab still take priority over this catalog.",
+  "_comment": "Battery capacity (Wh) by Jackery cloud model_code. PR additions here when you discover a new model_code — see README's 'Adding a new Jackery model' section. Loaded by forecaster.py at startup; runtime per-device overrides via the Device tab still take priority over this catalog.",
+  "_scope": "Capacity only. AC-charging behavior, idle overhead, charge efficiency etc. are AUTO-LEARNED per-deployment from each user's own telemetry — see fit_idle_overhead_w / fit_charge_efficiency / fit_max_charge_w in forecaster.py. Don't add per-model charging defaults here; they'd be wrong for everyone except whoever picked them.",
   "default_capacity_wh": 3024,
   "default_capacity_comment": "HomePower 3000 — conservative fallback for unknown model codes so we don't over-promise SOC headroom.",
   "models": {
