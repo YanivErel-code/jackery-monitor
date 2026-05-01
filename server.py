@@ -952,6 +952,18 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
                 )
                 return {"value": w, "source": "fit", "n_samples": n,
                         "updated_at": int(time.time())}
+            # Fit returned None — no qualifying samples after filtering.
+            # Write a default ourselves so the next call sees `default`
+            # instead of falling through to whatever stale fit was here
+            # before. Without this, an old buggy fit's value can't be
+            # displaced even with the new filter rejecting all samples.
+            default_w = float(smart_charge.DEFAULT_CONFIG.get("max_charge_w") or 800)
+            state.energy.set_device_param(
+                device_sn, key, default_w, source="default",
+                n_samples=n, note="fit found no qualifying samples",
+            )
+            return {"value": default_w, "source": "default",
+                    "n_samples": n, "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
 
