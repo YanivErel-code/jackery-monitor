@@ -516,7 +516,7 @@ def test_inverter_overhead_pct_used_by_build_forecast():
     # 2pp drops per window (was 1pp) for the new MIN_SOC_DROP gate.
     now = int(time.time())
     history = []
-    # 15 cycles × (2 rows each, 2pp drop each) → 15 qualifying windows.
+    # 15 cycles x (2 rows each, 2pp drop each) -> 15 qualifying windows.
     # SOC ramps 90 → 60 over 30 cycles, well above DEPLETED floor.
     for i in range(15):
         ts = now - 60 * 3600 + i * 3600 * 3
@@ -654,7 +654,7 @@ def test_charge_efficiency_used_by_build_forecast():
                         "ac_input_wh": 0, "ac_input_w": 0})
     # Discharge windows: 8 more across 24h to satisfy the readiness gate.
     # Need 2pp drops per window (was 1pp) for the new MIN_SOC_DROP gate.
-    # 30000Wh × 2pp / 1h = 600W drain; out_w=545 → ~10% overhead.
+    # 30000Wh x 2pp / 1h = 600W drain; out_w=545 -> ~10% overhead.
     for i in range(8):
         ts = now - 24 * 3600 + i * 3600 * 3
         history.append({"ts": ts, "battery_pct": 80 - 2 * i,
