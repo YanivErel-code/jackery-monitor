@@ -1148,6 +1148,17 @@ async def _smart_charge_evaluate(record: bool = True,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
     )
+    # Counterfactual — same forecast computed without the AC charge
+    # floor injected. Used by compute_plan to decide if AC is actually
+    # needed; with the floor on, predicted_sunrise_soc is at the target
+    # by construction and the deficit math collapses to zero.
+    baseline_fcast = forecaster.build_forecast(
+        energy_history=energy_hist,
+        weather_hourly=weather["hourly"],
+        starting_soc_pct=starting_soc,
+        capacity_wh=capacity,
+        ac_charge_floor_pct=None,
+    )
     # If we don't have enough history yet to fit a trustworthy forecast,
     # don't act on it — return a no-op plan so the controller stays in
     # "skip" until the forecaster reports ready=True.
@@ -1176,7 +1187,8 @@ async def _smart_charge_evaluate(record: bool = True,
             log.debug("forecast persist (smart_charge) failed: %s", e)
     plan = smart_charge.compute_plan(
         config=cfg, current_soc_pct=starting_soc,
-        forecast=fcast, cost_plan=cost_module.get_plan(),
+        forecast=fcast, baseline_forecast=baseline_fcast,
+        cost_plan=cost_module.get_plan(),
         capacity_wh=capacity,
         tz_offset_seconds=int(loc.get("utc_offset_seconds") or 0),
     )

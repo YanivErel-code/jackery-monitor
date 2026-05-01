@@ -88,8 +88,9 @@ def test_no_action_when_predicted_sunrise_meets_target(tmp_path, monkeypatch):
         cost_plan=_flat_plan(), capacity_wh=5040,
     )
     assert plan.action == "off"
-    assert "no grid needed" in plan.reason
+    assert "AC not needed" in plan.reason
     assert plan.predicted_sunrise_soc_pct == 30.0
+    assert plan.baseline_predicted_sunrise_soc_pct == 30.0
 
 
 def test_charges_when_predicted_sunrise_below_target(tmp_path, monkeypatch):
@@ -111,7 +112,10 @@ def test_charges_when_predicted_sunrise_below_target(tmp_path, monkeypatch):
     assert plan.deficit_kwh < 1.0
 
 
-def test_already_at_target_means_off(tmp_path, monkeypatch):
+def test_already_at_target_coasts_outside_planned_hours(tmp_path, monkeypatch):
+    """SOC well above target and we're not in a planned charging hour →
+    coast (off). The planned hour stays scheduled in case SOC drifts —
+    if it does, the next tick re-enters CHARGING (Q5)."""
     sc = _fresh(monkeypatch, tmp_path)
     now = int(time.time())
     fc = _build_forecast(now_ts=now, sunset_h=0, night_h=8,
@@ -122,7 +126,9 @@ def test_already_at_target_means_off(tmp_path, monkeypatch):
         forecast=fc, cost_plan=_flat_plan(), capacity_wh=5040,
     )
     assert plan.action == "off"
-    assert "already reached" in plan.reason
+    assert "coasting" in plan.reason
+    # A plan still exists in case SOC drifts mid-night.
+    assert plan.planned_hours
 
 
 def test_test_mode_returns_plan_without_active_intent(tmp_path, monkeypatch):
@@ -164,3 +170,279 @@ def test_no_forecast_returns_off_with_reason(tmp_path, monkeypatch):
     )
     assert plan.action == "off"
     assert "no forecast" in plan.reason.lower()
+
+
+# ---- New behavior tests for the sunrise-anchored discontinuous schedule ----
+
+def _tou_plan(cheap_hours=(0, 1, 2, 3), cheap_rate=0.10, peak_rate=0.40,
+              currency="USD"):
+    """A simple block-TOU plan: `cheap_hours` (list of UTC hours) at
+    `cheap_rate`, all others at `peak_rate`. The smart-charge planner
+    applies tz_offset_seconds=0 in tests so UTC-hour buckets are what
+    `rate_at` looks at."""
+    return {
+        "type": "tou",
+        "currency": currency,
+        "tou_rates": [
+            {"start_hour": h, "end_hour": (h + 1) % 24, "rate": cheap_rate}
+            for h in cheap_hours
+        ] + [
+            # Catch-all peak — overlapping slots are evaluated in order,
+            # so we put cheap first. cost.rate_at returns the first slot
+            # whose hour matches; "0..24" covers everything.
+            {"start_hour": 0, "end_hour": 24, "rate": peak_rate},
+        ],
+    }
+
+
+def test_planned_hours_anchor_at_sunrise_minus_margin(tmp_path, monkeypatch):
+    """The hour ENDING at (sunrise - margin) must be in planned_hours.
+    With margin=1h, that's the hour starting at (sunrise - 2h). This is
+    the deadline anchor — no matter how cheap other hours are, this one
+    must charge so the deadline is met."""
+    sc = _fresh(monkeypatch, tmp_path)
+    # Anchor the test on a known UTC hour boundary so we can compute
+    # the expected anchor timestamp exactly.
+    base = 1_700_000_000 - (1_700_000_000 % 3600)  # hour-aligned
+    # Now=base; sunrise=base+10h; margin=1h ⇒ deadline=base+9h ⇒ anchor
+    # hour starts at base+8h (runs base+8h → base+9h).
+    fc = []
+    # 8 dark hours starting now (declining SOC)
+    for i in range(8):
+        fc.append({"ts": base + i * 3600, "solar_w": 0,
+                   "predicted_soc": max(0, 80 - 10 * (i + 1))})
+    # Hour 8: still dark
+    fc.append({"ts": base + 8 * 3600, "solar_w": 0, "predicted_soc": 0})
+    # Hour 9: still dark
+    fc.append({"ts": base + 9 * 3600, "solar_w": 0, "predicted_soc": 0})
+    # Hour 10: SUNRISE
+    fc.append({"ts": base + 10 * 3600, "solar_w": 200, "predicted_soc": 5})
+
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=80, forecast={"forecast": fc},
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base,
+    )
+    expected_anchor = base + 8 * 3600
+    assert plan.planned_hours, "expected at least one planned hour"
+    assert expected_anchor in plan.planned_hours, (
+        f"anchor hour {expected_anchor} missing from {plan.planned_hours}"
+    )
+    # And the latest planned hour IS the anchor — nothing later than
+    # margin is ever planned (the extension covers post-margin needs).
+    assert max(plan.planned_hours) == expected_anchor
+
+
+def test_planned_hours_pick_cheapest_with_tou(tmp_path, monkeypatch):
+    """Cost-weighted: when TOU has a cheap evening block, the planner
+    picks those hours BEFORE the anchor. With needed_hours=4 and a 4h
+    cheap block early in the night plus the mandatory anchor, expect
+    a 5-hour discontinuous plan if TOU positions the cheap block away
+    from the anchor."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    # Now=base; sunrise=base+10h; deadline=base+9h; anchor=base+8h.
+    # Cheap hours: UTC hours of (base..base+3) — first 4 hours of night.
+    # Anchor (base+8h) lands at a different UTC hour, so it won't be
+    # in the cheap set; it's forced in.
+    cheap_utc_hours = []
+    for i in range(4):
+        ts = base + i * 3600
+        from datetime import datetime, timezone
+        cheap_utc_hours.append(datetime.fromtimestamp(ts, tz=timezone.utc).hour)
+    fc = []
+    for i in range(10):
+        fc.append({"ts": base + i * 3600, "solar_w": 0,
+                   "predicted_soc": max(0, 80 - 8 * (i + 1))})
+    fc.append({"ts": base + 10 * 3600, "solar_w": 200, "predicted_soc": 0})
+
+    # Big deficit so needed_hours is large enough to span the cheap block
+    # plus the anchor. baseline_predicted ≈ 0%, target=25%, capacity=10kWh
+    # ⇒ deficit=2.5kWh ⇒ needed=ceil(2500/800)=4. With anchor forced,
+    # we'll pick 3 cheapest from the rest.
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=10, forecast={"forecast": fc},
+        cost_plan=_tou_plan(cheap_hours=tuple(cheap_utc_hours)),
+        capacity_wh=10000,
+        now_ts=base,
+    )
+    expected_anchor = base + 8 * 3600
+    assert expected_anchor in plan.planned_hours
+    # Three cheapest (other than anchor) are the 4 cheap hours minus
+    # any that aren't in candidates. Candidates are [base, base+9h);
+    # cheap is base..base+3h, all in range. Picker takes 3 of those 4.
+    cheap_hours_chosen = [h for h in plan.planned_hours
+                          if base <= h < base + 4 * 3600]
+    assert len(cheap_hours_chosen) == 3, (
+        f"expected 3 cheap hours selected, got {cheap_hours_chosen}"
+    )
+
+
+def test_in_planned_hour_returns_on(tmp_path, monkeypatch):
+    """When `now` lands on a scheduled ON hour, action=on."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    fc = []
+    for i in range(8):
+        fc.append({"ts": base + i * 3600, "solar_w": 0,
+                   "predicted_soc": max(0, 80 - 10 * (i + 1))})
+    fc.append({"ts": base + 8 * 3600, "solar_w": 200, "predicted_soc": 0})
+    # sunrise = base+8h; deadline = base+7h; anchor hour = base+6h.
+
+    # Evaluate AT the anchor hour.
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=10, forecast={"forecast": fc},
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base + 6 * 3600 + 100,  # mid-anchor-hour
+    )
+    assert plan.action == "on"
+    assert "charging now" in plan.reason
+
+
+def test_post_margin_extension_keeps_charging(tmp_path, monkeypatch):
+    """Lock-in (Q2): past sunrise-margin and still under target →
+    extension fires, action=on. This is what hits target even when
+    the planner under-allocated hours."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    fc = []
+    for i in range(4):
+        fc.append({"ts": base + i * 3600, "solar_w": 0,
+                   "predicted_soc": max(0, 80 - 20 * (i + 1))})
+    fc.append({"ts": base + 4 * 3600, "solar_w": 200, "predicted_soc": 0})
+    # sunrise = base+4h; deadline = base+3h.
+
+    # Now = base + 3h + 30min — past the deadline.
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=18,  # still under target
+        forecast={"forecast": fc},
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base + 3 * 3600 + 1800,
+    )
+    assert plan.action == "on"
+    assert plan.extension_active is True
+    assert "extension" in plan.reason
+
+
+def test_post_margin_target_hit_releases(tmp_path, monkeypatch):
+    """Past the margin AND SOC has hit target → off. Extension only
+    fires while SOC < target."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    fc = []
+    for i in range(4):
+        fc.append({"ts": base + i * 3600, "solar_w": 0,
+                   "predicted_soc": max(0, 80 - 20 * (i + 1))})
+    fc.append({"ts": base + 4 * 3600, "solar_w": 200, "predicted_soc": 0})
+
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=26,  # just over target
+        forecast={"forecast": fc},
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base + 3 * 3600 + 1800,
+    )
+    assert plan.action == "off"
+    assert plan.extension_active is False
+
+
+def test_counterfactual_releases_lock_when_baseline_recovers(tmp_path, monkeypatch):
+    """Q4: mid-session, if the baseline forecast (no AC) shows we'll
+    hit target on our own, release. The with-floor `forecast` still
+    looks like we're charging (because the floor is target), but the
+    `baseline_forecast` is the ground truth for need-to-charge."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+
+    def mk_fc(end_pct):
+        out = []
+        for i in range(8):
+            soc = max(0, 80 - (80 - end_pct) * (i + 1) / 8)
+            out.append({"ts": base + i * 3600, "solar_w": 0,
+                        "predicted_soc": soc})
+        out.append({"ts": base + 8 * 3600, "solar_w": 200, "predicted_soc": 50})
+        return {"forecast": out}
+
+    # With-floor forecast bottoms at target=25 (floor injected by caller);
+    # baseline (no floor) actually bottoms at 30 — solar+coast is enough.
+    fc = mk_fc(end_pct=25.0)
+    bfc = mk_fc(end_pct=30.0)
+
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=40, forecast=fc, baseline_forecast=bfc,
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base,
+    )
+    assert plan.action == "off"
+    assert "AC not needed" in plan.reason
+    assert plan.baseline_predicted_sunrise_soc_pct == 30.0
+    # The display predicted (with floor) is the lower one — what UI shows.
+    assert plan.predicted_sunrise_soc_pct == 25.0
+
+
+def test_counterfactual_drives_deficit_when_baseline_below_target(tmp_path, monkeypatch):
+    """The deficit math comes from the baseline (no-AC) forecast, not
+    from the with-floor display forecast. If only the with-floor were
+    used, the floor would mask the underlying need — predicted=target
+    by construction would always say 'no grid needed'."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+
+    def mk_fc(end_pct):
+        out = []
+        for i in range(8):
+            soc = max(0, 80 - (80 - end_pct) * (i + 1) / 8)
+            out.append({"ts": base + i * 3600, "solar_w": 0,
+                        "predicted_soc": soc})
+        out.append({"ts": base + 8 * 3600, "solar_w": 200, "predicted_soc": 25})
+        return {"forecast": out}
+
+    # With-floor: clamped at 25 (floor=target). Baseline: hits 5%.
+    fc = mk_fc(end_pct=25.0)
+    bfc = mk_fc(end_pct=5.0)
+
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=40, forecast=fc, baseline_forecast=bfc,
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base,
+    )
+    # Baseline is 5%, target 25%, deficit 20pp = ~1 kWh of 5040 Wh ⇒
+    # needed ≈ 2 hours at 800W.
+    assert plan.deficit_kwh > 0.5
+    assert plan.action in ("on", "off")
+    assert plan.planned_hours, "deficit > 0 implies a non-empty plan"
+
+
+def test_drift_below_target_re_enters_charging(tmp_path, monkeypatch):
+    """Q5: if SOC drifts below target after target was hit, the plan
+    fires again. Tested by simulating now=anchor-hour with soc < target."""
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    fc = []
+    for i in range(8):
+        fc.append({"ts": base + i * 3600, "solar_w": 0,
+                   "predicted_soc": max(0, 80 - 12 * (i + 1))})
+    fc.append({"ts": base + 8 * 3600, "solar_w": 200, "predicted_soc": 0})
+
+    # SOC drifted to 23% — below target.
+    plan = sc.compute_plan(
+        config={"mode": "active", "target_sunrise_soc_pct": 25,
+                "max_charge_w": 800},
+        current_soc_pct=23, forecast={"forecast": fc},
+        cost_plan=_flat_plan(0.30), capacity_wh=5040,
+        now_ts=base + 6 * 3600 + 100,  # in anchor hour
+    )
+    assert plan.action == "on"

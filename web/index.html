@@ -526,8 +526,8 @@
           </div>
           <div class="settings-row">
             <label class="settings-label" for="sc-target-soc">
-              <span class="settings-label-text">Target sunrise SOC</span>
-              <span class="settings-hint">Don't fall below this % before the sun comes back. 25% is conservative; 15-20% is aggressive.</span>
+              <span class="settings-label-text">Target SOC at sunrise</span>
+              <span class="settings-hint">Smart-charge schedules charging to land at this % by sunrise (1h margin). Overshoot is fine; undershoot means we extend charging past sunrise until we hit it. 25% is conservative; 15-20% is aggressive.</span>
             </label>
             <div class="settings-control">
               <input id="sc-target-soc" type="number" min="5" max="95" step="1" value="25" /> <small>%</small>

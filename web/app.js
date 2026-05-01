@@ -2427,12 +2427,36 @@ function renderSmartChargePlan(plan, narration) {
   const el = $('sc-current-plan');
   if (!el) return;
   if (!plan) { el.hidden = true; return; }
-  const window_ = plan.window_start && plan.window_end
-    ? `${new Date(plan.window_start * 1000).toLocaleTimeString()} → ${new Date(plan.window_end * 1000).toLocaleTimeString()}`
-    : '—';
-  const sunrise = plan.sunrise_ts
-    ? new Date(plan.sunrise_ts * 1000).toLocaleTimeString()
-    : '—';
+  const fmtHour = (ts) => new Date(ts * 1000).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit',
+  });
+  // Discontinuous schedule: render the planned hours grouped into
+  // contiguous segments so a 4-hour split (e.g. 18-21 + 04-05) shows
+  // as two distinct ON blocks. Falls back to legacy window_start/end
+  // on older decision rows that don't carry planned_hours.
+  let scheduleStr = '—';
+  if (Array.isArray(plan.planned_hours) && plan.planned_hours.length) {
+    const hrs = [...plan.planned_hours].sort((a, b) => a - b);
+    const segments = [];
+    let segStart = hrs[0];
+    let segEnd = hrs[0] + 3600;
+    for (let i = 1; i < hrs.length; i++) {
+      if (hrs[i] === segEnd) {
+        segEnd = hrs[i] + 3600;
+      } else {
+        segments.push([segStart, segEnd]);
+        segStart = hrs[i];
+        segEnd = hrs[i] + 3600;
+      }
+    }
+    segments.push([segStart, segEnd]);
+    scheduleStr = segments
+      .map(([s, e]) => `${fmtHour(s)}–${fmtHour(e)}`)
+      .join(', ');
+  } else if (plan.window_start && plan.window_end) {
+    scheduleStr = `${fmtHour(plan.window_start)}–${fmtHour(plan.window_end)}`;
+  }
+  const sunrise = plan.sunrise_ts ? fmtHour(plan.sunrise_ts) : '—';
   const rate = plan.cheapest_rate != null
     ? `$${plan.cheapest_rate.toFixed(3)}/kWh` : '—';
   const actionCls = plan.action === 'on' ? 'sc-act-on'
@@ -2443,18 +2467,28 @@ function renderSmartChargePlan(plan, narration) {
   const narrationLine = narration
     ? `<div class="sc-narration" style="margin-top:10px; padding-left:0">💬 ${safe(narration)}</div>`
     : '';
+  // Counterfactual lives next to display predicted so the user can see
+  // when smart-charge is doing real work vs coasting on solar.
+  const baseline = plan.baseline_predicted_sunrise_soc_pct;
+  const baselineLine = baseline != null
+    ? `<div><span class="sc-lbl">No-AC sunrise SOC</span><span>${Math.round(baseline)}%</span></div>`
+    : '';
+  const extensionBadge = plan.extension_active
+    ? '<span class="sc-mode" title="Past planned window, holding ON until target hit">EXTENSION</span>'
+    : '';
   el.innerHTML = `
     <div class="sc-plan-header">
       <span class="sc-action ${actionCls}">${(plan.action || '?').toUpperCase()}</span>
-      <span class="sc-mode">[${plan.mode || '?'}]</span>
+      <span class="sc-mode">[${plan.mode || '?'}]</span>${extensionBadge}
       <span class="sc-reason">${plan.reason || ''}</span>
     </div>
     <div class="sc-plan-grid">
       <div><span class="sc-lbl">Current SOC</span><span>${plan.current_soc_pct != null ? Math.round(plan.current_soc_pct) + '%' : '—'}</span></div>
       <div><span class="sc-lbl">Predicted at sunrise</span><span>${plan.predicted_sunrise_soc_pct != null ? Math.round(plan.predicted_sunrise_soc_pct) + '%' : '—'}</span></div>
+      ${baselineLine}
       <div><span class="sc-lbl">Target</span><span>${Math.round(plan.target_sunrise_soc_pct)}%</span></div>
       <div><span class="sc-lbl">Deficit</span><span>${plan.deficit_kwh != null ? plan.deficit_kwh.toFixed(2) + ' kWh' : '—'}</span></div>
-      <div><span class="sc-lbl">Charge window</span><span>${window_}</span></div>
+      <div><span class="sc-lbl">Charge schedule</span><span>${scheduleStr}</span></div>
       <div><span class="sc-lbl">Sunrise</span><span>${sunrise}</span></div>
       <div><span class="sc-lbl">Cheapest rate</span><span>${rate}</span></div>
     </div>${narrationLine}`;
