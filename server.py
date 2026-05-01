@@ -856,6 +856,26 @@ _param_fit_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _PARAM_FIT_CACHE_TTL_S = 60.0
 
 
+def _resolved_capacity_wh(device_sn: str | None) -> int:
+    """The total system capacity (main + N expansion packs) for this
+    device, in Wh. Mirrors the `battery_capacity_wh` resolver branch
+    so other fits (idle overhead, charge efficiency) compute against
+    the same number the simulator uses. Without this helper, callers
+    would have to repeat the user-override → catalog → packs ladder
+    by hand, and easily skip a step (which we did — the fit branches
+    were passing `model_code=None` to _total_capacity_wh, getting the
+    3024 Wh fallback * pack_count instead of the real 30240 Wh)."""
+    if not device_sn:
+        return forecaster.DEFAULT_BATTERY_CAPACITY_WH
+    override = state.energy.get_capacity_override(device_sn)
+    if override:
+        return int(override)
+    d = next((x for x in state.energy.list_devices()
+              if x.get("device_sn") == device_sn), None)
+    mc = (d or {}).get("model_code")
+    return _total_capacity_wh(device_sn, mc)
+
+
 def _cached_history(device_sn: str) -> list[dict]:
     """One-shot 14d history pull, used by the resolver's live-fit
     branch. Memoized via _param_fit_cache so multiple param lookups
@@ -989,8 +1009,7 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
 
     elif key == "inverter_overhead_pct":
         try:
-            cap = (state.energy.get_capacity_override(device_sn)
-                   or _total_capacity_wh(device_sn, None))
+            cap = _resolved_capacity_wh(device_sn)
             pct, n = forecaster.fit_inverter_overhead_pct(
                 _cached_history(device_sn), cap,
             )
@@ -1006,8 +1025,7 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
 
     elif key == "charge_efficiency":
         try:
-            cap = (state.energy.get_capacity_override(device_sn)
-                   or _total_capacity_wh(device_sn, None))
+            cap = _resolved_capacity_wh(device_sn)
             v, n = forecaster.fit_charge_efficiency(_cached_history(device_sn), cap)
             source = "fit" if n >= 5 else "default"
             state.energy.set_device_param(
