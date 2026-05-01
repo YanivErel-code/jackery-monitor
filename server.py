@@ -2018,7 +2018,10 @@ def api_smart_charge_status(device_sn: str | None = None):
         history = state.energy.list_smart_charge_decisions(device_sn, limit=50)
         try:
             ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
-            observed_w, observed_n = forecaster.fit_max_charge_w(ehist)
+            tz_off = device_location.get_tz_offset() or 0
+            observed_w, observed_n = forecaster.fit_max_charge_w(
+                ehist, tz_offset_seconds=int(tz_off),
+            )
         except Exception as e:
             log.debug("observed_max_charge_w fit failed: %s", e)
     return {"device_sn": device_sn,

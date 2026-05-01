@@ -565,7 +565,9 @@ def test_max_charge_w_recovers_observed_peak():
 
 def test_max_charge_w_works_for_low_power_users():
     # A 600W standard-charging user should get back ~600W, not the
-    # 1500W "fast" default we used to hardcode.
+    # 1500W "fast" default we used to hardcode. base=1.7e9 lands on a
+    # UTC-22:13 timestamp, so all samples fall within the 21-06 night
+    # band and the input_w fallback path counts them.
     base = 1_700_000_000
     history = [
         {"ts": base + i * 600, "input_w": v, "battery_pct": 50}
@@ -574,3 +576,59 @@ def test_max_charge_w_works_for_low_power_users():
     w, n = forecaster.fit_max_charge_w(history)
     assert n >= 6
     assert 580 <= w <= 650, f"got {w}, expected ~600"
+
+
+def test_max_charge_w_excludes_solar_daytime_input():
+    # Regression test for the bug a user reported: fit was returning
+    # ~3812W on a setup whose actual AC charge rate is ~1500W. Cause:
+    # the function read input_w (= grid + solar + car), so daytime
+    # solar production got counted as AC charging.
+    noon_utc = 1_700_049_600    # 2023-11-15 12:00:00 UTC — daytime
+    threeam_utc = 1_700_016_000  # 2023-11-15 03:00:00 UTC — night
+    history = []
+    # 20 daytime samples at 3700W of solar input (no AC).
+    for i in range(20):
+        history.append({"ts": noon_utc + i * 60, "input_w": 3700,
+                        "ac_input_w": 0, "battery_pct": 80})
+    # 10 night samples at 1500W of real AC charging.
+    for i in range(10):
+        history.append({"ts": threeam_utc + i * 60, "input_w": 1500,
+                        "ac_input_w": 0, "battery_pct": 50})
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=0)
+    # Daytime solar is excluded; only night-time input counts.
+    assert n == 10, f"expected 10 night-only samples, got {n}"
+    assert 1450 <= w <= 1550, (
+        f"got {w}; expected ~1500 (NOT 3700, the solar reading)"
+    )
+
+
+def test_max_charge_w_uses_ac_input_w_when_populated():
+    # For users whose cloud `acip` is reliable, the function should
+    # prefer it directly — even daytime samples are valid because
+    # `ac_input_w` is already classified as grid charging.
+    noon = 1_700_049_600  # daytime UTC
+    history = [
+        {"ts": noon + i * 60, "input_w": 3700, "ac_input_w": 1500,
+         "battery_pct": 50}
+        for i in range(10)
+    ]
+    w, n = forecaster.fit_max_charge_w(history)
+    assert n == 10
+    assert w == 1500.0  # ac_input_w wins, not input_w
+
+
+def test_max_charge_w_tz_offset_shifts_night_band():
+    # The night-only fallback should respect the user's local time.
+    # 08:00 UTC is midnight PST (UTC-8): in PST it should count, in
+    # UTC it shouldn't.
+    eight_utc = 1_700_035_200  # 2023-11-15 08:00:00 UTC = 00:00 PST
+    history = [
+        {"ts": eight_utc + i * 60, "input_w": 1200, "ac_input_w": 0,
+         "battery_pct": 50}
+        for i in range(15)
+    ]
+    _, n_utc = forecaster.fit_max_charge_w(history, tz_offset_seconds=0)
+    assert n_utc == 0  # 08 UTC is daytime, no AC classification → excluded
+    w_pst, n_pst = forecaster.fit_max_charge_w(history, tz_offset_seconds=-28800)
+    assert n_pst == 15  # 00 PST is night → all included
+    assert 1150 <= w_pst <= 1250

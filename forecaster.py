@@ -284,9 +284,19 @@ def fit_idle_overhead_w(
 
 
 # ---------- observed AC charging rate ----------
+# Local-time night band when solar production is physically zero. Used
+# as a fallback discriminator for users whose cloud `acip` field is
+# broken (returns 0 even during obvious AC charging — see the
+# anomaly the AI advisor flagged on this codebase). 21:00-06:00 is
+# conservative enough to clear all twilight contributions year-round.
+_NIGHT_START_LOCAL_HOUR = 21
+_NIGHT_END_LOCAL_HOUR = 6
+
+
 def fit_max_charge_w(
     energy_history: list[dict[str, Any]],
     *,
+    tz_offset_seconds: int = 0,
     min_input_w: float = 100.0,
     min_samples: int = 6,
     percentile: float = 0.95,
@@ -299,30 +309,50 @@ def fit_max_charge_w(
     Fast on dedicated 20A 1800W / Super-fast w/ STS 2400W) and similar
     tables for other models are user-configurable and accessory-
     dependent — there is no correct answer per model_code, only per
-    deployment. So instead of looking them up, we sample input_w
-    while the device is charging and report the high-end of what the
-    user's specific setup actually does.
+    deployment.
 
-    Algorithm: filter to samples with input_w ≥ min_input_w (real
-    charging events, not idle noise), take the `percentile`th value.
-    A 95th percentile is robust to brief startup spikes while still
-    reflecting the steady-state ceiling the user's circuit allows.
+    Solar must be excluded. Two paths, in order of trust:
+      1. The cloud reports `ac_input_w` (`acip`) classifying input as
+         grid charging — when ≥ min_input_w we use it directly.
+      2. When `acip` is 0 but input_w is high (the broken-cloud case
+         the user has — see advisor anomaly), fall back to local-time
+         night hours where solar is physically impossible. `input_w`
+         during those hours must be AC charging via the smart-charge
+         Kasa plug or similar.
+    Daytime samples without a populated `acip` are skipped — solar vs
+    grid can't be disentangled there.
 
-    Falls back to (None, n) when fewer than `min_samples` qualifying
-    samples are available — typical on a fresh install before any
-    charging has happened.
+    `tz_offset_seconds` lets the night-window check use the user's
+    local time. Pass `device_location.get_tz_offset()` from callers.
     """
-    vals = [
-        float(r.get("input_w") or 0)
-        for r in (energy_history or [])
-        if r.get("input_w") is not None
-        and float(r.get("input_w") or 0) >= min_input_w
-    ]
-    if len(vals) < min_samples:
-        return None, len(vals)
-    vals.sort()
-    idx = min(len(vals) - 1, int(len(vals) * percentile))
-    return float(vals[idx]), len(vals)
+    candidates: list[float] = []
+    skipped_unknown = 0
+    for r in (energy_history or []):
+        try:
+            in_w = float(r.get("input_w") or 0)
+            ac_w = float(r.get("ac_input_w") or 0)
+            ts = int(r.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        # Path 1: cloud's `acip` field carries the grid-classified value.
+        if ac_w >= min_input_w:
+            candidates.append(ac_w)
+            continue
+        # Path 2: input is high but cloud didn't classify it — only
+        # accept when local time guarantees solar is zero.
+        if in_w >= min_input_w and ts > 0:
+            local_h = ((ts + tz_offset_seconds) // 3600) % 24
+            is_night = (local_h >= _NIGHT_START_LOCAL_HOUR
+                        or local_h < _NIGHT_END_LOCAL_HOUR)
+            if is_night:
+                candidates.append(in_w)
+            else:
+                skipped_unknown += 1
+    if len(candidates) < min_samples:
+        return None, len(candidates)
+    candidates.sort()
+    idx = min(len(candidates) - 1, int(len(candidates) * percentile))
+    return float(candidates[idx]), len(candidates)
 
 
 # ---------- charge efficiency ----------
