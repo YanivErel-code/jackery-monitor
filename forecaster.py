@@ -71,14 +71,18 @@ SOLAR_RECENT_CAP_MULT = 1.5
 IDLE_LOAD_W = 30.0
 
 # Inverter idle / DC-bus / parasitic overhead that the device's `op` (AC
-# output) field doesn't capture. The advisor surfaced this as a 600-700W
-# constant gap: SOC slope on a 30240 Wh nameplate implies ~1140W avg
-# discharge over a 9h window where reported out_w avg was only ~460W.
-# Adding this as a flat additive to every per-hour load lookup makes the
-# forecaster's drain model match SOC reality. Conservative end of the
-# observed 600-700W band; a slight under-estimate is preferable to over-
-# predicting a 0% cliff.
-IDLE_OVERHEAD_W = 600.0
+# output) field doesn't capture. The forecaster's load model is fit from
+# `op`, so we have to add this term back so SOC simulation matches the
+# observed SOC slope.
+#
+# Initial estimate from a single 9h overnight window was 600-700W, but
+# that window included unmeasured high-load events (HVAC cycles, etc.).
+# Re-validation across multiple steady-state windows on post-fix data
+# (2026-05-01 06:00→13:00, 04-05/05-01 04:00-13:00) put the constant
+# parasitic term at ~145-190W. Setting to 200W (round number, slightly
+# conservative). Re-tune by running the AI advisor and comparing
+# implied overhead in its anomaly reports.
+IDLE_OVERHEAD_W = 200.0
 
 # Cutoff for "recent" samples in load-profile recency weighting (seconds).
 # Variable buckets (high IQR / median) weight samples newer than this 70%

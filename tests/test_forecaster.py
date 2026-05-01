@@ -231,11 +231,11 @@ def test_simulate_soc_clamps_at_bounds():
 
 def test_build_forecast_glues_pieces_together():
     # 14 days of strong, consistent solar; ask for forecast starting "now".
-    # Since IDLE_OVERHEAD_W (600W) is now added to every load lookup, the
-    # synthetic panel must produce comfortably more than that during the
-    # day for the smoke-test charge assertion to hold. Use a 2.0 W per
-    # W/m² coefficient (~2kW peak array) so daytime solar (~1600W at
-    # ghi=800) clears the overhead + 100W output_w with margin.
+    # IDLE_OVERHEAD_W is added to every load lookup, so the synthetic
+    # panel needs to comfortably exceed it during the day for the
+    # smoke-test charge assertion to hold. With OVERHEAD=200 + 100W
+    # output_w = ~300W effective daytime load, a 2.0 W per W/m²
+    # coefficient (~1600W peak at ghi=800) clears it with wide margin.
     now = int(time.time())
     weather = []
     for i in range(-14 * 24, 24 * 5):  # past 14 days through next 5 days, hourly

@@ -1020,6 +1020,28 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "with made_at >= this timestamp."
             ),
         },
+        {
+            "ts_iso": "2026-05-01T16:00:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Re-tuned IDLE_OVERHEAD_W from 600 → 200 based on YOUR "
+                "previous review's empirical reconciliation: steady-state "
+                "windows showed actual constant overhead is closer to "
+                "145-190W, and 600W was over-predicting drain by 300-450W. "
+                "Predictions made BEFORE this timestamp will look "
+                "biased-low; predictions AFTER should track SOC slope "
+                "much more closely. Also: a known measurement asymmetry "
+                "remains — predictions are seeded with system SOC "
+                "(capacity-weighted main + expansion packs) but the "
+                "`actual_soc` field in prediction_accuracy reads from "
+                "samples.last_battery_pct which is the MAIN-only reading. "
+                "When packs are out of balance with main (e.g. main at "
+                "100%, packs at 75%) this manifests as a bias that grows "
+                "with SOC. This is on the to-do list to fix; you can "
+                "flag it but do not re-suggest the same diagnosis every "
+                "review."
+            ),
+        },
     ]
 
 
