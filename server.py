@@ -1541,6 +1541,25 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "temperature. Pack thermal monitoring is out of scope."
             ),
         },
+        {
+            "ts_iso": "2026-05-01T18:35:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Inverter overhead model switched from a flat watt "
+                "constant to a percentage of throughput. Was: "
+                "expected_load = base + idle_overhead_w (200W default). "
+                "Now: expected_load = base * (1 + inverter_overhead_pct) "
+                "with default 0.10 (10%) — modern LiFePO4 inverters lose "
+                "~10% as heat in DC->AC conversion, scales with load. "
+                "fit_inverter_overhead_pct replaces fit_idle_overhead_w; "
+                "the legacy fit_idle_overhead_w is now a thin shim that "
+                "converts the percentage to watts at a typical 500W "
+                "load. DEVICE_PARAM_KEYS exposes `inverter_overhead_pct` "
+                "(unit=ratio); the bundle still carries idle_overhead_w "
+                "for back-compat. When reasoning about load accuracy, "
+                "prefer the percentage — it's the source of truth."
+            ),
+        },
     ]
 
 
