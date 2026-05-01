@@ -2149,8 +2149,178 @@ function renderSmartChargeHistory(rows) {
         <span class="sc-mode">[${r.mode || '?'}]</span>
         <span class="sc-pred">predicted ${pred} → actual ${actual} (target ${target})</span>
         <span class="sc-reason" title="${safe(r.reason || '')}">${safe(r.reason || '')}</span>
-      </div>${narrationLine}`;
+        <button class="btn btn-ghost btn-small sc-detail-btn"
+                data-decided-at="${r.decided_at}" type="button">Details ▾</button>
+      </div>${narrationLine}
+      <div class="sc-detail-panel" data-detail-for="${r.decided_at}" hidden></div>`;
   }).join('');
+  // Wire the Details toggles. Each click hits the decision_details
+  // endpoint and renders into the matching panel.
+  list.querySelectorAll('[data-decided-at]').forEach((btn) => {
+    btn.addEventListener('click', () => toggleDecisionDetails(btn));
+  });
+}
+
+async function toggleDecisionDetails(btn) {
+  const decidedAt = btn.dataset.decidedAt;
+  const panel = document.querySelector(`.sc-detail-panel[data-detail-for="${decidedAt}"]`);
+  if (!panel) return;
+  if (!panel.hidden) {
+    panel.hidden = true;
+    btn.textContent = 'Details ▾';
+    return;
+  }
+  btn.textContent = 'Details ▴';
+  panel.hidden = false;
+  panel.innerHTML = '<div class="hint" style="padding:8px 12px">Loading…</div>';
+  try {
+    const dev = activeJackeryDevice();
+    const params = `?decided_at=${encodeURIComponent(decidedAt)}` +
+      (dev?.device_sn ? `&device_sn=${encodeURIComponent(dev.device_sn)}` : '');
+    const r = await fetch(`/api/smart_charge/decision_details${params}`);
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${r.status}`);
+    }
+    const j = await r.json();
+    panel.innerHTML = renderDecisionDetailsHtml(j);
+    panel.querySelector('[data-action="copy-detail"]')?.addEventListener('click', () => {
+      copyDecisionDetails(j);
+    });
+  } catch (e) {
+    panel.innerHTML = `<div class="hint" style="padding:8px 12px; color:#ef4444">Failed: ${e.message || e}</div>`;
+  }
+}
+
+function renderDecisionDetailsHtml(j) {
+  const safe = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString() : '—';
+  const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString() : '—';
+  const d = j.decision || {};
+  const fields = [
+    ['decided_at', fmtTs(d.decided_at)],
+    ['mode', d.mode],
+    ['action', d.action],
+    ['executed', d.executed ? 'yes' : 'no'],
+    ['reason', d.reason],
+    ['current_soc_pct', d.current_soc_pct != null ? `${d.current_soc_pct}%` : '—'],
+    ['predicted_sunrise_soc_pct', d.predicted_sunrise_soc_pct != null ? `${d.predicted_sunrise_soc_pct}%` : '—'],
+    ['actual_sunrise_soc_pct', d.actual_sunrise_soc_pct != null ? `${d.actual_sunrise_soc_pct}%` : '—'],
+    ['target_sunrise_soc_pct', d.target_sunrise_soc_pct != null ? `${d.target_sunrise_soc_pct}%` : '—'],
+    ['deficit_kwh', d.deficit_kwh != null ? `${d.deficit_kwh.toFixed(2)} kWh` : '—'],
+    ['charge_window', d.window_start && d.window_end ? `${fmtTime(d.window_start)} → ${fmtTime(d.window_end)}` : '—'],
+    ['sunrise_ts', fmtTs(d.sunrise_ts)],
+    ['cheapest_rate', d.cheapest_rate != null ? `$${d.cheapest_rate.toFixed(3)}/kWh` : '—'],
+  ];
+  const fieldsHtml = fields.map(([k, v]) => `
+    <div class="dd-field"><span class="dd-key">${safe(k)}</span><span class="dd-val">${safe(v)}</span></div>`).join('');
+
+  const params = (j.resolved_params || []).map(p => `
+    <div class="dd-field"><span class="dd-key">${safe(p.label || p.key)}</span>
+      <span class="dd-val">${p.value == null ? '—' : (
+        p.unit === 'ratio' ? Number(p.value).toFixed(3) : `${Math.round(Number(p.value))} ${safe(p.unit)}`
+      )} <small class="hint">[${safe(p.source)}${p.n_samples ? `, n=${p.n_samples}` : ''}]</small></span></div>`).join('');
+
+  const fcRows = (j.forecast_trace || []).map(f => `
+    <tr><td>${fmtTime(f.target)}</td><td>${Math.round(f.predicted_soc)}%</td></tr>`).join('');
+  const fcTable = fcRows
+    ? `<table class="dd-table"><thead><tr><th>target</th><th>predicted SOC</th></tr></thead><tbody>${fcRows}</tbody></table>`
+    : '<div class="hint">No forecast trace stored at this decision time.</div>';
+
+  const wRows = (j.weather || []).map(w => `
+    <tr><td>${fmtTime(w.ts)}</td><td>${w.ghi_w_m2 || 0}</td><td>${w.cloud_cover_pct || 0}%</td></tr>`).join('');
+  const wTable = wRows
+    ? `<table class="dd-table"><thead><tr><th>hour</th><th>GHI W/m²</th><th>cloud</th></tr></thead><tbody>${wRows}</tbody></table>`
+    : '<div class="hint">No weather observations in window.</div>';
+
+  const sRows = (j.samples_trace || []).map(s => `
+    <tr><td>${fmtTime(s.ts)}</td><td>${s.soc != null ? `${s.soc}%` : '—'}</td>
+        <td>${s.input_w || 0}W</td><td>${s.output_w || 0}W</td><td>${s.solar_w || 0}W</td></tr>`).join('');
+  const sTable = sRows
+    ? `<table class="dd-table"><thead><tr><th>hour</th><th>SOC</th><th>in</th><th>out</th><th>solar</th></tr></thead><tbody>${sRows}</tbody></table>`
+    : '<div class="hint">No samples after this decision yet.</div>';
+
+  return `
+    <div class="dd-wrap">
+      <div class="dd-actions">
+        <button class="btn btn-primary btn-small" data-action="copy-detail" type="button">Copy all (paste-ready)</button>
+      </div>
+      <div class="dd-section"><h4>Decision row</h4><div class="dd-grid">${fieldsHtml}</div></div>
+      <div class="dd-section"><h4>Resolved device parameters (current)</h4><div class="dd-grid">${params || '<div class="hint">none</div>'}</div></div>
+      <div class="dd-section"><h4>Forecast trace at decision time</h4>${fcTable}</div>
+      <div class="dd-section"><h4>Weather inputs (next 24h)</h4>${wTable}</div>
+      <div class="dd-section"><h4>Actual SOC trajectory after decision</h4>${sTable}</div>
+    </div>`;
+}
+
+async function copyDecisionDetails(j) {
+  // Build a paste-ready plain-text dump. Same shape as the AI insights
+  // Copy-all button so the chat assistant has a consistent format to
+  // parse.
+  const fmtTs = (ts) => ts ? new Date(ts * 1000).toISOString() : '—';
+  const lines = [];
+  const d = j.decision || {};
+  lines.push(`# Smart-charge decision details — exported ${new Date().toISOString()}`);
+  lines.push(`# device_sn=${j.device_sn || '?'}`);
+  lines.push('');
+  lines.push('## Decision row');
+  for (const [k, v] of Object.entries(d)) {
+    let val = v;
+    if (typeof val === 'number' && k.endsWith('_at') || k === 'sunrise_ts'
+        || k === 'window_start' || k === 'window_end') {
+      val = `${v} (${fmtTs(v)})`;
+    }
+    lines.push(`- ${k}: ${val ?? '—'}`);
+  }
+  lines.push('');
+  lines.push('## Resolved device parameters (current values)');
+  for (const p of (j.resolved_params || [])) {
+    lines.push(`- ${p.key}: ${p.value} ${p.unit || ''} [source=${p.source}${p.n_samples ? `, n=${p.n_samples}` : ''}]`);
+  }
+  lines.push('');
+  lines.push('## Forecast trace (predictions made at decision time)');
+  for (const f of (j.forecast_trace || [])) {
+    lines.push(`- ${fmtTs(f.target)}  predicted_soc=${f.predicted_soc}`);
+  }
+  if (!(j.forecast_trace || []).length) lines.push('  (none)');
+  lines.push('');
+  lines.push('## Weather inputs');
+  for (const w of (j.weather || [])) {
+    lines.push(`- ${fmtTs(w.ts)}  ghi=${w.ghi_w_m2 || 0} W/m²  cloud=${w.cloud_cover_pct || 0}%`);
+  }
+  if (!(j.weather || []).length) lines.push('  (none)');
+  lines.push('');
+  lines.push('## Actual SOC trajectory after decision');
+  for (const s of (j.samples_trace || [])) {
+    lines.push(`- ${fmtTs(s.ts)}  SOC=${s.soc ?? '—'}%  in=${s.input_w || 0}W  out=${s.output_w || 0}W  solar=${s.solar_w || 0}W`);
+  }
+  if (!(j.samples_trace || []).length) lines.push('  (none)');
+  const text = lines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    const status = $('alg-status') || $('sc-status');
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Copied ${text.length} chars to clipboard.`;
+      setTimeout(() => { status.hidden = true; }, 2500);
+    }
+  } catch {
+    // Fallback: textarea overlay.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:8vh;left:5vw;width:90vw;height:70vh;z-index:9999;font-family:monospace;font-size:12px';
+    document.body.appendChild(ta);
+    ta.select();
+    setTimeout(() => {
+      const dismiss = (ev) => {
+        if (ev.target === ta) return;
+        ta.remove();
+        document.removeEventListener('click', dismiss, true);
+      };
+      document.addEventListener('click', dismiss, true);
+    }, 50);
+  }
 }
 
 function renderSmartChargePlan(plan, narration) {

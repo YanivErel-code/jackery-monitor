@@ -681,6 +681,65 @@ main {
 .sc-row .sc-pred   { color: var(--text-dim); white-space: nowrap; }
 .sc-row .sc-reason { color: var(--text-mute); white-space: nowrap;
                      overflow: hidden; text-overflow: ellipsis; }
+.sc-detail-btn {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.sc-detail-panel {
+  margin: 4px 0 8px 6px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+.dd-actions { margin-bottom: 12px; display: flex; justify-content: flex-end; }
+.dd-section { margin-bottom: 16px; }
+.dd-section h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.dd-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 4px 16px;
+}
+.dd-field {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.dd-key { color: var(--text-mute); }
+.dd-val { color: var(--text); text-align: right; }
+.dd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.dd-table th {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-mute);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.dd-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
+}
 .sc-narration {
   font-family: var(--font-mono);
   font-size: 12px;

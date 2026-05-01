@@ -2186,6 +2186,114 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
     return {"device_sn": device_sn, "config": saved}
 
 
+@app.get("/api/smart_charge/decision_details")
+def api_smart_charge_decision_details(decided_at: int, device_sn: str | None = None):
+    """Drill-down for a single smart-charge decision row. Returns the
+    decision plus everything the controller saw at that moment:
+
+      - The full decision dict (raw fields incl. deficit_kwh, window
+        timestamps, sunrise_ts, cheapest_rate).
+      - The forecast trace that was used (forecast_predictions for this
+        device with made_at within ±10min of decided_at), so you can
+        see hour-by-hour predicted SOC into the next day.
+      - Weather observations from sunset through sunrise (GHI + cloud
+        cover) — the inputs that drove the solar piece of the forecast.
+      - Sample trace from sunset through "now" (or sunrise if past) —
+        the actual SOC trajectory, for visual predicted-vs-actual.
+      - Current resolved device parameters (capacity, idle_overhead,
+        charge_efficiency, max_charge_w) — the values the simulator
+        would have used for this run.
+
+    Most data comes from existing tables; no fresh fits or RPCs.
+    """
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    decisions = state.energy.list_smart_charge_decisions(device_sn, limit=200)
+    decision = next((d for d in decisions
+                     if int(d.get("decided_at") or 0) == int(decided_at)), None)
+    if not decision:
+        raise HTTPException(404, "decision not found")
+
+    # Forecast trace made closest to this decision (±10 minutes).
+    forecast_trace: list[dict] = []
+    try:
+        win_lo, win_hi = decided_at - 600, decided_at + 600
+        with state.energy._conn() as c:
+            rows = c.execute(
+                """SELECT made_at, target, predicted_soc
+                     FROM forecast_predictions
+                    WHERE device_sn = ?
+                      AND made_at BETWEEN ? AND ?
+                      AND target >= ?
+                    ORDER BY target
+                    LIMIT 200""",
+                (device_sn, win_lo, win_hi, decided_at),
+            ).fetchall()
+        forecast_trace = [
+            {"made_at": r[0], "target": r[1],
+             "predicted_soc": float(r[2])} for r in rows
+        ]
+    except Exception as e:
+        log.debug("forecast trace lookup failed: %s", e)
+
+    # Weather sunset→sunrise. Pull a 24h window starting at decided_at
+    # to keep the query simple; the UI filters to the sunset/sunrise
+    # band visually.
+    weather_obs: list[dict] = []
+    try:
+        for w in state.energy.list_weather_observations(
+            since_ts=decided_at - 3600, limit=72,
+        ):
+            if w.get("ts", 0) > decided_at + 24 * 3600:
+                continue
+            weather_obs.append(w)
+    except Exception as e:
+        log.debug("weather lookup failed: %s", e)
+
+    # Actual SOC trajectory from decided_at through now (or sunrise+1h
+    # if past, so the user can see the actual sunrise SOC alongside
+    # the predicted one). Use the existing history() helper at 10-min
+    # resolution since the bucket aggregator runs at minute-level.
+    samples_trace: list[dict] = []
+    try:
+        sunrise_ts = int(decision.get("sunrise_ts") or 0)
+        end_ts = min(int(time.time()),
+                     sunrise_ts + 3600 if sunrise_ts else int(time.time()))
+        hours = max(1, (end_ts - decided_at) // 3600 + 1)
+        all_history = state.energy.history(device_sn, hours=hours, bucket_s=600)
+        samples_trace = [
+            {"ts": r["ts"], "soc": r.get("battery_pct"),
+             "input_w": r.get("input_w"), "output_w": r.get("output_w"),
+             "solar_w": r.get("solar_w")}
+            for r in all_history
+            if r.get("ts", 0) >= decided_at and r.get("ts", 0) <= end_ts
+        ]
+    except Exception as e:
+        log.debug("samples trace lookup failed: %s", e)
+
+    # Resolved device params (current values — useful for "is the
+    # simulator using something reasonable now?"). Same shape as
+    # /api/devices/params.
+    resolved_params = []
+    for k, meta in energy_db.DEVICE_PARAM_KEYS.items():
+        try:
+            r = resolve_device_param(device_sn, k)
+            resolved_params.append({"key": k, **meta, **r})
+        except Exception:
+            continue
+
+    return {
+        "device_sn": device_sn,
+        "decision": decision,
+        "forecast_trace": forecast_trace,
+        "weather": weather_obs,
+        "samples_trace": samples_trace,
+        "resolved_params": resolved_params,
+    }
+
+
 @app.get("/api/smart_charge/status")
 def api_smart_charge_status(device_sn: str | None = None):
     """Latest decision + recent history + observed AC charging rate for
