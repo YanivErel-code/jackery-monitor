@@ -313,6 +313,14 @@ async def poll_loop() -> None:
                                 log.warning("battery_packs RPC error for %s: %s",
                                             dev_sn, err)
                             elif packs:
+                                # Strip BMS sensor garbage at ingestion so it
+                                # doesn't flow into the cache, the DB, or the
+                                # advisor's analysis. Bad pack temps in
+                                # particular have shown up as 4°C and 135°C —
+                                # impossibilities the sensor would never produce
+                                # if it were working. Drop them; downstream
+                                # code already handles missing values gracefully.
+                                packs = _sanitize_pack_telemetry(packs)
                                 state.battery_packs_by_sn[dev_sn] = packs
                                 state.last_packs_ts_by_sn[dev_sn] = ts
                                 # DB persist throttled separately — the cache
@@ -632,6 +640,55 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
     )
 
 
+# Plausible Li-ion operating temperature band. Anything outside this is
+# almost certainly a BMS fault code or a stuck register, not a real
+# reading. Real thermal events would have triggered a BMS disconnect
+# well before the values we've seen (4°C while ambient was 20°C+, 135°C
+# while neighboring packs read 78°C). Drop these at ingestion so they
+# don't pollute the cache, the DB, or the advisor's analysis.
+PACK_TEMP_PLAUSIBLE_C_MIN = -20.0
+PACK_TEMP_PLAUSIBLE_C_MAX = 80.0
+
+# Track which (pack_sn, value) combos we've already warned about so the
+# poll loop's logs don't spam every 10s.
+_pack_temp_fault_warned: set[tuple[str, int]] = set()
+
+
+def _sanitize_pack_telemetry(packs: list[dict]) -> list[dict]:
+    """Drop BMS sensor values that are physically impossible. Currently
+    just `it` (internal temperature) — the only field we've observed
+    sending garbage. Returns a new list of dicts with bad fields set to
+    None; downstream code already handles None as "no reading"."""
+    out: list[dict] = []
+    for p in packs:
+        if not isinstance(p, dict):
+            out.append(p)
+            continue
+        clean = dict(p)
+        it = clean.get("it")
+        if it is not None and it != 999:  # 999 is the "n/a" sentinel
+            try:
+                it_f = float(it)
+                if it_f < PACK_TEMP_PLAUSIBLE_C_MIN or it_f > PACK_TEMP_PLAUSIBLE_C_MAX:
+                    sn = str(clean.get("deviceSn") or "?")
+                    key = (sn, int(it_f))
+                    if key not in _pack_temp_fault_warned:
+                        _pack_temp_fault_warned.add(key)
+                        log.warning(
+                            "Dropping implausible pack temp it=%s°C for "
+                            "deviceSn=%s (plausible band %s..%s°C). Likely a "
+                            "BMS fault code on this firmware; we ignore it "
+                            "rather than feed garbage to the simulator.",
+                            it_f, sn,
+                            PACK_TEMP_PLAUSIBLE_C_MIN, PACK_TEMP_PLAUSIBLE_C_MAX,
+                        )
+                    clean["it"] = None
+            except (TypeError, ValueError):
+                clean["it"] = None
+        out.append(clean)
+    return out
+
+
 _unknown_models_warned: set[int] = set()
 
 
@@ -865,14 +922,27 @@ async def smart_charge_loop():
 def _db_pack_to_cloud_shape(row: dict) -> dict:
     """energy_db's per-row shape uses internal names; the UI + smart-charge
     expect the cloud's raw field names. Convert at the boundary so neither
-    side has to know about the other."""
+    side has to know about the other.
+
+    Also runs the same plausibility filter as the live ingest path —
+    historical rows written before the filter shipped (or via the bridge
+    on a different release) might still carry impossible temps. Drop
+    them on the way out so the UI / advisor never see the garbage."""
+    it = row.get("internal_temp_c")
+    if it is not None:
+        try:
+            it_f = float(it)
+            if it_f < PACK_TEMP_PLAUSIBLE_C_MIN or it_f > PACK_TEMP_PLAUSIBLE_C_MAX:
+                it = None
+        except (TypeError, ValueError):
+            it = None
     return {
         "deviceSn": row.get("pack_sn"),
         "deviceOrder": row.get("device_order") or 0,
         "rb": row.get("soc_pct"),
         "ip": row.get("input_w"),
         "op": row.get("output_w"),
-        "it": row.get("internal_temp_c"),
+        "it": it,
         "ec": row.get("error_code") or 0,
     }
 
@@ -1138,6 +1208,21 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "to-do list."
             ),
         },
+        {
+            "ts_iso": "2026-05-01T17:00:00+00:00",
+            "subsystem": "telemetry",
+            "summary": (
+                "Pack temperatures (`internal_temp_c` / `it`) outside the "
+                "plausible Li-ion operating band [-20, 80]°C are now "
+                "dropped at ingestion (set to None) and at every DB read "
+                "path. Earlier reviews flagged 4°C and 135°C readings — "
+                "those are BMS fault codes / stuck registers, not real "
+                "temperatures. If you see internal_temp_c == None on a "
+                "pack, that's WHY (the raw value was implausible); don't "
+                "flag it as missing telemetry. Only flag pack thermal "
+                "concerns when readings are present AND inside the band."
+            ),
+        },
     ]
 
 
@@ -1266,7 +1351,22 @@ def _make_advisor_query_fn(device_sn: str):
 
         if name == "query_battery_packs":
             packs = state.energy.latest_battery_packs(device_sn)
-            return {"rows": packs, "row_count": len(packs)}
+            # Same plausibility filter as the ingest path — pre-filter
+            # so the advisor doesn't keep flagging rows that were
+            # persisted before the sanitizer shipped.
+            cleaned = []
+            for r in packs:
+                rr = dict(r)
+                t = rr.get("internal_temp_c")
+                if t is not None:
+                    try:
+                        tf = float(t)
+                        if tf < PACK_TEMP_PLAUSIBLE_C_MIN or tf > PACK_TEMP_PLAUSIBLE_C_MAX:
+                            rr["internal_temp_c"] = None
+                    except (TypeError, ValueError):
+                        rr["internal_temp_c"] = None
+                cleaned.append(rr)
+            return {"rows": cleaned, "row_count": len(cleaned)}
 
         return {"error": f"unknown tool: {name}"}
 
