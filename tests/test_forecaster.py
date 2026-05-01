@@ -617,6 +617,59 @@ def test_max_charge_w_uses_ac_input_w_when_populated():
     assert w == 1500.0  # ac_input_w wins, not input_w
 
 
+def test_max_charge_w_ghi_filter_excludes_solar_regardless_of_clock():
+    # Bug repro for the user's "3595W solar mislabeled as AC" report:
+    # fit_max_charge_w is called with tz_offset=0 (UTC), but the user
+    # is in PDT. UTC 21:00-06:00 (the "night band") happens to be PDT
+    # 14:00-23:00 — solar peak afternoon. With weather_hourly carrying
+    # GHI per hour, we can exclude solar samples regardless of
+    # timezone.
+    afternoon_utc = 1_700_049_600   # 12:00 UTC = 04:00 PDT (... but if the user
+    # were in a tz where 12:00 UTC is daytime locally, this same hour would have
+    # high GHI). What matters: GHI is the source of truth.
+    history = []
+    weather = []
+    # 20 samples at 4000W of solar input, GHI=900 (clearly daytime).
+    # Without the GHI filter and with tz_offset=0, these COULD have been
+    # counted as "night" depending on UTC hour. With GHI we always skip.
+    for i in range(20):
+        ts = afternoon_utc + i * 60
+        history.append({"ts": ts, "input_w": 4000, "ac_input_w": 0,
+                        "solar_w": 4000, "battery_pct": 80})
+    weather.append({"ts": afternoon_utc - (afternoon_utc % 3600),
+                    "ghi_w_m2": 900, "cloud_cover_pct": 0})
+    # 10 samples at 1500W with GHI=0 (real night, real AC).
+    night_utc = afternoon_utc + 12 * 3600
+    for i in range(10):
+        ts = night_utc + i * 60
+        history.append({"ts": ts, "input_w": 1500, "ac_input_w": 0,
+                        "solar_w": 0, "battery_pct": 50})
+    weather.append({"ts": night_utc - (night_utc % 3600),
+                    "ghi_w_m2": 0, "cloud_cover_pct": 100})
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=0,
+                                        weather_hourly=weather)
+    # Solar samples excluded by GHI filter regardless of UTC hour.
+    assert n == 10, f"expected 10 dark-GHI samples, got {n}"
+    assert 1450 <= w <= 1550, f"got {w}; expected ~1500 (NOT 4000, the solar)"
+
+
+def test_max_charge_w_skips_classified_ac_when_solar_also_high():
+    # Defensive case: cloud reports both ac_input_w=3000 AND
+    # solar_w=3000 (mis-classification). Should NOT trust ac_input_w
+    # in this case — fall through to GHI-based check.
+    noon = 1_700_049_600
+    history = [
+        {"ts": noon + i * 60, "input_w": 6000, "ac_input_w": 3000,
+         "solar_w": 3000, "battery_pct": 50}
+        for i in range(10)
+    ]
+    weather = [{"ts": noon - (noon % 3600), "ghi_w_m2": 800, "cloud_cover_pct": 0}]
+    w, n = forecaster.fit_max_charge_w(history, weather_hourly=weather)
+    # Both classification AND solar high → can't trust either; skipped.
+    assert n == 0, f"expected to skip mixed classification, got n={n}"
+    assert w is None
+
+
 def test_max_charge_w_tz_offset_shifts_night_band():
     # The night-only fallback should respect the user's local time.
     # 08:00 UTC is midnight PST (UTC-8): in PST it should count, in

@@ -297,6 +297,7 @@ def fit_max_charge_w(
     energy_history: list[dict[str, Any]],
     *,
     tz_offset_seconds: int = 0,
+    weather_hourly: list[dict[str, Any]] | None = None,
     min_input_w: float = 100.0,
     min_samples: int = 6,
     percentile: float = 0.95,
@@ -323,56 +324,81 @@ def fit_max_charge_w(
     Daytime samples without a populated `acip` are skipped — solar vs
     grid can't be disentangled there.
 
-    `tz_offset_seconds` lets the night-window check use the user's
-    local time. Pass `device_location.get_tz_offset()` from callers.
+    Solar exclusion (in priority order):
+      a. `weather_hourly` GHI lookup at the sample's hour. If GHI < 50
+         W/m² the sun is physically too low to produce, so any input
+         must be from another source (AC plug). This is timezone-free
+         and works for any user worldwide.
+      b. Local-time night band [21:00, 06:00) using `tz_offset_seconds`
+         as a fallback when no weather data is available.
+      c. If neither check is conclusive (daytime, no weather), skip.
 
-    `return_candidates=True` returns ([candidate_dicts], n) instead
-    of (watts, n) — used by the Device-tab debug UI to inspect what
-    samples the fit picked. Each dict carries
-    {ts, input_w, ac_input_w, solar_w, value_used, path}.
+    `return_candidates=True` returns ([candidate_dicts], n_used)
+    instead of (watts, n) — used by the Device-tab debug UI to
+    inspect what samples the fit picked. Each dict carries
+    {ts, input_w, ac_input_w, solar_w, ghi_w_m2, value_used, path}.
     """
+    # Build a {hour_aligned_ts: ghi} index for fast lookup.
+    ghi_by_hour: dict[int, float] = {}
+    for w in (weather_hourly or []):
+        try:
+            wts = int(w.get("ts") or 0)
+            wts -= wts % 3600  # align to hour
+            ghi_by_hour[wts] = float(w.get("ghi_w_m2") or 0)
+        except (TypeError, ValueError):
+            continue
+    GHI_DARK_THRESHOLD = 50.0
+
     candidates_w: list[float] = []
     candidates_dbg: list[dict] = []
-    skipped_unknown = 0
     for r in (energy_history or []):
         try:
             in_w = float(r.get("input_w") or 0)
             ac_w = float(r.get("ac_input_w") or 0)
+            solar_w = float(r.get("solar_w") or 0)
             ts = int(r.get("ts") or 0)
         except (TypeError, ValueError):
             continue
         path = None
-        value = None
-        # Path 1: cloud's `acip` field carries the grid-classified value.
-        if ac_w >= min_input_w:
+        value: float | None = None
+        # Path 1: cloud's `acip` field is populated AND the device's
+        # own solar reading is near-zero, so we can trust the grid
+        # classification. (When `acip` is non-zero but solar_w is also
+        # high, the cloud may be misclassifying — fall through to
+        # GHI-based check.)
+        if ac_w >= min_input_w and solar_w < min_input_w:
             path = "ac_input_w"
             value = ac_w
-        # Path 2: input is high but cloud didn't classify it — only
-        # accept when local time guarantees solar is zero.
         elif in_w >= min_input_w and ts > 0:
-            local_h = ((ts + tz_offset_seconds) // 3600) % 24
-            is_night = (local_h >= _NIGHT_START_LOCAL_HOUR
-                        or local_h < _NIGHT_END_LOCAL_HOUR)
-            if is_night:
-                path = "input_w_night"
-                value = in_w
+            # Path 2a: GHI-based exclusion when we have weather data.
+            hour_ts = ts - (ts % 3600)
+            ghi = ghi_by_hour.get(hour_ts)
+            if ghi is not None:
+                if ghi < GHI_DARK_THRESHOLD:
+                    path = "input_w_dark_ghi"
+                    value = in_w
+                else:
+                    path = "skipped_solar_possible"
             else:
-                skipped_unknown += 1
-                if return_candidates:
-                    candidates_dbg.append({
-                        "ts": ts, "input_w": in_w, "ac_input_w": ac_w,
-                        "solar_w": float(r.get("solar_w") or 0),
-                        "value_used": None, "path": "skipped_daytime",
-                    })
-                continue
+                # Path 2b: no weather → fall back to local-time night.
+                local_h = ((ts + tz_offset_seconds) // 3600) % 24
+                is_night = (local_h >= _NIGHT_START_LOCAL_HOUR
+                            or local_h < _NIGHT_END_LOCAL_HOUR)
+                if is_night:
+                    path = "input_w_night"
+                    value = in_w
+                else:
+                    path = "skipped_daytime_no_ghi"
         if value is not None:
             candidates_w.append(value)
-            if return_candidates:
-                candidates_dbg.append({
-                    "ts": ts, "input_w": in_w, "ac_input_w": ac_w,
-                    "solar_w": float(r.get("solar_w") or 0),
-                    "value_used": value, "path": path,
-                })
+        if return_candidates and (value is not None or path is not None
+                                   or in_w >= min_input_w):
+            candidates_dbg.append({
+                "ts": ts, "input_w": in_w, "ac_input_w": ac_w,
+                "solar_w": solar_w,
+                "ghi_w_m2": ghi_by_hour.get(ts - (ts % 3600)),
+                "value_used": value, "path": path or "below_min_input",
+            })
     if return_candidates:
         return candidates_dbg, len(candidates_w)  # type: ignore[return-value]
     if len(candidates_w) < min_samples:

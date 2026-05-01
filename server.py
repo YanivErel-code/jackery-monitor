@@ -936,7 +936,14 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
 
     elif key == "max_charge_w":
         try:
-            w, n = forecaster.fit_max_charge_w(_cached_history(device_sn))
+            tz_off = int(device_location.get_tz_offset() or 0)
+            wx = state.energy.list_weather_observations(
+                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
+            )
+            w, n = forecaster.fit_max_charge_w(
+                _cached_history(device_sn),
+                tz_offset_seconds=tz_off, weather_hourly=wx,
+            )
             if w is not None:
                 state.energy.set_device_param(
                     device_sn, key, w, source="fit", n_samples=n,
@@ -1944,15 +1951,19 @@ def api_devices_params(device_sn: str | None = None,
         try:
             ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
             tz_off = device_location.get_tz_offset() or 0
+            wx = state.energy.list_weather_observations(
+                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
+            )
             samples, n_used = forecaster.fit_max_charge_w(
                 ehist, tz_offset_seconds=int(tz_off),
-                return_candidates=True,
+                weather_hourly=wx, return_candidates=True,
             )
             response["debug"] = {
                 "key": "max_charge_w",
                 "tz_offset_seconds": int(tz_off),
+                "weather_observations": len(wx),
                 "n_used_in_fit": n_used,
-                "samples": samples,  # list of {ts, input_w, ac_input_w, solar_w, value_used, path}
+                "samples": samples,  # list of {ts, input_w, ac_input_w, solar_w, ghi_w_m2, value_used, path}
             }
         except Exception as e:
             response["debug"] = {"key": "max_charge_w", "error": str(e)}
@@ -2386,8 +2397,11 @@ def api_smart_charge_status(device_sn: str | None = None):
         try:
             ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
             tz_off = device_location.get_tz_offset() or 0
+            wx = state.energy.list_weather_observations(
+                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
+            )
             observed_w, observed_n = forecaster.fit_max_charge_w(
-                ehist, tz_offset_seconds=int(tz_off),
+                ehist, tz_offset_seconds=int(tz_off), weather_hourly=wx,
             )
         except Exception as e:
             log.debug("observed_max_charge_w fit failed: %s", e)

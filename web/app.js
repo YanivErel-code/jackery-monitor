@@ -533,17 +533,18 @@ async function inspectParam(btn, deviceSn) {
         <td>${Math.round(s.input_w || 0)}</td>
         <td>${Math.round(s.ac_input_w || 0)}</td>
         <td>${Math.round(s.solar_w || 0)}</td>
+        <td>${s.ghi_w_m2 == null ? '—' : Math.round(s.ghi_w_m2)}</td>
         <td>${s.value_used == null ? '—' : Math.round(s.value_used)}</td>
         <td>${safe(s.path)}</td>
       </tr>`).join('');
     panel.innerHTML = `
       <div class="dd-section" style="padding:8px 12px">
-        <h4>Samples used by the fit (n=${dbg.n_used_in_fit}, tz_offset=${dbg.tz_offset_seconds}s)</h4>
-        <p class="hint" style="margin:4px 0 8px">Each row is one hourly bucket. The 95th percentile of <strong>value_used</strong> gives the fitted result. Watch for <code>input_w_night</code> rows where solar_w isn't 0 — that's solar leaking through the night-band filter.</p>
+        <h4>Samples used by the fit (n=${dbg.n_used_in_fit}, weather_observations=${dbg.weather_observations || 0}, tz_offset=${dbg.tz_offset_seconds}s)</h4>
+        <p class="hint" style="margin:4px 0 8px">Each row is one hourly bucket. The 95th percentile of <strong>value_used</strong> gives the fitted result. Path values: <code>ac_input_w</code> = cloud-classified AC, <code>input_w_dark_ghi</code> = no-solar via weather GHI &lt; 50 W/m² (best signal), <code>input_w_night</code> = no-solar via local clock fallback when no weather, <code>skipped_solar_possible</code> = daytime with weather, <code>skipped_daytime_no_ghi</code> = daytime no weather, <code>below_min_input</code> = idle.</p>
         <div style="overflow-x:auto">
           <table class="dd-table">
             <thead><tr>
-              <th>hour</th><th>input_w</th><th>ac_input_w</th><th>solar_w</th><th>value_used</th><th>path</th>
+              <th>hour</th><th>input_w</th><th>ac_input_w</th><th>solar_w</th><th>GHI W/m²</th><th>value_used</th><th>path</th>
             </tr></thead>
             <tbody>${rows_html}</tbody>
           </table>
