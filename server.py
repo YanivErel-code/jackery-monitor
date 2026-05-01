@@ -1949,7 +1949,15 @@ def api_devices_params(device_sn: str | None = None,
     for key, meta in energy_db.DEVICE_PARAM_KEYS.items():
         resolved = resolve_device_param(device_sn, key)
         out.append({"key": key, **meta, **resolved})
-    response: dict[str, Any] = {"device_sn": device_sn, "params": out}
+    response: dict[str, Any] = {
+        "device_sn": device_sn,
+        "params": out,
+        # Expose the resolution context so the UI can show "we're
+        # using tz_offset=-28800s" — useful when debugging why a fit
+        # is producing weird values (a 0 here often means the user's
+        # location wasn't set, which breaks the night-band fallback).
+        "tz_offset_seconds": int(device_location.get_tz_offset() or 0),
+    }
     if debug_key == "max_charge_w":
         try:
             ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)

@@ -551,29 +551,34 @@ def test_max_charge_w_filters_idle_samples():
 def test_max_charge_w_recovers_observed_peak():
     # Synthetic charging history with a clear ~1500W steady-state.
     # 95th percentile should land near 1500W (a few brief spikes to
-    # 1700 don't dominate).
-    base = 1_700_000_000
+    # 1700 don't dominate). Pass a non-zero tz_offset so the
+    # night-band fallback engages (the strict guard rejects tz=0
+    # without weather data).
+    base = 1_700_000_000  # 2023-11-14 22:13:20 UTC = night in UTC-8
     history = [
-        {"ts": base + i * 600, "input_w": v, "battery_pct": 50}
+        {"ts": base + i * 600, "input_w": v, "ac_input_w": 0, "solar_w": 0,
+         "battery_pct": 50}
         for i, v in enumerate([1500, 1500, 1480, 1520, 1500] * 10
                               + [1700, 1650])
     ]
-    w, n = forecaster.fit_max_charge_w(history)
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=-28800)
     assert n >= 6
     assert 1450 <= w <= 1750, f"got {w}, expected ~1500-1700"
 
 
 def test_max_charge_w_works_for_low_power_users():
     # A 600W standard-charging user should get back ~600W, not the
-    # 1500W "fast" default we used to hardcode. base=1.7e9 lands on a
-    # UTC-22:13 timestamp, so all samples fall within the 21-06 night
-    # band and the input_w fallback path counts them.
-    base = 1_700_000_000
+    # 1500W "fast" default we used to hardcode. Use an explicit PST
+    # offset so the night-band engages (UTC-22:13 = PST 14:13 PM,
+    # but the test's range spans into UTC night which IS PST night
+    # too). Adjust base so all samples are in PST night.
+    pst_night_utc = 1_700_028_000  # 2023-11-15 06:00:00 UTC = 22:00 PST 11/14
     history = [
-        {"ts": base + i * 600, "input_w": v, "battery_pct": 50}
+        {"ts": pst_night_utc + i * 600, "input_w": v, "ac_input_w": 0,
+         "solar_w": 0, "battery_pct": 50}
         for i, v in enumerate([580, 600, 620, 600, 595, 605, 600, 610, 590, 600] * 3)
     ]
-    w, n = forecaster.fit_max_charge_w(history)
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=-28800)
     assert n >= 6
     assert 580 <= w <= 650, f"got {w}, expected ~600"
 
@@ -583,19 +588,20 @@ def test_max_charge_w_excludes_solar_daytime_input():
     # ~3812W on a setup whose actual AC charge rate is ~1500W. Cause:
     # the function read input_w (= grid + solar + car), so daytime
     # solar production got counted as AC charging.
-    noon_utc = 1_700_049_600    # 2023-11-15 12:00:00 UTC — daytime
-    threeam_utc = 1_700_016_000  # 2023-11-15 03:00:00 UTC — night
+    pst_daytime_utc = 1_700_071_200  # 2023-11-15 18:00 UTC = 10:00 PST → daytime
+    pst_night_utc   = 1_700_028_000  # 2023-11-15 06:00 UTC = 22:00 PST → night
     history = []
-    # 20 daytime samples at 3700W of solar input (no AC).
+    # 20 daytime samples at 3700W solar (PST 10:00 = daytime, no AC).
     for i in range(20):
-        history.append({"ts": noon_utc + i * 60, "input_w": 3700,
-                        "ac_input_w": 0, "battery_pct": 80})
-    # 10 night samples at 1500W of real AC charging.
+        history.append({"ts": pst_daytime_utc + i * 60, "input_w": 3700,
+                        "ac_input_w": 0, "solar_w": 3700, "battery_pct": 80})
+    # 10 night samples at 1500W real AC charging (no solar reading).
     for i in range(10):
-        history.append({"ts": threeam_utc + i * 60, "input_w": 1500,
-                        "ac_input_w": 0, "battery_pct": 50})
-    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=0)
-    # Daytime solar is excluded; only night-time input counts.
+        history.append({"ts": pst_night_utc + i * 60, "input_w": 1500,
+                        "ac_input_w": 0, "solar_w": 0, "battery_pct": 50})
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=-28800)
+    # Daytime samples skipped (PST daytime + no GHI). Night samples
+    # pass (PST night + solar_w=0). Result: 10 night-only samples.
     assert n == 10, f"expected 10 night-only samples, got {n}"
     assert 1450 <= w <= 1550, (
         f"got {w}; expected ~1500 (NOT 3700, the solar reading)"
@@ -651,6 +657,46 @@ def test_max_charge_w_ghi_filter_excludes_solar_regardless_of_clock():
     # Solar samples excluded by GHI filter regardless of UTC hour.
     assert n == 10, f"expected 10 dark-GHI samples, got {n}"
     assert 1450 <= w <= 1550, f"got {w}; expected ~1500 (NOT 4000, the solar)"
+
+
+def test_max_charge_w_skips_phantom_solar_at_night():
+    # Defensive case the user surfaced: cloud reports `acip=0` and
+    # `solar_w=3500W` at *night* — physically impossible (no sun),
+    # almost certainly a cloud bug where it's falsely re-classifying
+    # cleared-state input as solar. Without this guard, the night-band
+    # fallback would count `input_w=3500` as AC charging.
+    pst_night_utc = 1_700_071_200  # 2023-11-15 18:00:00 UTC = 10:00 PST
+    # We use UTC=18:00 with tz_offset=-28800 (PST): local = 10:00 — no, that's
+    # not night. Pick a UTC that maps to PST night:
+    pst_night_utc = 1_700_103_600  # 2023-11-15 03:00:00 UTC next day = 19:00 PST 11/14
+    # Better: pick UTC 06:00, which is 22:00 PST night.
+    pst_night_utc = 1_700_028_000  # 2023-11-15 06:00:00 UTC = 22:00 PST 11/14
+    history = [
+        {"ts": pst_night_utc + i * 60, "input_w": 3500, "ac_input_w": 0,
+         "solar_w": 3500, "battery_pct": 60}
+        for i in range(15)
+    ]
+    # No weather data passed — fall through to night-band path.
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=-28800)
+    # Phantom solar at night should be skipped, leaving no candidates.
+    assert n == 0, f"phantom-solar samples should be excluded, got {n}"
+    assert w is None
+
+
+def test_max_charge_w_no_tz_no_ghi_skips_everything():
+    # Fresh-install scenario: user hasn't set location yet, so no
+    # tz_offset and no weather observations. Without those signals we
+    # can't distinguish solar from AC — fall back to source=default
+    # rather than guessing.
+    base = 1_700_000_000
+    history = [
+        {"ts": base + i * 600, "input_w": 1500, "ac_input_w": 0,
+         "solar_w": 0, "battery_pct": 50}
+        for i in range(20)
+    ]
+    w, n = forecaster.fit_max_charge_w(history, tz_offset_seconds=0)
+    assert n == 0, f"with no tz and no GHI we shouldn't count anything, got {n}"
+    assert w is None
 
 
 def test_max_charge_w_skips_classified_ac_when_solar_also_high():

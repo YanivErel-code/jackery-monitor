@@ -364,13 +364,13 @@ def fit_max_charge_w(
         # Path 1: cloud's `acip` field is populated AND the device's
         # own solar reading is near-zero, so we can trust the grid
         # classification. (When `acip` is non-zero but solar_w is also
-        # high, the cloud may be misclassifying — fall through to
-        # GHI-based check.)
+        # high, the cloud may be misclassifying — fall through.)
         if ac_w >= min_input_w and solar_w < min_input_w:
             path = "ac_input_w"
             value = ac_w
         elif in_w >= min_input_w and ts > 0:
             # Path 2a: GHI-based exclusion when we have weather data.
+            # Required: GHI < threshold (sun physically below horizon).
             hour_ts = ts - (ts % 3600)
             ghi = ghi_by_hour.get(hour_ts)
             if ghi is not None:
@@ -379,16 +379,31 @@ def fit_max_charge_w(
                     value = in_w
                 else:
                     path = "skipped_solar_possible"
-            else:
-                # Path 2b: no weather → fall back to local-time night.
+            elif tz_offset_seconds != 0:
+                # Path 2b: no weather, but we have a non-UTC timezone
+                # so local-time night is meaningful. Also require
+                # solar_w near zero — guards against the
+                # acip-broken-and-solar-misclassified-as-input case
+                # where in_w is high at night because the cloud lied.
                 local_h = ((ts + tz_offset_seconds) // 3600) % 24
                 is_night = (local_h >= _NIGHT_START_LOCAL_HOUR
                             or local_h < _NIGHT_END_LOCAL_HOUR)
-                if is_night:
+                if not is_night:
+                    path = "skipped_daytime_no_ghi"
+                elif solar_w >= min_input_w:
+                    # Cloud is claiming solar AT NIGHT. Either device
+                    # has a phantom solar reading or some other input
+                    # source. Either way, not AC; don't count.
+                    path = "skipped_phantom_solar_at_night"
+                else:
                     path = "input_w_night"
                     value = in_w
-                else:
-                    path = "skipped_daytime_no_ghi"
+            else:
+                # No weather AND no timezone → can't classify safely.
+                # Better to under-fit (source=default) than to pull in
+                # solar. Users who haven't set location will see this
+                # until they configure it.
+                path = "skipped_no_tz_no_ghi"
         if value is not None:
             candidates_w.append(value)
         if return_candidates and (value is not None or path is not None
