@@ -24,8 +24,11 @@ WORKDIR /app
 # cifs-utils provides /sbin/mount.cifs which backup.py shells out to in
 # order to mount the remote NAS share for the daily backup feature.
 # Requires CAP_SYS_ADMIN at runtime (see docker-compose.yml).
+# smbclient is used by backup_discover.py to enumerate share names on a
+# host once credentials are entered (powers the share-name dropdown in
+# the Settings UI). Both come from the samba project.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cifs-utils \
+    && apt-get install -y --no-install-recommends cifs-utils smbclient \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

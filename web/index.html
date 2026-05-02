@@ -1047,6 +1047,21 @@
           Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS over SMB. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic, etc.) get re-prompted. Backups are kept forever; prune manually on the NAS if needed.
         </p>
         <p id="backup-state-line" class="hint" style="margin:6px 0 12px"></p>
+
+        <!-- Auto-discovery panel: appears only when no creds are saved.
+             On first open we sweep the local subnet for SMB hosts (port
+             445) and let the user pick one with a click — same UX as
+             the macOS Finder "Network" sidebar. The panel hides itself
+             once a host is picked or once saved creds exist. -->
+        <div id="backup-discover-panel" class="backup-discover" hidden>
+          <div class="backup-discover-head">
+            <strong>Found on your network</strong>
+            <span id="backup-discover-state" class="hint">Scanning…</span>
+            <button id="backup-discover-rescan" class="btn btn-ghost btn-tiny" type="button">Rescan</button>
+          </div>
+          <ul id="backup-discover-list" class="backup-discover-list"></ul>
+        </div>
+
         <form id="backup-creds-form">
           <div class="settings-fields">
             <div class="settings-row">
@@ -1064,7 +1079,9 @@
                 <span class="settings-hint">The SMB share to mount (no leading slash, e.g. <code>backups</code>).</span>
               </label>
               <div class="settings-control">
-                <input id="backup-share" type="text" class="device-select" autocomplete="off" placeholder="backups" style="min-width:220px" />
+                <input id="backup-share" type="text" class="device-select" autocomplete="off" placeholder="backups" list="backup-share-options" style="min-width:220px" />
+                <datalist id="backup-share-options"></datalist>
+                <span id="backup-share-hint" class="hint" style="margin-left:8px"></span>
               </div>
             </div>
             <div class="settings-row">

@@ -5274,8 +5274,153 @@ async function loadBackupAll() {
   // Fan-out the three independent loads. Status & creds are cheap (local
   // file reads); snapshot listing requires mounting the remote so we leave
   // it lazy until the user clicks "List snapshots".
-  loadBackupCreds();
+  await loadBackupCreds();
   loadBackupStatus();
+  // After creds load we know whether to auto-discover. loadBackupCreds
+  // sets _backupHasCreds; if false we sweep the LAN once for SMB hosts
+  // (cached for the rest of the session).
+  if (!_backupHasCreds) {
+    runBackupDiscovery({ force: false });
+  } else {
+    const panel = $('backup-discover-panel');
+    if (panel) panel.hidden = true;
+  }
+}
+
+// Cached state for discovery so re-entering the Settings tab doesn't
+// trigger another 5-second LAN sweep. Manual "Rescan" bypasses this.
+let _backupHasCreds = false;
+let _backupDiscoveryRan = false;
+
+// Translate machine-readable error tokens from the backup module into
+// something a normal human can act on. Anything not in this map gets
+// shown verbatim (it's already a real error string from mount.cifs or
+// smbclient).
+function _backupHumaniseError(s) {
+  if (!s) return 'unknown error';
+  const map = {
+    no_credentials: 'Enter NAS host, share, username, and password to test.',
+  };
+  return map[s] || s;
+}
+
+async function runBackupDiscovery({ force }) {
+  const panel = $('backup-discover-panel');
+  const list = $('backup-discover-list');
+  const state = $('backup-discover-state');
+  if (!panel || !list || !state) return;
+  if (_backupDiscoveryRan && !force) {
+    panel.hidden = false;
+    return;
+  }
+  _backupDiscoveryRan = true;
+  panel.hidden = false;
+  state.textContent = 'Scanning your network…';
+  state.dataset.kind = '';
+  list.innerHTML = '';
+  try {
+    const r = await fetch('/api/backup/discover');
+    const j = await r.json();
+    const hosts = (j && j.hosts) || [];
+    if (!hosts.length) {
+      state.textContent = 'No SMB devices found. Type the NAS address below.';
+      return;
+    }
+    state.textContent = `${hosts.length} device${hosts.length === 1 ? '' : 's'} found — click to use`;
+    for (const h of hosts) {
+      const li = document.createElement('li');
+      const labelHost = h.name && h.name !== h.ip ? h.name : '';
+      li.innerHTML = labelHost
+        ? `<span class="nas-name"></span><span class="nas-ip"></span>`
+        : `<span class="nas-ip"></span>`;
+      const nameEl = li.querySelector('.nas-name');
+      const ipEl = li.querySelector('.nas-ip');
+      if (nameEl) nameEl.textContent = labelHost;
+      if (ipEl) ipEl.textContent = h.ip;
+      // Click chooses this host: prefer hostname when we have one (works
+      // across IP changes if the NAS broadcasts a name) but fall back to
+      // raw IP. Connectivity test will fire automatically once the user
+      // adds username + password.
+      li.addEventListener('click', () => {
+        const hostInput = $('backup-host');
+        if (hostInput) {
+          hostInput.value = labelHost || h.ip;
+          hostInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        // Hide the panel once a pick is made — it's served its purpose.
+        panel.hidden = true;
+        // If the user already typed creds, populating host should
+        // immediately satisfy the auto-test guard; otherwise focus the
+        // username field as the natural next step.
+        const u = $('backup-username');
+        if (u && !u.value) u.focus();
+      });
+      list.appendChild(li);
+    }
+  } catch (err) {
+    state.textContent = 'Scan failed: ' + (err.message || err);
+    state.dataset.kind = 'err';
+  }
+}
+
+$('backup-discover-rescan')?.addEventListener('click', () => {
+  runBackupDiscovery({ force: true });
+});
+
+// Share dropdown: as soon as host + username + password are all filled
+// in, ask the server to enumerate shares on that host so the user can
+// pick from a datalist instead of guessing the share name. Debounced
+// the same way as the connectivity auto-test, but with its own signature
+// so it doesn't double-fire alongside the test.
+let _backupShareSig = '';
+async function _maybeLoadShares() {
+  const f = _readBackupForm();
+  if (!f.host || !f.username || !f.password) return;
+  const sig = `${f.host}|${f.username}|${f.password}|${f.domain}`;
+  if (sig === _backupShareSig) return;
+  _backupShareSig = sig;
+  const dl = $('backup-share-options');
+  const hint = $('backup-share-hint');
+  if (!dl) return;
+  if (hint) { hint.textContent = 'Looking up available shares…'; hint.dataset.kind = ''; }
+  try {
+    const r = await fetch('/api/backup/list-shares', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        host: f.host, username: f.username,
+        password: f.password, domain: f.domain,
+      }),
+    });
+    let j = {};
+    try { j = await r.json(); } catch (_) {}
+    if (!r.ok || !j.ok) {
+      // Non-fatal: user can still type the share name manually.
+      if (hint) {
+        hint.textContent = 'Couldn\u2019t list shares (' + (j.error || j.detail || ('HTTP ' + r.status)) + ') \u2014 type it manually.';
+        hint.dataset.kind = '';
+      }
+      return;
+    }
+    const shares = j.shares || [];
+    dl.innerHTML = '';
+    for (const name of shares) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      dl.appendChild(opt);
+    }
+    if (hint) {
+      if (shares.length) {
+        hint.textContent = `${shares.length} share${shares.length === 1 ? '' : 's'} available — click the field to pick.`;
+        hint.dataset.kind = 'ok';
+      } else {
+        hint.textContent = 'No shares listed for this account.';
+        hint.dataset.kind = '';
+      }
+    }
+  } catch (err) {
+    if (hint) { hint.textContent = 'Share lookup failed: ' + (err.message || err); hint.dataset.kind = ''; }
+  }
 }
 
 function _backupSetMsg(id, text, kind) {
@@ -5294,6 +5439,7 @@ async function loadBackupCreds() {
   try {
     const r = await fetch('/api/backup/credentials');
     const j = await r.json();
+    _backupHasCreds = !!j.has_credentials;
     if (j.has_credentials && j.remote) {
       const remote = j.remote;
       status.textContent = `saved · \\\\${remote.host || '?'}\\${remote.share || '?'}`;
@@ -5383,7 +5529,7 @@ async function _runBackupTest(mode = 'manual') {
       // FastAPI HTTPException returns {detail: "..."} on 4xx/5xx; our own
       // ok:false body uses {error: "..."}. Try both, then HTTP status, so
       // the user always sees something specific.
-      const reason = j.error || j.detail || `HTTP ${r.status}`;
+      const reason = _backupHumaniseError(j.error || j.detail || `HTTP ${r.status}`);
       _backupSetMsg('backup-creds-msg', 'Failed: ' + reason, 'err');
     }
   } catch (err) {
@@ -5400,10 +5546,17 @@ $('backup-test')?.addEventListener('click', () => _runBackupTest('manual'));
 (function _wireBackupAutoTest() {
   const ids = ['backup-host', 'backup-share', 'backup-subdir',
                'backup-username', 'backup-password', 'backup-domain'];
-  let timer = null;
+  let testTimer = null;
+  let shareTimer = null;
   let lastSig = '';
   function schedule() {
     const f = _readBackupForm();
+    // Share lookup needs only host/username/password — schedule that
+    // independently from the connectivity test (which needs all four).
+    if (f.host && f.username && f.password) {
+      if (shareTimer) clearTimeout(shareTimer);
+      shareTimer = setTimeout(() => _maybeLoadShares(), 700);
+    }
     const complete = f.host && f.share && f.username && f.password;
     if (!complete) return;
     // Skip if nothing actually changed since the last successful trigger
@@ -5411,8 +5564,8 @@ $('backup-test')?.addEventListener('click', () => _runBackupTest('manual'));
     const sig = `${f.host}|${f.share}|${f.subdir}|${f.username}|${f.password}|${f.domain}`;
     if (sig === lastSig) return;
     lastSig = sig;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => _runBackupTest('auto'), 700);
+    if (testTimer) clearTimeout(testTimer);
+    testTimer = setTimeout(() => _runBackupTest('auto'), 700);
   }
   ids.forEach(id => {
     const el = $(id);

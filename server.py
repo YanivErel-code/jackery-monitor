@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 import auth
 import backup
 import backup_creds
+import backup_discover
 import cost as cost_module
 import energy_db
 import forecaster
@@ -4096,6 +4097,41 @@ async def api_backup_test(body: dict | None = None):
         if not all(creds[k] for k in ("host", "share", "username", "password")):
             raise HTTPException(400, "host, share, username, password are required")
     return await asyncio.to_thread(backup.test_connectivity, creds)
+
+
+@app.get("/api/backup/discover")
+async def api_backup_discover():
+    """Sweep the container's local subnet for SMB hosts (port 445).
+    Drives the auto-discovery hint on the Settings → Backup card when
+    no credentials are saved yet. Returns:
+        {"hosts": [{"ip":..., "name":..., "port":445}, ...]}
+    Latency is bounded (~5s worst case on a /24). Best-effort: returns
+    an empty list rather than erroring if the subnet can't be inferred.
+    """
+    hosts = await asyncio.to_thread(backup_discover.discover_smb_hosts)
+    return {"hosts": hosts}
+
+
+@app.post("/api/backup/list-shares")
+async def api_backup_list_shares(body: dict):
+    """Enumerate share names on a host using supplied creds. The UI uses
+    this to populate the share dropdown after the user has typed host +
+    username + password. Returns {ok, shares} or {ok: False, error}.
+
+    We deliberately don't fall back to saved creds here — discovery is
+    only useful while the user is actively configuring a NEW destination.
+    """
+    body = body or {}
+    host = (body.get("host") or "").strip()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    domain = (body.get("domain") or "WORKGROUP").strip()
+    if not host or not username or not password:
+        raise HTTPException(400, "host, username, password are required")
+    return await asyncio.to_thread(
+        backup_discover.list_shares,
+        host, username, password, domain=domain,
+    )
 
 
 @app.get("/api/backup/status")
