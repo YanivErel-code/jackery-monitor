@@ -241,21 +241,6 @@
         </section>
       </div>
 
-      <!-- Per-expansion-battery state (only shown when packs are
-           attached). Collapsible — header summary stays visible
-           always; the per-pack list expands on click. Collapse
-           state persists per-browser via localStorage. -->
-      <section id="battery-packs-card" class="card collapsible collapsed" hidden>
-        <div class="card-header collapsible-header" id="battery-packs-toggle"
-             role="button" tabindex="0" aria-expanded="false"
-             aria-controls="battery-packs-list">
-          <h2>Battery packs</h2>
-          <span id="battery-packs-summary" class="hint">—</span>
-          <span class="collapsible-chevron" aria-hidden="true">▾</span>
-        </div>
-        <div id="battery-packs-list" class="battery-packs-list"></div>
-      </section>
-
       <!-- Power — output ports (cloud MQTT toggles) plus the
            AC-charge Kasa plug at the end (only rendered when a plug
            is configured for this device's smart-charge). Section is
@@ -276,6 +261,24 @@
             <span class="sw-state" id="ac-charge-state">—</span>
           </button>
         </div>
+      </section>
+
+      <!-- Per-expansion-battery state (only shown when packs are
+           attached). Collapsible — header summary stays visible
+           always; the per-pack list expands on click. Collapse
+           state persists per-browser via localStorage. Lives below
+           the Power card so the most-actionable controls (output
+           toggles, AC-charge plug) sit closer to the live KPIs at
+           the top of the tab; per-pack drill-down is rare. -->
+      <section id="battery-packs-card" class="card collapsible collapsed" hidden>
+        <div class="card-header collapsible-header" id="battery-packs-toggle"
+             role="button" tabindex="0" aria-expanded="false"
+             aria-controls="battery-packs-list">
+          <h2>Battery packs</h2>
+          <span id="battery-packs-summary" class="hint">—</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
+        </div>
+        <div id="battery-packs-list" class="battery-packs-list"></div>
       </section>
 
       <!-- Live chart -->
