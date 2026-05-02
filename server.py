@@ -1286,6 +1286,57 @@ async def smart_charge_loop():
         await asyncio.sleep(5 * 60)
 
 
+# Per-device probe cadence after a failure: 5 min, 10, 20, 30, 30, ...
+# Capped so we don't drift to every-few-hours and miss a recovery for
+# an hour after the plug comes back. After a success, resets to 5 min.
+KASA_RECONCILER_BASE_S = 5 * 60
+KASA_RECONCILER_MAX_BACKOFF_S = 30 * 60
+
+
+async def kasa_reconciler_loop():
+    """Periodically probe every saved Kasa plug and persist the
+    outcome (last_seen, last_error, consecutive_failures) on the
+    registry. Lets transient failures self-heal and surfaces
+    persistent ones to the UI without making the user click around.
+
+    Per-device exponential backoff so an offline plug doesn't get
+    hammered every 5 min — but capped so a recovered plug isn't
+    stuck offline forever (max wait between probes is 30 min)."""
+    while True:
+        try:
+            now = time.time()
+            for d in state.kasa.list_devices():
+                fails = d.get("consecutive_failures") or 0
+                last_failed = d.get("last_failed_ts") or 0
+                # Exponential: 5min x 2^fails, capped. fails capped at
+                # 5 to avoid overflow at extreme values.
+                wait_s = min(
+                    KASA_RECONCILER_BASE_S * (2 ** min(fails, 5)),
+                    KASA_RECONCILER_MAX_BACKOFF_S,
+                )
+                if fails > 0 and (now - last_failed) < wait_s:
+                    continue
+                host = d.get("host")
+                if not host:
+                    continue
+                try:
+                    info = await kasa_client.status(host)
+                    state.kasa.update_probe(
+                        host, success=True,
+                        is_on=info.get("is_on"),
+                        model=info.get("model"),
+                        alias=info.get("alias"),
+                    )
+                except Exception as e:
+                    state.kasa.update_probe(
+                        host, success=False, error=str(e),
+                    )
+                    log.info("Kasa reconciler: %s offline (%s)", host, e)
+        except Exception as e:
+            log.warning("kasa reconciler loop iteration failed: %s", e)
+        await asyncio.sleep(KASA_RECONCILER_BASE_S)
+
+
 def _db_pack_to_cloud_shape(row: dict) -> dict:
     """energy_db's per-row shape uses internal names; the UI + smart-charge
     expect the cloud's raw field names. Convert at the boundary so neither
@@ -1861,6 +1912,7 @@ async def lifespan(app: FastAPI):
     state.poll_task = asyncio.create_task(poll_loop())
     state.smart_charge_task = asyncio.create_task(smart_charge_loop())
     state.advisor_task = asyncio.create_task(advisor_loop())
+    state.kasa_reconciler_task = asyncio.create_task(kasa_reconciler_loop())
     yield
     if state.poll_task:
         state.poll_task.cancel()
@@ -1868,6 +1920,8 @@ async def lifespan(app: FastAPI):
         state.smart_charge_task.cancel()
     if getattr(state, "advisor_task", None):
         state.advisor_task.cancel()
+    if getattr(state, "kasa_reconciler_task", None):
+        state.kasa_reconciler_task.cancel()
     try:
         await state.client.disconnect()
     except Exception:
@@ -3256,29 +3310,61 @@ async def api_kasa_status(host: str):
 
 
 # ---- saved Kasa device registry (separate from rules) ----
+def _enrich_kasa_for_ui(d: dict) -> dict:
+    """Surface the registry's cached probe state on the wire shape the
+    UI expects: `online`/`is_on`/`error`/`status` derived from the
+    last reconciler outcome."""
+    return {
+        **d,
+        "is_on": d.get("last_known_is_on"),
+        "online": state.kasa.is_online(d),
+        "status": state.kasa.status_of(d),
+        "error": d.get("last_error"),
+        "last_seen_ts": d.get("last_seen_ts"),
+    }
+
+
 @app.get("/api/kasa/saved")
 async def api_kasa_saved_list(refresh: bool = False,
                               jackery_sn: str | None = None):
     """Return saved Kasa devices. If `jackery_sn` is provided, restrict
     to plugs assigned to that Jackery (or unassigned legacy entries).
-    If `refresh=true`, also probe each device in parallel so the UI can
-    display current on/off state."""
+
+    By default returns CACHED probe state from the kasa_reconciler_loop
+    background task (every ~5 min, exponential backoff per device on
+    failure). If `refresh=true`, force an immediate parallel probe and
+    update the cache — useful for the user's "I just plugged it back
+    in, refresh now" path. Both routes update the persisted
+    consecutive_failures counter."""
     devices = state.kasa.list_devices(jackery_device_sn=jackery_sn)
     if not refresh or not devices:
-        return {"devices": [{**d, "is_on": None, "online": None} for d in devices]}
+        return {"devices": [_enrich_kasa_for_ui(d) for d in devices]}
 
     async def _probe(d):
         try:
             info = await kasa_client.status(d["host"])
-            return {**d, "is_on": info.get("is_on"),
-                    "model": d.get("model") or info.get("model"),
-                    "alias": d.get("alias") or info.get("alias"),
-                    "online": True}
-        except Exception:
-            return {**d, "is_on": None, "online": False}
+            state.kasa.update_probe(
+                d["host"], success=True,
+                is_on=info.get("is_on"),
+                model=info.get("model"),
+                alias=info.get("alias"),
+            )
+        except Exception as e:
+            state.kasa.update_probe(d["host"], success=False, error=str(e))
+        return _enrich_kasa_for_ui(state.kasa.get(d["host"]) or d)
 
     enriched = await asyncio.gather(*[_probe(d) for d in devices])
     return {"devices": list(enriched)}
+
+
+@app.get("/api/kasa/health")
+def api_kasa_health():
+    """Lightweight summary the dashboard polls to decide whether to
+    show the Automation tab dot. No probing — reads cached state."""
+    return {
+        "offline_count": state.kasa.offline_count(),
+        "device_count": len(state.kasa.list_devices()),
+    }
 
 
 @app.post("/api/kasa/saved")

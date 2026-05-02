@@ -123,3 +123,54 @@ class KasaRegistry:
     def hosts_in_use(self, rules: list[dict]) -> set[str]:
         """Return the set of saved-device hosts referenced by any rule."""
         return {r.get("kasa_host") for r in (rules or []) if r.get("kasa_host")}
+
+    # ---------- probe-result tracking ----------
+    # The reconciler loop in server.py periodically probes each saved
+    # plug and records the outcome here. The dashboard reads cached
+    # state via /api/kasa/saved so it gets fast page loads + a stable
+    # signal for "is this plug reachable?" without hammering the LAN
+    # every time the user opens a tab.
+    def update_probe(self, host: str, *, success: bool,
+                     is_on: bool | None = None,
+                     error: str | None = None,
+                     model: str | None = None,
+                     alias: str | None = None) -> dict | None:
+        d = self.get(host)
+        if not d:
+            return None
+        now = time.time()
+        if success:
+            d["last_seen_ts"] = now
+            d["last_error"] = None
+            d["consecutive_failures"] = 0
+            if is_on is not None:
+                d["last_known_is_on"] = is_on
+            # Don't overwrite a user-edited alias; only fill if empty.
+            if model and not d.get("model"):
+                d["model"] = model
+            if alias and not d.get("alias"):
+                d["alias"] = alias
+        else:
+            # Truncate error so an unbounded stack trace doesn't bloat
+            # the JSON file.
+            d["last_error"] = (str(error)[:240] if error else "probe failed")
+            d["consecutive_failures"] = (d.get("consecutive_failures") or 0) + 1
+            d["last_failed_ts"] = now
+        self._save()
+        return d
+
+    def status_of(self, d: dict) -> str:
+        """One of 'online' | 'offline' | 'unknown' (never probed)."""
+        if (d.get("consecutive_failures") or 0) > 0:
+            return "offline"
+        if d.get("last_seen_ts"):
+            return "online"
+        return "unknown"
+
+    def is_online(self, d: dict) -> bool:
+        return self.status_of(d) == "online"
+
+    def offline_count(self) -> int:
+        """Number of saved devices currently in the 'offline' state.
+        Used by the dashboard to render the Automation tab dot."""
+        return sum(1 for d in self.devices if self.status_of(d) == "offline")

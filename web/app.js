@@ -378,11 +378,29 @@ async function refreshAutomationDot() {
     const params = dev?.device_sn
       ? `?device_sn=${encodeURIComponent(dev.device_sn)}&status=pending`
       : '?status=pending';
-    const r = await fetch(`/api/algorithm/suggestions${params}`);
-    if (!r.ok) return;
-    const j = await r.json();
-    const count = (j.suggestions || []).length;
-    setAutomationDot(count > 0);
+    const [insightsR, kasaHealthR] = await Promise.all([
+      fetch(`/api/algorithm/suggestions${params}`),
+      fetch('/api/kasa/health'),
+    ]);
+    let insightCount = 0;
+    let kasaOffline = 0;
+    if (insightsR.ok) {
+      const j = await insightsR.json();
+      insightCount = (j.suggestions || []).length;
+    }
+    if (kasaHealthR.ok) {
+      const k = await kasaHealthR.json();
+      kasaOffline = k.offline_count || 0;
+    }
+    const dot = $('tab-automation-dot');
+    setAutomationDot(insightCount > 0 || kasaOffline > 0);
+    if (dot) {
+      // Dynamic title so hovering reveals what actually needs attention.
+      const reasons = [];
+      if (insightCount > 0) reasons.push(`${insightCount} AI insight(s) pending`);
+      if (kasaOffline > 0) reasons.push(`${kasaOffline} Kasa device(s) offline`);
+      dot.title = reasons.join(' · ') || 'Automation';
+    }
   } catch { /* network blip — leave dot unchanged */ }
 }
 
@@ -995,11 +1013,21 @@ function renderSavedKasa(devices) {
       const j = (lastDevices || []).find(x => x.device_sn === d.jackery_device_sn);
       assignmentLabel = j?.name || `…${d.jackery_device_sn.slice(-6)}`;
     }
+    // Last-seen + error: only render when we actually have something to
+    // say. A truncated error keeps the row from blowing up vertically;
+    // hover the badge for the full text.
+    const lastSeen = d.last_seen_ts
+      ? new Date(d.last_seen_ts * 1000).toLocaleString()
+      : null;
+    const errLine = (d.online === false && d.error)
+      ? `<div class="kr-error" title="${safe(d.error)}">⚠ ${safe(String(d.error).slice(0, 100))}${String(d.error).length > 100 ? '…' : ''}${lastSeen ? ` · last seen ${safe(lastSeen)}` : ''}</div>`
+      : '';
     return `<div class="kasa-row" data-host="${safe(d.host)}">
       <span class="kr-state ${stateClass}">${stateText}</span>
       <div class="kr-name">
         <div class="kr-alias">${safe(d.alias)}</div>
         <div class="kr-meta">${meta} · <span class="kr-assignment">→ ${safe(assignmentLabel)}</span></div>
+        ${errLine}
       </div>
       <div class="kasa-row-actions">
         <button class="btn btn-ghost" data-toggle="${safe(d.host)}" data-onstate="${d.is_on ? '1' : '0'}" type="button">${d.is_on ? 'Turn off' : 'Turn on'}</button>

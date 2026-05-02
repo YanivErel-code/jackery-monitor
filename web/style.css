@@ -1137,6 +1137,13 @@ main {
 .kasa-row .kr-alias { font-weight: 500; color: var(--text); font-size: 14px; }
 .kasa-row .kr-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
 .kasa-row .kr-meta .host { color: var(--text-mute); }
+.kasa-row .kr-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #f08080;
+  margin-top: 4px;
+  word-break: break-word;
+}
 .kasa-row-actions { display: flex; gap: 6px; }
 .kasa-row-actions button { font-size: 12px; padding: 4px 10px; }
 
