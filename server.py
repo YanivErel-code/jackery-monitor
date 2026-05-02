@@ -2066,6 +2066,7 @@ async def lifespan(app: FastAPI):
     state.smart_charge_task = asyncio.create_task(smart_charge_loop())
     state.advisor_task = asyncio.create_task(advisor_loop())
     state.kasa_reconciler_task = asyncio.create_task(kasa_reconciler_loop())
+    state.forecast_recorder_task = asyncio.create_task(forecast_recorder_loop())
     yield
     if state.poll_task:
         state.poll_task.cancel()
@@ -2075,6 +2076,8 @@ async def lifespan(app: FastAPI):
         state.advisor_task.cancel()
     if getattr(state, "kasa_reconciler_task", None):
         state.kasa_reconciler_task.cancel()
+    if getattr(state, "forecast_recorder_task", None):
+        state.forecast_recorder_task.cancel()
     try:
         await state.client.disconnect()
     except Exception:
@@ -2470,12 +2473,16 @@ def api_energy_devices():
     return {"devices": state.energy.all_totals()}
 
 
-@app.get("/api/forecast")
-async def api_forecast(device_sn: str | None = None):
-    """SOC forecast for the next ~5 days based on weather + per-device history.
+async def _build_and_record_forecast(device_sn: str | None) -> dict:
+    """Resolve per-device context (model_code, current SOC, capacity)
+    and build a forecast, persisting the resulting predictions to
+    `prediction_accuracy` when ready. Shared by `/api/forecast` and the
+    `forecast_recorder_loop` background task so both paths produce
+    identical prediction rows.
 
-    Returns the simulated SOC curve plus the fitted model coefficients so the
-    UI can show how confident the prediction is."""
+    Returns the full response dict the API surfaces, including
+    {error, configured} sentinels so the API can pass it through and
+    the background loop can log a single line."""
     loc = device_location.get()
     if not loc:
         return {"error": "location not set", "configured": False}
@@ -2485,26 +2492,20 @@ async def api_forecast(device_sn: str | None = None):
     if not device_sn:
         return {"error": "no active device", "configured": True}
 
-    # Resolve the model_code + current SOC from the *requested* device's
-    # cloud_meta entry (or its energy-DB row), not from `state.device` —
-    # otherwise asking /api/forecast?device_sn=<secondary> while bridge-
-    # active is the primary returns the secondary's history paired with
-    # the primary's capacity / SOC, which produces nonsense (and is the
-    # source of the multi-device "wrong forecast" symptom).
+    # Resolve model_code + current SOC from the *requested* device's
+    # cloud_meta entry, not from `state.device` — otherwise asking
+    # about a secondary device while bridge-active is the primary
+    # mixes the two devices' data into one forecast.
     bridge_active_sn = state.device.device_sn if state.device else None
     bridge_is_target = bridge_active_sn and str(bridge_active_sn) == str(device_sn)
     model_code: int | None = None
     main_soc = 50.0
     cloud = state.last_cloud_meta or {}
     if bridge_is_target:
-        # Bridge-active path: use the rich state.device + state.last_status.
         model_code = getattr(state.device, "model_code", None)
         if state.last_status and state.last_status.get("battery_percent") is not None:
             main_soc = float(state.last_status["battery_percent"])
     else:
-        # Non-active device: pull model_code from cloud_meta.devices and
-        # current SOC from cloud_meta.devices_telemetry. Both are kept up
-        # to date by the bridge polling every device on every tick.
         for d in (cloud.get("devices") or []):
             if str(d.get("device_sn")) == str(device_sn):
                 mc = d.get("model_code")
@@ -2515,16 +2516,9 @@ async def api_forecast(device_sn: str | None = None):
         if tele.get("battery_percent") is not None:
             main_soc = float(tele["battery_percent"])
 
-    # _total_capacity_wh() auto-derives total capacity from the live
-    # battery_packs cache (main + N x pack), with the manual override
-    # winning if set and the spec capacity as the fallback.
     capacity = _total_capacity_wh(device_sn, model_code)
-    # Pair the system-wide capacity with the system-wide SOC so the
-    # simulation starts from the right energy level.
     starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
 
-    # 14 days of hourly-bucketed history is plenty for both the regression and
-    # the load profile.
     energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
     weather = await weather_client.fetch_irradiance(loc["latitude"], loc["longitude"])
     if weather.get("error"):
@@ -2550,6 +2544,79 @@ async def api_forecast(device_sn: str | None = None):
         **result,
         "configured": True,
     }
+
+
+@app.get("/api/forecast")
+async def api_forecast(device_sn: str | None = None):
+    """SOC forecast for the next ~5 days based on weather + per-device history.
+
+    Returns the simulated SOC curve plus the fitted model coefficients so the
+    UI can show how confident the prediction is."""
+    return await _build_and_record_forecast(device_sn)
+
+
+# Hourly cadence for the periodic forecast recorder. The advisor's
+# accuracy join needs predictions that have aged into the past — at
+# this cadence each device gets ~24 fresh prediction snapshots per
+# day, plenty for the lead-time-bucket MAE summaries even when smart-
+# charge is off and the user never opens the Forecast tab. Open-Meteo
+# itself updates hourly, and weather_client caches between calls so
+# multi-device accounts don't re-hit the API.
+FORECAST_RECORDER_INTERVAL_S = 3600
+# Wait for the bridge to populate cloud_meta + state.device before
+# the first iteration; otherwise we'd skip that pass with "no
+# devices" warnings on every container restart.
+FORECAST_RECORDER_INITIAL_DELAY_S = 90
+
+
+async def _record_forecasts_for_all_devices() -> None:
+    """Build + persist a forecast for every device on the account that
+    we have recent cloud_meta for. Skips devices whose forecaster isn't
+    ready (returns ready=False); those will start landing rows once
+    enough history accumulates. Errors are caught per-device so one
+    bad device can't sink the rest of the iteration."""
+    cloud = state.last_cloud_meta or {}
+    devs = cloud.get("devices") or []
+    if not devs:
+        log.debug("forecast_recorder: no devices in cloud_meta yet, skipping")
+        return
+    if not device_location.get():
+        log.debug("forecast_recorder: location not set, skipping")
+        return
+    recorded = skipped = 0
+    for d in devs:
+        sn = d.get("device_sn")
+        if not sn:
+            continue
+        try:
+            result = await _build_and_record_forecast(sn)
+            if result.get("ready") and result.get("forecast"):
+                recorded += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            log.warning("forecast_recorder: build for %s failed: %s", sn, e)
+            skipped += 1
+    log.info("forecast_recorder: recorded predictions for %d device(s); skipped %d (calibrating or error)",
+             recorded, skipped)
+
+
+async def forecast_recorder_loop() -> None:
+    """Build per-device forecasts on a fixed cadence so the prediction-
+    accuracy table keeps accumulating data regardless of smart-charge
+    state or Forecast-tab traffic. Without this, prediction_accuracy
+    only gets new rows when (a) the user opens the Forecast tab or
+    (b) the smart-charge controller is enabled and ticking — both can
+    be quiet for days, which then leaves the daily advisor with no
+    post-deploy predictions to evaluate (advisor anomaly flagged
+    2026-05-02)."""
+    await asyncio.sleep(FORECAST_RECORDER_INITIAL_DELAY_S)
+    while True:
+        try:
+            await _record_forecasts_for_all_devices()
+        except Exception as e:
+            log.warning("forecast_recorder loop iteration failed: %s", e)
+        await asyncio.sleep(FORECAST_RECORDER_INTERVAL_S)
 
 
 def _bucket_accuracy(samples: list[dict]) -> dict[str, dict[str, float]]:

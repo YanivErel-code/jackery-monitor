@@ -228,6 +228,61 @@ def test_view_select_only_bumps_requesting_browser_ws(server_state):
     assert s.state.ws_clients[ws_b]["view_id"] is None
 
 
+async def test_record_forecasts_for_all_devices(server_state, monkeypatch):
+    """The hourly forecast recorder should iterate every device the
+    bridge knows about and call the build helper for each, ignoring
+    failures on individual devices instead of bailing out. Verifies
+    that the loop covers BOTH the bridge-active device and any
+    secondary, so prediction_accuracy keeps populating regardless of
+    which Jackery the worker happens to be watching."""
+    s = server_state
+
+    # Stub location so the recorder doesn't bail early on "location
+    # not set." Returns whatever truthy dict the helper would expect.
+    monkeypatch.setattr(
+        s.device_location, "get",
+        lambda: {"latitude": 37.7, "longitude": -122.4},
+    )
+
+    called: list[str] = []
+
+    async def fake_build(sn):
+        called.append(sn)
+        # 5000 succeeds, 3000 returns ready=False (calibrating) — the
+        # loop should still cover both and just count the secondary
+        # as skipped.
+        if sn == "SN-A":
+            return {"ready": True, "forecast": [{"ts": 1, "predicted_soc": 50}],
+                    "configured": True, "device_sn": sn}
+        return {"ready": False, "forecast": [], "configured": True, "device_sn": sn}
+    monkeypatch.setattr(s, "_build_and_record_forecast", fake_build)
+
+    await s._record_forecasts_for_all_devices()
+
+    # Both devices in cloud_meta got attempted, in order they appear.
+    assert called == ["SN-A", "SN-B"]
+
+
+async def test_record_forecasts_skips_when_no_devices(server_state, monkeypatch):
+    """Empty cloud_meta on cold start (bridge hasn't populated it yet)
+    should not raise — just log and skip the iteration."""
+    s = server_state
+    s.state.last_cloud_meta = {}  # simulate pre-poll state
+
+    monkeypatch.setattr(
+        s.device_location, "get",
+        lambda: {"latitude": 37.7, "longitude": -122.4},
+    )
+    called: list[str] = []
+    async def fake_build(sn):
+        called.append(sn)
+        return {"ready": True, "forecast": [], "configured": True}
+    monkeypatch.setattr(s, "_build_and_record_forecast", fake_build)
+
+    await s._record_forecasts_for_all_devices()
+    assert called == []  # nothing to iterate, nothing called
+
+
 def test_view_history_is_cached(server_state, monkeypatch):
     """Per-view history is hit on every tick — a TTL cache keeps the
     energy DB query rate sane. We count only LIVE_CHART_HOURS-window
