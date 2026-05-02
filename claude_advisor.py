@@ -69,7 +69,34 @@ CONTEXT_1M_HEADER = os.environ.get(
 # Valid: "low" | "medium" | "high". Higher = the model will think longer
 # when the task warrants it. The model self-allocates the budget.
 # (Older models use a fixed token budget instead — see THINKING_BUDGET.)
-THINKING_EFFORT = os.environ.get("JACKERY_ADVISOR_THINKING_EFFORT", "high")
+DEFAULT_THINKING_EFFORT = "high"
+
+
+def _get_thinking_effort() -> str:
+    """Resolution order at call time:
+       1. JACKERY_ADVISOR_THINKING_EFFORT env var (legacy ops control)
+       2. anthropic_prefs (UI Settings tab)
+       3. fallback default."""
+    env = os.environ.get("JACKERY_ADVISOR_THINKING_EFFORT")
+    if env:
+        return env
+    try:
+        return anthropic_prefs.get_thinking_effort()
+    except Exception:
+        return DEFAULT_THINKING_EFFORT
+
+
+def _wants_1m_context() -> bool:
+    """Whether to send the context-1m beta header on the next API call.
+    Reads at call time so a Settings-tab toggle takes effect on the
+    next daily review without a container restart."""
+    env = os.environ.get("JACKERY_ADVISOR_1M_CONTEXT")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        return anthropic_prefs.get_1m_context()
+    except Exception:
+        return True  # preserve pre-prefs always-on default
 
 # Legacy fixed-budget thinking, used only if JACKERY_ADVISOR_THINKING_MODE
 # is set to "budget" (for older models that don't accept adaptive).
@@ -465,6 +492,16 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
             #   - Opus 4.7+: {"type": "adaptive"} + extra_body output_config
             # The model rejects the wrong shape. JACKERY_ADVISOR_THINKING_MODE
             # selects between them; default "adaptive" matches Opus 4.7.
+            # 1M-context beta header is opt-in per the Settings tab —
+            # only sent when the user has the flag enabled (default
+            # True for compat with the pre-prefs always-on behavior).
+            # Sending it on a model that doesn't support it is a no-op
+            # per Anthropic; not sending it limits the conversation to
+            # the model's stock context window.
+            extra_headers = (
+                {"anthropic-beta": CONTEXT_1M_HEADER}
+                if _wants_1m_context() else {}
+            )
             kwargs: dict = dict(
                 model=_get_model(),
                 max_tokens=MAX_TOKENS,
@@ -472,7 +509,7 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
                 tool_choice={"type": "auto"},
                 system=_system_prompt(),
                 messages=messages,
-                extra_headers={"anthropic-beta": CONTEXT_1M_HEADER},
+                extra_headers=extra_headers,
             )
             if THINKING_MODE == "adaptive":
                 kwargs["thinking"] = {"type": "adaptive"}
@@ -480,7 +517,7 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
                 # not a kwarg on the SDK call — pass via extra_body so the
                 # SDK forwards it untouched.
                 kwargs["extra_body"] = {
-                    "output_config": {"effort": THINKING_EFFORT},
+                    "output_config": {"effort": _get_thinking_effort()},
                 }
             else:
                 kwargs["thinking"] = {

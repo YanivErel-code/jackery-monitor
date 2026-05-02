@@ -3289,10 +3289,43 @@ ANTHROPIC_MODELS_FALLBACK: list[dict[str, str]] = [
     {"id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5"},
 ]
 
+# Substring patterns for model IDs that support the 1M-context beta.
+# Applied case-insensitively. Override via env var when Anthropic
+# extends 1M to a new family — no code change needed.
+#   JACKERY_1M_MODEL_PATTERNS="opus,sonnet"  → flags both families
+# As of this writing, only the Opus 4.x line ships with 1M support.
+ANTHROPIC_1M_PATTERNS: tuple[str, ...] = tuple(
+    p.strip().lower()
+    for p in os.environ.get("JACKERY_1M_MODEL_PATTERNS", "opus").split(",")
+    if p.strip()
+)
+
+
+def _model_supports_1m(model_id: str) -> bool:
+    """Heuristic: does this model id match any configured 1M-capable
+    pattern? Used by the UI to decide whether to synthesize a "(1M
+    context)" entry alongside the bare model entry in the dropdown."""
+    if not model_id:
+        return False
+    needle = model_id.lower()
+    return any(p in needle for p in ANTHROPIC_1M_PATTERNS)
+
+
+def _annotate_models(models: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Tag each model with `supports_1m` so the UI can decide which
+    ones to synthesize a `(1M context)` dropdown variant for. Pure;
+    just adds a flag, doesn't filter."""
+    return [
+        {**m, "supports_1m": _model_supports_1m(m.get("id", ""))}
+        for m in models
+    ]
+
 
 @app.get("/api/anthropic/models")
 async def api_anthropic_models(refresh: bool = False):
-    """Return the list of Claude models the user can pick from.
+    """Return the list of Claude models the user can pick from, each
+    annotated with `supports_1m` (matched against
+    JACKERY_1M_MODEL_PATTERNS, default `opus`).
 
     When an Anthropic API key is configured, fetches the live list
     from the Anthropic API (cached 5 min). When no key is configured
@@ -3306,16 +3339,18 @@ async def api_anthropic_models(refresh: bool = False):
     if not refresh and (now - _anthropic_models_cache["ts"]) < ANTHROPIC_MODELS_CACHE_TTL_S:
         cached = _anthropic_models_cache["models"]
         if cached:
-            return {"models": cached, "source": "cache"}
+            return {"models": _annotate_models(cached), "source": "cache"}
 
     api_key = ac.load() or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {"models": ANTHROPIC_MODELS_FALLBACK, "source": "fallback_no_key"}
+        return {"models": _annotate_models(ANTHROPIC_MODELS_FALLBACK),
+                "source": "fallback_no_key"}
 
     try:
         from anthropic import AsyncAnthropic
     except ImportError:
-        return {"models": ANTHROPIC_MODELS_FALLBACK, "source": "fallback_no_sdk"}
+        return {"models": _annotate_models(ANTHROPIC_MODELS_FALLBACK),
+                "source": "fallback_no_sdk"}
 
     try:
         client = AsyncAnthropic(api_key=api_key)
@@ -3328,15 +3363,16 @@ async def api_anthropic_models(refresh: bool = False):
         ]
     except Exception as e:
         log.info("anthropic models list failed (%s); using fallback", e)
-        return {"models": ANTHROPIC_MODELS_FALLBACK,
+        return {"models": _annotate_models(ANTHROPIC_MODELS_FALLBACK),
                 "source": "fallback_fetch_failed",
                 "error": str(e)[:200]}
 
     if not models:
-        return {"models": ANTHROPIC_MODELS_FALLBACK, "source": "fallback_empty"}
+        return {"models": _annotate_models(ANTHROPIC_MODELS_FALLBACK),
+                "source": "fallback_empty"}
     _anthropic_models_cache["ts"] = now
     _anthropic_models_cache["models"] = models
-    return {"models": models, "source": "live"}
+    return {"models": _annotate_models(models), "source": "live"}
 
 
 @app.get("/api/anthropic/prefs")
@@ -3349,18 +3385,31 @@ def api_anthropic_prefs_get():
 
 @app.post("/api/anthropic/prefs")
 async def api_anthropic_prefs_save(body: dict):
-    """Persist the user's model selection per role. Either or both of
-    advisor_model / narrator_model may be present; missing keys leave
-    the existing preference untouched. Returns the resulting full
-    snapshot so the UI can re-render."""
+    """Persist any subset of the user's preferences. Missing keys
+    leave the existing preference untouched.
+
+    Accepted fields:
+      - advisor_model:           Claude model id for the advisor role
+      - advisor_1m_context:      bool — send context-1m beta header
+      - advisor_thinking_effort: "low" | "medium" | "high"
+      - narrator_model:          Claude model id for the narrator role
+
+    Returns the resulting full snapshot so the UI can re-render."""
     import anthropic_prefs
-    advisor = (body or {}).get("advisor_model")
-    narrator = (body or {}).get("narrator_model")
-    if not advisor and not narrator:
-        raise HTTPException(
-            400, "at least one of advisor_model / narrator_model required")
+    body = body or {}
+    advisor_model = body.get("advisor_model")
+    narrator_model = body.get("narrator_model")
+    raw_1m = body.get("advisor_1m_context")
+    advisor_1m = bool(raw_1m) if raw_1m is not None else None
+    advisor_effort = body.get("advisor_thinking_effort")
+    if (advisor_model is None and narrator_model is None
+            and advisor_1m is None and advisor_effort is None):
+        raise HTTPException(400, "at least one preference field required")
     return anthropic_prefs.set_models(
-        advisor_model=advisor, narrator_model=narrator,
+        advisor_model=advisor_model,
+        advisor_1m_context=advisor_1m,
+        advisor_thinking_effort=advisor_effort,
+        narrator_model=narrator_model,
     )
 
 

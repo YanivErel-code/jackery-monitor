@@ -4767,16 +4767,27 @@ document.getElementById('ak-clear')?.addEventListener('click', async () => {
 });
 
 // ============================================================
-// ANTHROPIC MODEL PICKERS — populated from /api/anthropic/models
-// (live list when an API key is saved, static fallback otherwise),
-// persisted via /api/anthropic/prefs. Refreshes every time the
-// Settings tab opens.
+// ANTHROPIC MODEL + EFFORT PICKERS — populated from
+// /api/anthropic/models (live list when an API key is saved,
+// static fallback otherwise), persisted via /api/anthropic/prefs.
+// Refreshes every time the Settings tab opens.
+//
+// 1M-context handling: models flagged supports_1m by the server
+// get a synthetic "(1M context)" entry with value `${id}@1m`. On
+// save, the suffix is stripped and `advisor_1m_context: true` is
+// sent alongside the bare model id. Picking a non-@1m entry sets
+// it false. This way "future Opus" / "future Sonnet 1M" works
+// without a code change — just bump JACKERY_1M_MODEL_PATTERNS on
+// the server.
 // ============================================================
+const ANTHROPIC_1M_SUFFIX = '@1m';
+
 async function loadAnthropicModelPickers() {
   const advisorSel = $('ak-advisor-model');
   const narratorSel = $('ak-narrator-model');
+  const effortSel = $('ak-advisor-effort');
   const statusEl = $('ak-models-status');
-  if (!advisorSel || !narratorSel) return;
+  if (!advisorSel || !narratorSel || !effortSel) return;
   if (statusEl) statusEl.textContent = 'Loading model list…';
   try {
     // Parallel: fetch the available list + the user's current selection.
@@ -4789,12 +4800,21 @@ async function loadAnthropicModelPickers() {
     const models = modelsJ.models || [];
     const prefs = {
       advisor_model: prefsJ.advisor_model || '',
+      advisor_1m_context: !!prefsJ.advisor_1m_context,
+      advisor_thinking_effort: prefsJ.advisor_thinking_effort || 'high',
       narrator_model: prefsJ.narrator_model || '',
     };
-    // Populate both dropdowns. If the user's current pref isn't in the
-    // fetched list (e.g. they saved a custom ID), still preserve it as
-    // the selected option so we don't silently change their choice.
-    const populate = (sel, current) => {
+    // Compute the dropdown value that represents the current advisor
+    // selection (model + 1m flag) — if 1m is on, pick the @1m
+    // variant; else pick the bare model.
+    const advisorCurrent = prefs.advisor_model
+      ? (prefs.advisor_1m_context
+          ? `${prefs.advisor_model}${ANTHROPIC_1M_SUFFIX}`
+          : prefs.advisor_model)
+      : '';
+
+    const populate = (sel, current, opts = {}) => {
+      const { synthesize1m = false } = opts;
       sel.innerHTML = '';
       const seen = new Set();
       const addOpt = (id, label) => {
@@ -4806,14 +4826,30 @@ async function loadAnthropicModelPickers() {
         if (id === current) o.selected = true;
         sel.appendChild(o);
       };
-      for (const m of models) addOpt(m.id, m.display_name);
+      for (const m of models) {
+        addOpt(m.id, m.display_name);
+        // Synthesize a 1M variant on dropdowns that should offer it
+        // (advisor only). The server tells us which models support 1M
+        // via the `supports_1m` flag — we don't hardcode "opus" here
+        // so future families pick up the variant via the env-var
+        // pattern config without a frontend change.
+        if (synthesize1m && m.supports_1m) {
+          const id1m = `${m.id}${ANTHROPIC_1M_SUFFIX}`;
+          addOpt(id1m, `${m.display_name || m.id} (1M context)`);
+        }
+      }
       if (current && !seen.has(current)) {
         addOpt(current, `${current} (saved)`);
       }
       sel.disabled = false;
     };
-    populate(advisorSel, prefs.advisor_model);
+    populate(advisorSel, advisorCurrent, { synthesize1m: true });
     populate(narratorSel, prefs.narrator_model);
+    // Effort dropdown is static (Anthropic API enum); just select
+    // the persisted value.
+    for (const opt of effortSel.options) {
+      opt.selected = opt.value === prefs.advisor_thinking_effort;
+    }
     if (statusEl) {
       const sourceLabel = ({
         live: '✅ Live list from Anthropic.',
@@ -4830,14 +4866,10 @@ async function loadAnthropicModelPickers() {
   }
 }
 
-async function saveAnthropicModelPref(role, model) {
+async function saveAnthropicPref(body, label) {
   const statusEl = $('ak-models-status');
-  if (!model) return;
-  if (statusEl) statusEl.textContent = `Saving ${role} model…`;
+  if (statusEl) statusEl.textContent = `Saving ${label}…`;
   try {
-    const body = role === 'advisor'
-      ? { advisor_model: model }
-      : { narrator_model: model };
     const r = await fetch('/api/anthropic/prefs', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -4848,7 +4880,7 @@ async function saveAnthropicModelPref(role, model) {
       throw new Error(j.detail || `HTTP ${r.status}`);
     }
     if (statusEl) {
-      statusEl.textContent = `Saved. ${role} role will use ${model} on the next call.`;
+      statusEl.textContent = `Saved. ${label} applies on the next advisor/narrator call.`;
       setTimeout(() => { statusEl.textContent = ''; }, 3500);
     }
   } catch (e) {
@@ -4857,10 +4889,23 @@ async function saveAnthropicModelPref(role, model) {
 }
 
 document.getElementById('ak-advisor-model')?.addEventListener('change', (e) => {
-  saveAnthropicModelPref('advisor', e.target.value);
+  // Parse the synthetic @1m suffix into a (model, 1m_context) tuple
+  // before persisting. Picking the bare model entry explicitly turns
+  // 1m off — important so a previous "@1m" save doesn't keep the
+  // beta header on after the user switches to a non-1M model.
+  const raw = e.target.value;
+  const has1m = raw.endsWith(ANTHROPIC_1M_SUFFIX);
+  const model = has1m ? raw.slice(0, -ANTHROPIC_1M_SUFFIX.length) : raw;
+  saveAnthropicPref(
+    { advisor_model: model, advisor_1m_context: has1m },
+    `advisor model${has1m ? ' (1M)' : ''}`,
+  );
 });
 document.getElementById('ak-narrator-model')?.addEventListener('change', (e) => {
-  saveAnthropicModelPref('narrator', e.target.value);
+  saveAnthropicPref({ narrator_model: e.target.value }, 'narrator model');
+});
+document.getElementById('ak-advisor-effort')?.addEventListener('change', (e) => {
+  saveAnthropicPref({ advisor_thinking_effort: e.target.value }, 'thinking effort');
 });
 
 // ============================================================

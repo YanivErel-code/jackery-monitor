@@ -850,14 +850,31 @@
             <label class="settings-label" for="ak-advisor-model">
               <span class="settings-label-text">Advisor model</span>
               <span class="settings-hint">
-                Daily review — quality-sensitive. Default: Opus 4.7.
-                <br><strong>1M context is auto-enabled</strong> via the
-                <code>anthropic-beta: context-1m-2025-08-07</code> header
-                regardless of model — pick Opus to actually use it.
+                Daily review — quality-sensitive. 1M-capable models
+                (currently the Opus line) get a separate "(1M context)"
+                entry that toggles the <code>context-1m</code> beta
+                header on for that call. Default: Opus 4.7 1M.
               </span>
             </label>
             <div class="settings-control">
               <select id="ak-advisor-model" class="device-select" disabled><option>—</option></select>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="ak-advisor-effort">
+              <span class="settings-label-text">Thinking effort</span>
+              <span class="settings-hint">
+                Adaptive thinking budget for the advisor (Opus 4.7+).
+                Higher = the model self-allocates more tokens to think.
+                Default: high.
+              </span>
+            </label>
+            <div class="settings-control">
+              <select id="ak-advisor-effort" class="device-select">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
             </div>
           </div>
           <div class="settings-row">
