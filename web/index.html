@@ -849,7 +849,12 @@
           <div class="settings-row">
             <label class="settings-label" for="ak-advisor-model">
               <span class="settings-label-text">Advisor model</span>
-              <span class="settings-hint">Daily review — quality-sensitive. Default: Opus 4.7.</span>
+              <span class="settings-hint">
+                Daily review — quality-sensitive. Default: Opus 4.7.
+                <br><strong>1M context is auto-enabled</strong> via the
+                <code>anthropic-beta: context-1m-2025-08-07</code> header
+                regardless of model — pick Opus to actually use it.
+              </span>
             </label>
             <div class="settings-control">
               <select id="ak-advisor-model" class="device-select" disabled><option>—</option></select>
