@@ -380,7 +380,7 @@ main {
      gutter on either side. */
   margin: 4px 0 0;
   user-select: none;
-  aspect-ratio: 1000 / 280;
+  aspect-ratio: 1000 / 300;
 }
 
 /* Hidden geometry paths used as animateMotion targets. They live in
