@@ -5276,6 +5276,7 @@ async function loadBackupAll() {
   // it lazy until the user clicks "List snapshots".
   await loadBackupCreds();
   loadBackupStatus();
+  loadBackupSchedule();
   // After creds load we know whether to auto-discover. loadBackupCreds
   // sets _backupHasCreds; if false we sweep the LAN once for SMB hosts
   // (cached for the rest of the session).
@@ -5652,31 +5653,87 @@ function _fmtBytes(n) {
 
 $('backup-status-reload')?.addEventListener('click', loadBackupStatus);
 
-$('backup-run-now')?.addEventListener('click', async () => {
-  const btn = $('backup-run-now');
+// Shared on-demand backup runner. Supports both the inline button (in the
+// credentials card, feedback in `backup-creds-msg`) and the original
+// button in the Status & history card (feedback in `backup-run-msg`).
+async function _triggerBackupNow(btnId, msgId) {
+  const btn = $(btnId);
+  if (!btn) return;
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Running…';
-  _backupSetMsg('backup-run-msg', 'Backup in progress — this may take a minute over slow links.', '');
+  _backupSetMsg(msgId, 'Backup in progress — this may take a minute over slow links.', '');
   try {
     const r = await fetch('/api/backup/run', { method: 'POST' });
     let j = {};
     try { j = await r.json(); } catch (_) {}
     if (r.ok && j.ok) {
-      _backupSetMsg('backup-run-msg', `OK — wrote ${j.files_written} files (${_fmtBytes(j.bytes_written || 0)}).`, 'ok');
+      _backupSetMsg(msgId, `OK — wrote ${j.files_written} files (${_fmtBytes(j.bytes_written || 0)}).`, 'ok');
     } else if (j.skipped_reason) {
-      _backupSetMsg('backup-run-msg', `Skipped: ${j.skipped_reason}`, 'err');
+      _backupSetMsg(msgId, `Skipped: ${j.skipped_reason}`, 'err');
     } else {
       const reason = j.error || j.detail || `HTTP ${r.status}`;
-      _backupSetMsg('backup-run-msg', 'Failed: ' + reason, 'err');
+      _backupSetMsg(msgId, 'Failed: ' + reason, 'err');
     }
   } catch (err) {
-    _backupSetMsg('backup-run-msg', 'Failed: ' + (err.message || err), 'err');
+    _backupSetMsg(msgId, 'Failed: ' + (err.message || err), 'err');
   } finally {
     btn.disabled = false;
     btn.textContent = original;
     loadBackupStatus();
   }
+}
+
+$('backup-run-now')?.addEventListener('click',
+  () => _triggerBackupNow('backup-run-now', 'backup-run-msg'));
+$('backup-run-now-inline')?.addEventListener('click',
+  () => _triggerBackupNow('backup-run-now-inline', 'backup-creds-msg'));
+
+// Daily-backup hour: read once on first show + auto-save on change.
+// The same key (backup_schedule_hour) the backup_loop reads every
+// iteration, so the change applies on the next tick without restart.
+let _backupScheduleSaveTimer = null;
+async function loadBackupSchedule() {
+  const el = $('backup-schedule-hour');
+  if (!el || el.dataset.loaded === '1') return;
+  try {
+    const r = await fetch('/api/settings');
+    const j = await r.json();
+    // /api/settings returns {settings: [{key, value, label, hint, ...}]}
+    const entry = (j?.settings || []).find(s => s.key === 'backup_schedule_hour');
+    if (entry && entry.value != null) el.value = String(entry.value);
+    el.dataset.loaded = '1';
+  } catch (_) { /* leave blank — user can still type */ }
+}
+$('backup-schedule-hour')?.addEventListener('input', () => {
+  // Debounce so we don't spam /api/settings while the user types.
+  if (_backupScheduleSaveTimer) clearTimeout(_backupScheduleSaveTimer);
+  _backupScheduleSaveTimer = setTimeout(async () => {
+    const el = $('backup-schedule-hour');
+    if (!el) return;
+    const n = Number(el.value);
+    if (!Number.isInteger(n) || n < 0 || n > 23) {
+      _backupSetMsg('backup-schedule-msg', 'Hour must be 0–23.', 'err');
+      return;
+    }
+    _backupSetMsg('backup-schedule-msg', 'Saving…', '');
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ backup_schedule_hour: n }),
+      });
+      if (!r.ok) {
+        let j = {};
+        try { j = await r.json(); } catch (_) {}
+        throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+      }
+      _backupSetMsg('backup-schedule-msg', `Saved — next run at ${String(n).padStart(2, '0')}:00.`, 'ok');
+      setTimeout(() => _backupSetMsg('backup-schedule-msg', '', ''), 2500);
+    } catch (err) {
+      _backupSetMsg('backup-schedule-msg', 'Save failed: ' + (err.message || err), 'err');
+    }
+  }, 500);
 });
 
 // ---- snapshots / restore --------------------------------------------------

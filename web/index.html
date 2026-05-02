@@ -1120,10 +1120,30 @@
                 <input id="backup-domain" type="text" class="device-select" autocomplete="off" value="WORKGROUP" style="min-width:220px" />
               </div>
             </div>
+            <!-- Schedule input. Auto-saves on change via /api/settings —
+                 the same key (backup_schedule_hour) the daily loop reads
+                 every iteration, so a change here applies on the next
+                 tick without a container restart. -->
+            <div class="settings-row">
+              <label class="settings-label" for="backup-schedule-hour">
+                <span class="settings-label-text">Daily backup hour</span>
+                <span class="settings-hint">Local hour (0-23) when the daily SMB backup fires. <code>3</code> = 3 AM. Saves automatically on change.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-schedule-hour" type="number" min="0" max="23" step="1" class="device-select" style="width:80px" />
+                <span class="hint" style="margin-left:8px">:00 local</span>
+                <span id="backup-schedule-msg" class="hint" hidden style="margin-left:12px"></span>
+              </div>
+            </div>
           </div>
           <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
             <button class="btn btn-primary" type="submit">Save</button>
             <button id="backup-test" class="btn btn-ghost" type="button">Test connection</button>
+            <!-- "Run backup now" duplicated here from the Status & history
+                 card below so the user doesn't have to scroll past the
+                 form to fire an on-demand backup right after saving creds.
+                 Both buttons hit /api/backup/run; feedback shows inline. -->
+            <button id="backup-run-now-inline" class="btn btn-ghost" type="button">Run backup now</button>
             <button id="backup-clear" class="btn btn-ghost" type="button">Forget</button>
             <span id="backup-creds-msg" class="hint" hidden></span>
           </div>
