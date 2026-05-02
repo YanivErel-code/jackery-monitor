@@ -374,24 +374,45 @@ main {
 .flow-line {
   fill: none;
   stroke: var(--border);
-  stroke-width: 4;
+  stroke-width: 6;
   stroke-linecap: round;
-  stroke-dasharray: 10 8;     /* dash-on, gap-off; full cycle = 18 */
-  opacity: 0.35;
+  /* Long dashes + small gaps read as a *line* with motion, not
+     scattered dots. Cycle = 22 (matches dashoffset in the keyframe). */
+  stroke-dasharray: 16 6;
+  opacity: 0.5;
   --flow-dur: 1.2s;
 }
-.flow-line.solar { stroke: #4ade80; opacity: 0.9; }   /* green */
-.flow-line.grid  { stroke: #fbbc04; opacity: 0.9; }   /* amber */
-.flow-line.load  { stroke: #38bdf8; opacity: 0.9; }   /* sky    */
-.flow-line.idle  { stroke: var(--border); opacity: 0.25; }
+/* Active lines: full-saturation source colors + a soft glow so they
+   read at a glance against the dark card background. drop-shadow on
+   stroke is GPU-accelerated and survives stroke-dasharray motion. */
+.flow-line.solar {
+  stroke: #4ade80;
+  opacity: 1;
+  filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.55));
+}
+.flow-line.grid {
+  stroke: #fbbc04;
+  opacity: 1;
+  filter: drop-shadow(0 0 4px rgba(251, 188, 4, 0.55));
+}
+.flow-line.load {
+  stroke: #38bdf8;
+  opacity: 1;
+  filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.55));
+}
+.flow-line.idle {
+  stroke: #4a5568;        /* lighter than --border so dashes are visible */
+  opacity: 0.55;
+  filter: none;
+}
 .flow-line.active {
   animation: flow-march var(--flow-dur, 1.2s) linear infinite;
 }
 @keyframes flow-march {
   /* Negative offset → dashes move from (x1,y1) toward (x2,y2). All
      lines are oriented source→destination, so this gives the right
-     visual direction for every flow. */
-  to { stroke-dashoffset: -18; }
+     visual direction for every flow. Cycle = dasharray total = 22. */
+  to { stroke-dashoffset: -22; }
 }
 
 .flow-node {

@@ -3127,11 +3127,18 @@ function renderPowerFlow(t) {
   setFlow('flow-line-solar', 'flow-node-solar', 'flow-solar-w', solarW);
   setFlow('flow-line-grid',  'flow-node-grid',  'flow-grid-w',  gridW);
   setFlow('flow-line-load',  'flow-node-load',  'flow-load-w',  loadW);
-  // Battery node shows current SOC inside the circle.
+  // Battery node shows current SOC inside the circle. Use the same
+  // headline SOC the main battery card shows — system_soc_pct (main +
+  // packs averaged) when available, falling back to battery_percent
+  // (main only) on single-unit devices. Otherwise the flow diagram
+  // would show 77% while the SOC card right next to it shows 76%.
+  const headlineSoc = t.system_soc_pct != null
+    ? t.system_soc_pct
+    : t.battery_percent;
   const socEl = $('flow-soc-pct');
   if (socEl) {
-    socEl.textContent = t.battery_percent != null
-      ? `${Math.round(t.battery_percent)}%`
+    socEl.textContent = headlineSoc != null
+      ? `${Math.round(headlineSoc)}%`
       : '—';
   }
   // AC voltage/Hz — small hint in the card eyebrow so the metric
