@@ -161,11 +161,11 @@ def discover_smb_hosts(*, max_results: int = 32) -> list[dict[str, Any]]:
 
     found: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as ex:
-        for ip, ok in zip(
-            candidates,
-            ex.map(_probe_445, candidates),
-            strict=True,
-        ):
+        # ex.map yields one result per input in order, so zip with
+        # `candidates` is guaranteed length-aligned by construction.
+        # `strict=True` would be the textbook safety guard but it's
+        # PEP 654 (Python 3.10+) and breaks local test runs on 3.9.
+        for ip, ok in zip(candidates, ex.map(_probe_445, candidates)):  # noqa: B905
             if ok:
                 found.append(ip)
                 if len(found) >= max_results:
@@ -177,7 +177,9 @@ def discover_smb_hosts(*, max_results: int = 32) -> list[dict[str, Any]]:
     if found:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(found))) as ex:
             names = list(ex.map(_reverse_dns, found))
-        for ip, name in zip(found, names, strict=True):
+        # `names` built from list(ex.map(..., found)) — same length as
+        # `found` by construction. Same 3.9-compat reason as above.
+        for ip, name in zip(found, names):  # noqa: B905
             results.append({"ip": ip, "name": name or ip, "port": 445})
 
     # Named hosts before bare IPs; otherwise IP-numeric sort.
