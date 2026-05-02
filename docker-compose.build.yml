@@ -31,8 +31,11 @@ services:
       JACKERY_PASSWORD: "${JACKERY_PASSWORD:-}"
       JACKERY_REGION: "${JACKERY_REGION:-US}"
       JACKERY_CREDS_FILE: /data/jackery-creds.json
-    expose:
-      - "8766"
+    # Bind 8766 only to the host loopback so the host-networked
+    # jackery-monitor container can reach it at 127.0.0.1:8766. Not
+    # published to the LAN — nothing else should talk to the bridge.
+    ports:
+      - "127.0.0.1:8766:8766"
     volumes:
       - jackery-data:/data
     healthcheck:
@@ -42,8 +45,8 @@ services:
       retries: 5
       start_period: 5s
 
-  # FastAPI dashboard — talks to the bridge over the internal docker network.
-  # Published on the LAN at http://<nas-ip>:${JACKERY_HTTP_PORT}.
+  # FastAPI dashboard — host networking so backup auto-discovery can
+  # sweep the LAN directly. See docker-compose.yml for the full notes.
   jackery-monitor:
     build: .
     image: jackery-monitor:latest
@@ -52,13 +55,13 @@ services:
     depends_on:
       jackery-bridge:
         condition: service_healthy
-    ports:
-      - "${JACKERY_HTTP_PORT:-8000}:8000"
+    network_mode: host
     environment:
       BACKEND: bridge
-      BRIDGE_URL: jackery-bridge:8766
+      BRIDGE_URL: 127.0.0.1:8766
       POLL_INTERVAL_S: "10"
       JACKERY_DB: /data/energy.db
+      PORT: "${JACKERY_HTTP_PORT:-8000}"
     volumes:
       - jackery-data:/data
       # Live-bind the web UI so editing files in /docker/jackery-monitor/web/

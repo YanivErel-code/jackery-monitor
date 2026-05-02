@@ -36,8 +36,11 @@ services:
       JACKERY_PASSWORD: "${JACKERY_PASSWORD:-}"
       JACKERY_REGION: "${JACKERY_REGION:-US}"
       JACKERY_CREDS_FILE: /data/jackery-creds.json
-    expose:
-      - "8766"
+    # Bind 8766 only to the host loopback so the host-networked
+    # jackery-monitor container can reach it at 127.0.0.1:8766. Not
+    # published to the LAN — nothing else should talk to the bridge.
+    ports:
+      - "127.0.0.1:8766:8766"
     volumes:
       - jackery-data:/data
     labels:
@@ -49,8 +52,10 @@ services:
       retries: 5
       start_period: 5s
 
-  # FastAPI dashboard — talks to the bridge over the internal docker network.
-  # Published on the LAN at http://<nas-ip>:${JACKERY_HTTP_PORT}.
+  # FastAPI dashboard — host networking so the backup auto-discovery
+  # feature can sweep the LAN for SMB hosts (the docker bridge would
+  # otherwise hide the LAN behind NAT). Reachable on the LAN at
+  # http://<nas-ip>:${JACKERY_HTTP_PORT}.
   jackery-monitor:
     image: ghcr.io/yaniverel-code/jackery-monitor:latest
     pull_policy: always
@@ -59,13 +64,24 @@ services:
     depends_on:
       jackery-bridge:
         condition: service_healthy
-    ports:
-      - "${JACKERY_HTTP_PORT:-8123}:8000"
+    # Host networking: container shares the Synology's network namespace.
+    # No more ports: mapping — the app binds directly to the host's
+    # JACKERY_HTTP_PORT. Required for backup_discover.py to enumerate
+    # SMB hosts on the real LAN subnet (e.g. 192.168.1.0/24) instead
+    # of the docker bridge subnet (172.x.0.0/16).
+    network_mode: host
     environment:
       BACKEND: bridge
-      BRIDGE_URL: jackery-bridge:8766
+      # Host networking means "jackery-bridge" hostname is no longer
+      # resolvable. The bridge container publishes 8766 to 127.0.0.1
+      # so we reach it via loopback.
+      BRIDGE_URL: 127.0.0.1:8766
       POLL_INTERVAL_S: "10"
       JACKERY_DB: /data/energy.db
+      # uvicorn reads PORT from env. With host networking we bind
+      # directly to JACKERY_HTTP_PORT (default 8123) on the host — no
+      # docker port mapping in the way.
+      PORT: "${JACKERY_HTTP_PORT:-8123}"
     volumes:
       - jackery-data:/data
     # mount.cifs runs inside this container for the daily NAS backup feature
