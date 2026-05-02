@@ -126,62 +126,99 @@
             <span>Power flow</span>
             <span class="hint" id="flow-ac-meta">—</span>
           </div>
-          <!-- SVG flow diagram. Three sources/destinations connect to a
-               central battery node; lines animate via marching-dash CSS
-               (stroke-dashoffset keyframe) when watts > 0, with speed
-               proportional to wattage. viewBox scales the whole thing
-               to container width on every viewport size. -->
-          <svg class="power-flow-svg" viewBox="0 0 600 260"
+          <!-- Power flow diagram, Tesla-app style:
+               Solid translucent channel + bright traveling dot per
+               flow line. animateMotion + <mpath> drives the dot along
+               a hidden <path>; speed (dur) is set inline by app.js
+               based on wattage. When a flow is idle the dot's parent
+               group is hidden — the channel stays as a faint guide.
+
+               Colors per the user spec: solar→battery yellow,
+               battery→loads grayish white, grid→battery amber. -->
+          <svg class="power-flow-svg" viewBox="0 0 1000 280"
                preserveAspectRatio="xMidYMid meet"
                role="img" aria-label="Power flow diagram">
-            <!-- connecting lines (drawn first so nodes layer on top) -->
-            <line class="flow-line" id="flow-line-solar"
-                  x1="80" y1="60"  x2="280" y2="130" />
-            <line class="flow-line" id="flow-line-grid"
-                  x1="80" y1="200" x2="280" y2="130" />
-            <line class="flow-line" id="flow-line-load"
-                  x1="320" y1="130" x2="520" y2="130" />
+            <defs>
+              <!-- Hidden geometry paths the traveling dots follow.
+                   <line> can't be a target for animateMotion; <path>
+                   with two points is equivalent and works. -->
+              <path id="path-flow-solar" d="M 200 80 L 500 140" />
+              <path id="path-flow-grid"  d="M 200 200 L 500 140" />
+              <path id="path-flow-load"  d="M 500 140 L 820 140" />
+            </defs>
+
+            <!-- Visible channels (solid translucent strokes) -->
+            <line class="flow-channel solar" id="flow-line-solar"
+                  x1="200" y1="80"  x2="500" y2="140" />
+            <line class="flow-channel grid"  id="flow-line-grid"
+                  x1="200" y1="200" x2="500" y2="140" />
+            <line class="flow-channel load"  id="flow-line-load"
+                  x1="500" y1="140" x2="820" y2="140" />
+
+            <!-- Traveling dots — one per flow. The animateMotion
+                 dur is overridden inline by setFlow() based on watts;
+                 the dot's parent <g> toggles visibility on/off. -->
+            <g class="flow-dot solar" id="flow-dot-solar">
+              <circle r="6" />
+              <animateMotion dur="2.4s" repeatCount="indefinite">
+                <mpath href="#path-flow-solar" />
+              </animateMotion>
+            </g>
+            <g class="flow-dot grid" id="flow-dot-grid">
+              <circle r="6" />
+              <animateMotion dur="2.4s" repeatCount="indefinite">
+                <mpath href="#path-flow-grid" />
+              </animateMotion>
+            </g>
+            <g class="flow-dot load" id="flow-dot-load">
+              <circle r="6" />
+              <animateMotion dur="2.4s" repeatCount="indefinite">
+                <mpath href="#path-flow-load" />
+              </animateMotion>
+            </g>
 
             <!-- Solar node -->
             <g class="flow-node-group">
               <circle class="flow-node solar" id="flow-node-solar"
-                      cx="80" cy="60" r="32" />
-              <text class="flow-icon" x="80" y="60">☀</text>
+                      cx="200" cy="80" r="40" />
+              <text class="flow-icon" x="200" y="80">☀</text>
             </g>
-            <text class="flow-w" x="80" y="118">
+            <text class="flow-w" x="200" y="148">
               <tspan id="flow-solar-w">0</tspan> W
             </text>
-            <text class="flow-label" x="80" y="22">SOLAR</text>
+            <text class="flow-label" x="200" y="32">SOLAR</text>
 
             <!-- Grid node -->
             <g class="flow-node-group">
               <circle class="flow-node grid" id="flow-node-grid"
-                      cx="80" cy="200" r="32" />
-              <text class="flow-icon" x="80" y="200">⚡</text>
+                      cx="200" cy="200" r="40" />
+              <text class="flow-icon" x="200" y="200">⚡</text>
             </g>
-            <text class="flow-w" x="80" y="252">
+            <text class="flow-w" x="200" y="266">
               <tspan id="flow-grid-w">0</tspan> W
             </text>
-            <text class="flow-label" x="80" y="162">GRID</text>
+            <text class="flow-label" x="200" y="152">GRID</text>
 
             <!-- Battery node (center) -->
             <g class="flow-node-group">
               <circle class="flow-node battery" id="flow-node-battery"
-                      cx="300" cy="130" r="48" />
-              <text class="flow-soc" id="flow-soc-pct" x="300" y="130">—</text>
+                      cx="500" cy="140" r="60" />
+              <text class="flow-soc" id="flow-soc-pct" x="500" y="140">—</text>
             </g>
-            <text class="flow-label" x="300" y="76">BATTERY</text>
+            <text class="flow-label" x="500" y="68">BATTERY</text>
 
             <!-- Loads node -->
             <g class="flow-node-group">
               <circle class="flow-node load" id="flow-node-load"
-                      cx="520" cy="130" r="32" />
-              <text class="flow-icon" x="520" y="130">⊕</text>
+                      cx="820" cy="140" r="40" />
+              <!-- House glyph instead of ⊕ which read as an
+                   "add new" button rather than a load destination. -->
+              <text class="flow-icon house" x="820" y="140">⌂</text>
             </g>
-            <text class="flow-w" x="520" y="186">
+            <text class="flow-w" x="820" y="208">
               <tspan id="flow-load-w">0</tspan> W
             </text>
-            <text class="flow-label" x="520" y="92">LOADS</text>
+            <text class="flow-label" x="820" y="92">LOADS</text>
           </svg>
         </section>
 

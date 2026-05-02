@@ -3112,26 +3112,41 @@ setInterval(refreshAcChargeButton, 30_000);
 refreshAcChargeButton().catch(() => {});
 
 // ============================================================
-// POWER FLOW DIAGRAM
-// Renders the SVG flow card on every WS tick. Each line gets the
-// `active` class with --flow-dur set inversely to wattage (more
-// power → faster marching dashes); near-zero lines go `idle` (dim
-// grey, no animation). Source nodes (solar/grid/load) light up when
-// their flow is active. Pure DOM mutation — no canvas, no chart lib.
+// POWER FLOW DIAGRAM (Tesla-app style)
+// Each flow has three SVG pieces: a solid translucent CHANNEL,
+// a hidden geometry PATH, and a DOT group with animateMotion that
+// follows the path. When watts < 5: channel goes faint (idle), dot
+// hidden. When watts ≥ 5: channel brightens, dot becomes visible
+// and travels with dur set inversely to wattage. animateMotion's
+// dur is updated via setAttribute on the inner <animateMotion>
+// element — Chrome/Safari pick up the new duration without a
+// restart hack.
 // ============================================================
+
+// Threshold — anything below ~5W is inverter rounding noise, not flow.
+const FLOW_IDLE_W = 5;
+
 function renderPowerFlow(t) {
   if (!t) return;
   const solarW = Math.max(0, Math.round(Number(t.solar_input_w ?? 0)));
   const gridW  = Math.max(0, Math.round(Number(t.ac_input_w    ?? 0)));
   const loadW  = Math.max(0, Math.round(Number(t.output_power_w ?? 0)));
-  setFlow('flow-line-solar', 'flow-node-solar', 'flow-solar-w', solarW);
-  setFlow('flow-line-grid',  'flow-node-grid',  'flow-grid-w',  gridW);
-  setFlow('flow-line-load',  'flow-node-load',  'flow-load-w',  loadW);
-  // Battery node shows current SOC inside the circle. Use the same
-  // headline SOC the main battery card shows — system_soc_pct (main +
-  // packs averaged) when available, falling back to battery_percent
-  // (main only) on single-unit devices. Otherwise the flow diagram
-  // would show 77% while the SOC card right next to it shows 76%.
+  setFlow('solar', solarW);
+  setFlow('grid',  gridW);
+  setFlow('load',  loadW);
+
+  // Battery node — color encodes direction. Net = sources - load.
+  // Charging when sources outpace load, discharging the other way.
+  const batteryNode = $('flow-node-battery');
+  if (batteryNode) {
+    const net = (solarW + gridW) - loadW;
+    batteryNode.classList.toggle('charging',    net >  25);
+    batteryNode.classList.toggle('discharging', net < -25);
+  }
+
+  // Battery SOC text. Use the same headline SOC as the main battery
+  // card (system_soc_pct when available, else main %) so the two
+  // numbers always agree.
   const headlineSoc = t.system_soc_pct != null
     ? t.system_soc_pct
     : t.battery_percent;
@@ -3141,8 +3156,8 @@ function renderPowerFlow(t) {
       ? `${Math.round(headlineSoc)}%`
       : '—';
   }
-  // AC voltage/Hz — small hint in the card eyebrow so the metric
-  // isn't lost from the old layout, but doesn't clutter the diagram.
+
+  // AC voltage / Hz hint in the card eyebrow.
   const meta = $('flow-ac-meta');
   if (meta) {
     const parts = [];
@@ -3155,28 +3170,33 @@ function renderPowerFlow(t) {
   }
 }
 
-function setFlow(lineId, nodeId, watts_label_id, watts) {
-  const line = document.getElementById(lineId);
-  const node = document.getElementById(nodeId);
-  const wEl  = document.getElementById(watts_label_id);
+function setFlow(kind, watts) {
+  const channel = document.getElementById(`flow-line-${kind}`);
+  const node    = document.getElementById(`flow-node-${kind}`);
+  const dotGrp  = document.getElementById(`flow-dot-${kind}`);
+  const wEl     = document.getElementById(`flow-${kind}-w`);
   if (wEl) wEl.textContent = watts;
-  // Threshold matches the cloud's typical idle noise — anything below
-  // ~5 W is rounding error from the inverter, not real flow.
-  const active = watts >= 5;
-  if (line) {
-    line.classList.toggle('active', active);
-    line.classList.toggle('idle', !active);
-    if (active) {
-      // Map W → animation duration. 50 W → 3s/cycle (slow trickle),
-      // 2500+ W → 0.5s/cycle (fast). Clamp at edges so an extreme
-      // value can't make the dashes invisible / motion-sickness fast.
-      const dur = Math.max(0.5, Math.min(3.0, 2500 / Math.max(1, watts)));
-      line.style.setProperty('--flow-dur', `${dur.toFixed(2)}s`);
-    } else {
-      line.style.removeProperty('--flow-dur');
+
+  const active = watts >= FLOW_IDLE_W;
+  if (channel) channel.classList.toggle('active', active);
+  if (node)    node.classList.toggle('active', active);
+  if (dotGrp)  dotGrp.classList.toggle('active', active);
+
+  if (dotGrp) {
+    const am = dotGrp.querySelector('animateMotion');
+    if (am) {
+      if (active) {
+        // Speed mapping: faster dot = more power, but capped so
+        // 2 kW doesn't look frantic. 50 W → 4.5 s slow drift,
+        // 500 W → 2.7 s, 2 kW+ → 1.2 s. Smooth log-ish curve.
+        const dur = Math.max(1.2, Math.min(4.5, 4500 / Math.max(50, watts)));
+        am.setAttribute('dur', `${dur.toFixed(2)}s`);
+      } else {
+        // Stop wasting cycles on a hidden dot.
+        am.setAttribute('dur', '999s');
+      }
     }
   }
-  if (node) node.classList.toggle('active', active);
 }
 
 function describeSrc(meta) {

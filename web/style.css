@@ -358,86 +358,121 @@ main {
    labels (green=output, sky=input) so the metric origin still reads at
    a glance. */
 .kpi-card.power-flow { --card-accent: var(--accent-2); }
-/* ---- Animated power-flow diagram ----
-   SVG-based: three sources/destinations connect to a central battery
-   node via lines that "march" with stroke-dashoffset when active.
-   Speed (animation duration) is set inline by app.js based on watts;
-   the keyframe is shared. Idle lines render dim grey with no anim. */
+/* ---- Animated power-flow diagram (Tesla-app style) ----
+   Pattern: each "channel" is a solid translucent line in its source
+   color; a bright dot travels along a parallel hidden <path> via
+   <animateMotion>. Channels stay visible when idle (faint guide);
+   the dot's group toggles visibility based on watts.
+
+   Color palette per user spec:
+     - solar  → yellow  (#fbbf24)
+     - grid   → amber   (#fb923c, slightly orange to read distinct
+                          from solar's pure yellow)
+     - load   → grayish white (#cbd5e1)
+   Battery node ring color is set by JS to encode direction
+   (charging green, discharging amber). */
 .power-flow-svg {
   display: block;
   width: 100%;
   height: auto;
-  max-width: 720px;
-  margin: 4px auto 0;
+  /* No max-width cap: let the SVG fill the full card so the diagram
+     uses the available real estate instead of leaving a giant empty
+     gutter on either side. */
+  margin: 4px 0 0;
   user-select: none;
-}
-.flow-line {
-  fill: none;
-  stroke: var(--border);
-  stroke-width: 6;
-  stroke-linecap: round;
-  /* Long dashes + small gaps read as a *line* with motion, not
-     scattered dots. Cycle = 22 (matches dashoffset in the keyframe). */
-  stroke-dasharray: 16 6;
-  opacity: 0.5;
-  --flow-dur: 1.2s;
-}
-/* Active lines: full-saturation source colors + a soft glow so they
-   read at a glance against the dark card background. drop-shadow on
-   stroke is GPU-accelerated and survives stroke-dasharray motion. */
-.flow-line.solar {
-  stroke: #4ade80;
-  opacity: 1;
-  filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.55));
-}
-.flow-line.grid {
-  stroke: #fbbc04;
-  opacity: 1;
-  filter: drop-shadow(0 0 4px rgba(251, 188, 4, 0.55));
-}
-.flow-line.load {
-  stroke: #38bdf8;
-  opacity: 1;
-  filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.55));
-}
-.flow-line.idle {
-  stroke: #4a5568;        /* lighter than --border so dashes are visible */
-  opacity: 0.55;
-  filter: none;
-}
-.flow-line.active {
-  animation: flow-march var(--flow-dur, 1.2s) linear infinite;
-}
-@keyframes flow-march {
-  /* Negative offset → dashes move from (x1,y1) toward (x2,y2). All
-     lines are oriented source→destination, so this gives the right
-     visual direction for every flow. Cycle = dasharray total = 22. */
-  to { stroke-dashoffset: -22; }
+  aspect-ratio: 1000 / 280;
 }
 
+/* Hidden geometry paths used as animateMotion targets. They live in
+   <defs> in the SVG markup — invisible by default, but be defensive. */
+.power-flow-svg defs path { display: none; }
+
+/* The visible channels — solid lines, no dashes. */
+.flow-channel {
+  fill: none;
+  stroke-width: 8;
+  stroke-linecap: round;
+  opacity: 0.18;            /* idle = faint guide */
+  transition: opacity .3s, stroke .3s, filter .3s;
+}
+.flow-channel.solar { stroke: #fbbf24; }
+.flow-channel.grid  { stroke: #fb923c; }
+.flow-channel.load  { stroke: #cbd5e1; }
+.flow-channel.active {
+  opacity: 0.55;
+  filter: drop-shadow(0 0 6px var(--flow-glow, rgba(255,255,255,.25)));
+}
+.flow-channel.solar.active { --flow-glow: rgba(251, 191, 36, 0.45); }
+.flow-channel.grid.active  { --flow-glow: rgba(251, 146, 60, 0.45); }
+.flow-channel.load.active  { --flow-glow: rgba(203, 213, 225, 0.40); }
+
+/* Traveling dots — bright, glowing, scaled to wattage. The <g>
+   inherits visibility=hidden when the line is idle, hiding both the
+   circle and the animateMotion runtime cleanly. */
+.flow-dot { visibility: hidden; }
+.flow-dot.active { visibility: visible; }
+.flow-dot circle {
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 6px var(--dot-glow, rgba(255,255,255,.7)));
+}
+.flow-dot.solar circle {
+  fill: #fbbf24;
+  --dot-glow: rgba(251, 191, 36, 0.85);
+}
+.flow-dot.grid circle {
+  fill: #fb923c;
+  --dot-glow: rgba(251, 146, 60, 0.85);
+}
+.flow-dot.load circle {
+  fill: #f1f5f9;
+  --dot-glow: rgba(241, 245, 249, 0.75);
+}
+
+/* Nodes ---------------------------------------------------------- */
 .flow-node {
   fill: var(--bg-elev-2);
   stroke: var(--border);
-  stroke-width: 2;
+  stroke-width: 2.5;
   transition: stroke .25s, fill .25s;
 }
+.flow-node.solar.active {
+  stroke: #fbbf24;
+  fill: rgba(251, 191, 36, 0.08);
+}
+.flow-node.grid.active {
+  stroke: #fb923c;
+  fill: rgba(251, 146, 60, 0.08);
+}
+.flow-node.load.active {
+  stroke: #cbd5e1;
+  fill: rgba(203, 213, 225, 0.06);
+}
+/* Battery node: green when charging (input > output), amber when
+   discharging, neutral when idle. Class set by renderPowerFlow. */
 .flow-node.battery {
   fill: rgba(74, 222, 128, 0.06);
-  stroke: var(--accent);
+  stroke: var(--text-mute);
 }
-.flow-node.solar.active { stroke: #4ade80; fill: rgba(74,222,128,.08); }
-.flow-node.grid.active  { stroke: #fbbc04; fill: rgba(251,188,4,.08); }
-.flow-node.load.active  { stroke: #38bdf8; fill: rgba(56,189,248,.08); }
+.flow-node.battery.charging {
+  stroke: #4ade80;
+  fill: rgba(74, 222, 128, 0.10);
+}
+.flow-node.battery.discharging {
+  stroke: #fbbf24;
+  fill: rgba(251, 191, 36, 0.08);
+}
 
 .flow-icon {
-  font-size: 28px;
+  font-size: 30px;
   text-anchor: middle;
   dominant-baseline: central;
   fill: var(--text);
   pointer-events: none;
 }
+.flow-icon.house { font-size: 36px; }
 .flow-soc {
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 600;
   text-anchor: middle;
   dominant-baseline: central;
@@ -446,24 +481,17 @@ main {
   pointer-events: none;
 }
 .flow-w {
-  font-size: 14px;
+  font-size: 16px;
   text-anchor: middle;
   fill: var(--text);
   font-family: var(--font-mono);
 }
 .flow-label {
-  font-size: 10px;
+  font-size: 11px;
   text-anchor: middle;
   fill: var(--text-mute);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.10em;
   text-transform: uppercase;
-}
-/* The SVG's intrinsic viewBox aspect is 600x260. On narrow viewports
-   we cap height a bit lower so the card doesn't dominate the screen.
-   Text inside SVG scales with the viewBox automatically — no extra
-   media-query font sizing needed. */
-@media (max-width: 600px) {
-  .power-flow-svg { max-height: 220px; }
 }
 .card-eyebrow {
   display: flex; justify-content: space-between; align-items: center;
