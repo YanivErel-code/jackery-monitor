@@ -2914,10 +2914,8 @@ function applyStatus(s) {
   $('battery-time').textContent = timeLabel;
   if (t.battery_temp_c != null) $('battery-temp').textContent = formatTemp(t.battery_temp_c);
 
-  animateNumber($('output-w'), t.output_power_w);
-  animateNumber($('input-w'),  t.input_power_w);
-  animateNumber($('input-grid-w'),  t.ac_input_w ?? 0);
-  animateNumber($('input-solar-w'), t.solar_input_w ?? 0);
+  // Animated power flow diagram (replaces the old two-column W readout).
+  renderPowerFlow(t);
 
   // Battery card mood: charging / discharging / low / idle. Drives the soft
   // glow + bar color via CSS classes.
@@ -2930,19 +2928,6 @@ function applyStatus(s) {
     batCard.classList.toggle('discharging', net < -25);
     batCard.classList.toggle('low',         (t.battery_percent ?? 100) <= 20);
   }
-  if (t.ac_output_v != null) $('ac-out-v').textContent  = fmt(t.ac_output_v, 0);
-  // Split-phase L1 leg shown next to the combined 240V — Jackery's
-  // 5000 Plus reports both (acov = line-to-line, acov1 = leg-to-neutral).
-  // Hide if missing or zero.
-  const l1El = $('ac-out-v-l1');
-  if (l1El) {
-    if (t.ac_output_v_l1 && t.ac_output_v_l1 > 0) {
-      l1El.textContent = `(L1: ${fmt(t.ac_output_v_l1, 0)} V)`;
-    } else {
-      l1El.textContent = '';
-    }
-  }
-  if (t.ac_output_hz != null)        $('ac-out-hz').textContent = fmt(t.ac_output_hz, 0);
 
   // Today KPIs from energy aggregator
   if (s.energy?.today) {
@@ -3125,6 +3110,67 @@ setInterval(refreshAcChargeButton, 30_000);
 // Initial render — fire once at module load AND once when applyStatus
 // resolves an active device, so the button shows up without waiting 30s.
 refreshAcChargeButton().catch(() => {});
+
+// ============================================================
+// POWER FLOW DIAGRAM
+// Renders the SVG flow card on every WS tick. Each line gets the
+// `active` class with --flow-dur set inversely to wattage (more
+// power → faster marching dashes); near-zero lines go `idle` (dim
+// grey, no animation). Source nodes (solar/grid/load) light up when
+// their flow is active. Pure DOM mutation — no canvas, no chart lib.
+// ============================================================
+function renderPowerFlow(t) {
+  if (!t) return;
+  const solarW = Math.max(0, Math.round(Number(t.solar_input_w ?? 0)));
+  const gridW  = Math.max(0, Math.round(Number(t.ac_input_w    ?? 0)));
+  const loadW  = Math.max(0, Math.round(Number(t.output_power_w ?? 0)));
+  setFlow('flow-line-solar', 'flow-node-solar', 'flow-solar-w', solarW);
+  setFlow('flow-line-grid',  'flow-node-grid',  'flow-grid-w',  gridW);
+  setFlow('flow-line-load',  'flow-node-load',  'flow-load-w',  loadW);
+  // Battery node shows current SOC inside the circle.
+  const socEl = $('flow-soc-pct');
+  if (socEl) {
+    socEl.textContent = t.battery_percent != null
+      ? `${Math.round(t.battery_percent)}%`
+      : '—';
+  }
+  // AC voltage/Hz — small hint in the card eyebrow so the metric
+  // isn't lost from the old layout, but doesn't clutter the diagram.
+  const meta = $('flow-ac-meta');
+  if (meta) {
+    const parts = [];
+    if (t.ac_output_v != null) parts.push(`${Math.round(t.ac_output_v)} V`);
+    if (t.ac_output_v_l1 && t.ac_output_v_l1 > 0) {
+      parts.push(`L1 ${Math.round(t.ac_output_v_l1)} V`);
+    }
+    if (t.ac_output_hz != null) parts.push(`${Math.round(t.ac_output_hz)} Hz`);
+    meta.textContent = parts.join(' · ') || '—';
+  }
+}
+
+function setFlow(lineId, nodeId, watts_label_id, watts) {
+  const line = document.getElementById(lineId);
+  const node = document.getElementById(nodeId);
+  const wEl  = document.getElementById(watts_label_id);
+  if (wEl) wEl.textContent = watts;
+  // Threshold matches the cloud's typical idle noise — anything below
+  // ~5 W is rounding error from the inverter, not real flow.
+  const active = watts >= 5;
+  if (line) {
+    line.classList.toggle('active', active);
+    line.classList.toggle('idle', !active);
+    if (active) {
+      // Map W → animation duration. 50 W → 3s/cycle (slow trickle),
+      // 2500+ W → 0.5s/cycle (fast). Clamp at edges so an extreme
+      // value can't make the dashes invisible / motion-sickness fast.
+      const dur = Math.max(0.5, Math.min(3.0, 2500 / Math.max(1, watts)));
+      line.style.setProperty('--flow-dur', `${dur.toFixed(2)}s`);
+    } else {
+      line.style.removeProperty('--flow-dur');
+    }
+  }
+  if (node) node.classList.toggle('active', active);
+}
 
 function describeSrc(meta) {
   if (!meta) return '—';

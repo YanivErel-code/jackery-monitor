@@ -122,28 +122,67 @@
 
         <section class="card kpi-card power-flow has-accent" data-card="power-flow">
           <span class="grab-handle" aria-label="Drag to reorder" title="Drag to reorder"></span>
-          <div class="card-eyebrow"><span>Power flow</span></div>
-          <div class="power-flow-grid">
-            <div class="pf-side pf-out">
-              <div class="pf-label">Output</div>
-              <div class="kpi-value"><span id="output-w">—</span><small>W</small></div>
-              <div class="kpi-sub">
-                <span id="ac-out-v">—</span><small>V</small>
-                <span id="ac-out-v-l1" class="leg-volt"></span>
-                <span class="dot-sep">·</span>
-                <span id="ac-out-hz">—</span><small>Hz</small>
-              </div>
-            </div>
-            <div class="pf-side pf-in">
-              <div class="pf-label">Input</div>
-              <div class="kpi-value"><span id="input-w">—</span><small>W</small></div>
-              <div class="kpi-sub" id="input-source-line">
-                <span class="lbl">Grid</span> <span id="input-grid-w">—</span><small>W</small>
-                <span class="dot-sep">·</span>
-                <span class="lbl">Solar</span> <span id="input-solar-w">—</span><small>W</small>
-              </div>
-            </div>
+          <div class="card-eyebrow">
+            <span>Power flow</span>
+            <span class="hint" id="flow-ac-meta">—</span>
           </div>
+          <!-- SVG flow diagram. Three sources/destinations connect to a
+               central battery node; lines animate via marching-dash CSS
+               (stroke-dashoffset keyframe) when watts > 0, with speed
+               proportional to wattage. viewBox scales the whole thing
+               to container width on every viewport size. -->
+          <svg class="power-flow-svg" viewBox="0 0 600 260"
+               preserveAspectRatio="xMidYMid meet"
+               role="img" aria-label="Power flow diagram">
+            <!-- connecting lines (drawn first so nodes layer on top) -->
+            <line class="flow-line" id="flow-line-solar"
+                  x1="80" y1="60"  x2="280" y2="130" />
+            <line class="flow-line" id="flow-line-grid"
+                  x1="80" y1="200" x2="280" y2="130" />
+            <line class="flow-line" id="flow-line-load"
+                  x1="320" y1="130" x2="520" y2="130" />
+
+            <!-- Solar node -->
+            <g class="flow-node-group">
+              <circle class="flow-node solar" id="flow-node-solar"
+                      cx="80" cy="60" r="32" />
+              <text class="flow-icon" x="80" y="60">☀</text>
+            </g>
+            <text class="flow-w" x="80" y="118">
+              <tspan id="flow-solar-w">0</tspan> W
+            </text>
+            <text class="flow-label" x="80" y="22">SOLAR</text>
+
+            <!-- Grid node -->
+            <g class="flow-node-group">
+              <circle class="flow-node grid" id="flow-node-grid"
+                      cx="80" cy="200" r="32" />
+              <text class="flow-icon" x="80" y="200">⚡</text>
+            </g>
+            <text class="flow-w" x="80" y="252">
+              <tspan id="flow-grid-w">0</tspan> W
+            </text>
+            <text class="flow-label" x="80" y="162">GRID</text>
+
+            <!-- Battery node (center) -->
+            <g class="flow-node-group">
+              <circle class="flow-node battery" id="flow-node-battery"
+                      cx="300" cy="130" r="48" />
+              <text class="flow-soc" id="flow-soc-pct" x="300" y="130">—</text>
+            </g>
+            <text class="flow-label" x="300" y="76">BATTERY</text>
+
+            <!-- Loads node -->
+            <g class="flow-node-group">
+              <circle class="flow-node load" id="flow-node-load"
+                      cx="520" cy="130" r="32" />
+              <text class="flow-icon" x="520" y="130">⊕</text>
+            </g>
+            <text class="flow-w" x="520" y="186">
+              <tspan id="flow-load-w">0</tspan> W
+            </text>
+            <text class="flow-label" x="520" y="92">LOADS</text>
+          </svg>
         </section>
 
         <section class="card kpi-card today has-accent" data-card="today">
