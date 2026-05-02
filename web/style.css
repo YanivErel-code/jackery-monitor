@@ -493,6 +493,27 @@ main {
   letter-spacing: 0.10em;
   text-transform: uppercase;
 }
+
+/* iPhone / narrow-viewport legibility for the flow diagram.
+   The SVG has viewBox 0 0 1000 300 and renders at the card's full
+   width (~340px on iPhone), giving a content scale ≈0.34. Default
+   font-sizes (11 / 16 / 26 SVG-units) become 3.7 / 5.4 / 8.8 actual
+   px — unreadable. Bump them ~1.8–2× on small screens so the SOC
+   number, the wattages, and the SOLAR/GRID/BATTERY/LOADS labels are
+   all clearly readable without redesigning the diagram. The icons
+   get the same treatment so they read as proper symbols, not dots.
+   Bumps stay below the gap between nodes/labels so nothing collides. */
+@media (max-width: 600px) {
+  .flow-label { font-size: 22px; }
+  .flow-w    { font-size: 30px; font-weight: 600; }
+  .flow-soc  { font-size: 48px; }
+  .flow-icon { font-size: 44px; }
+  .flow-icon.house { font-size: 52px; }
+  /* Beef up the channel + dot a touch so the line doesn't look
+     anemic next to the larger labels. */
+  .flow-channel { stroke-width: 11; }
+  .flow-dot circle { r: 8; }
+}
 .card-eyebrow {
   display: flex; justify-content: space-between; align-items: center;
   font-size: 11px;
