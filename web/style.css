@@ -494,24 +494,26 @@ main {
   text-transform: uppercase;
 }
 
-/* Time-to-full / time-to-empty under the flow diagram. Mirrors the
-   SOC card's meta line (e.g. "4.1 h until full") so the Power Flow
-   card stands on its own. Hidden visually when the unit is balanced
-   (we render an em-dash, but it's dim and centred so it's not
-   distracting). */
-.flow-timer {
-  margin-top: 6px;
-  text-align: center;
+/* Time-to-full / time-to-empty rendered inside the battery ring,
+   directly below the SOC headline. Same telemetry as the SOC card's
+   meta line. Color-coded (green charging / amber discharging) to
+   match the battery node ring; em-dash when balanced/idle. */
+.flow-eta {
+  font-size: 11px;
   font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-dim);
+  text-anchor: middle;
+  dominant-baseline: central;
+  fill: var(--text-dim);
   letter-spacing: 0.02em;
-  min-height: 1em;
+  pointer-events: none;
 }
-.flow-timer.charging { color: #4ade80; }      /* green when adding energy */
-.flow-timer.discharging { color: #fbbf24; }   /* amber when draining */
+.flow-eta.charging    { fill: #4ade80; }
+.flow-eta.discharging { fill: #fbbf24; }
 @media (max-width: 600px) {
-  .flow-timer { font-size: 15px; }
+  /* Same scale-up logic as the rest of the diagram (viewBox 1000x300
+     at iPhone width ≈340 → content scale ~0.34). 22 SVG units ≈ 7.5
+     CSS px, just enough to read the timer below the SOC numeral. */
+  .flow-eta { font-size: 22px; }
 }
 
 /* iPhone / narrow-viewport legibility for the flow diagram.

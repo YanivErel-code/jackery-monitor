@@ -199,12 +199,15 @@
               <tspan id="flow-grid-w">0</tspan> W
             </text>
 
-            <!-- Battery node (center, vertical midpoint of solar+grid) -->
+            <!-- Battery node (center, vertical midpoint of solar+grid).
+                 SOC sits slightly above center so the time-to-full /
+                 time-remaining line below it stays inside the ring. -->
             <text class="flow-label" x="500" y="80">BATTERY</text>
             <g class="flow-node-group">
               <circle class="flow-node battery" id="flow-node-battery"
                       cx="500" cy="152" r="60" />
-              <text class="flow-soc" id="flow-soc-pct" x="500" y="152">—</text>
+              <text class="flow-soc" id="flow-soc-pct" x="500" y="144">—</text>
+              <text class="flow-eta" id="flow-timer" x="500" y="178">—</text>
             </g>
 
             <!-- Loads node -->
@@ -220,13 +223,6 @@
               <tspan id="flow-load-w">0</tspan> W
             </text>
           </svg>
-          <!-- Time-to-full / time-to-empty pulled live from telemetry
-               (`time_to_full_h` when charging, `time_remaining_h` when
-               discharging). Same data the SOC card surfaces in its
-               meta line, repeated here so the Power Flow card stands
-               on its own without needing to glance up. Falls back to
-               an em-dash when the unit is balanced/idle. -->
-          <div class="flow-timer" id="flow-timer">—</div>
         </section>
 
         <section class="card kpi-card today has-accent" data-card="today">
