@@ -21,6 +21,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# cifs-utils provides /sbin/mount.cifs which backup.py shells out to in
+# order to mount the remote NAS share for the daily backup feature.
+# Requires CAP_SYS_ADMIN at runtime (see docker-compose.yml).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cifs-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 

@@ -65,6 +65,13 @@ services:
       # takes effect immediately (just hard-reload the browser, no rebuild).
       # Comment this out if you want the image to be self-contained.
       - ./web:/app/web
+    # mount.cifs needs CAP_SYS_ADMIN inside the container for the daily
+    # NAS backup feature. See docker-compose.yml for details.
+    cap_add:
+      - SYS_ADMIN
+      - DAC_READ_SEARCH
+    security_opt:
+      - apparmor:unconfined
 
 volumes:
   jackery-data:

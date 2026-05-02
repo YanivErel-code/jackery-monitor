@@ -68,6 +68,18 @@ services:
       JACKERY_DB: /data/energy.db
     volumes:
       - jackery-data:/data
+    # mount.cifs runs inside this container for the daily NAS backup feature
+    # (see backup.py). It needs CAP_SYS_ADMIN to issue the kernel mount
+    # syscall and DAC_READ_SEARCH to traverse mount points owned by other
+    # UIDs. Without these, /api/backup/test will fail with EPERM.
+    cap_add:
+      - SYS_ADMIN
+      - DAC_READ_SEARCH
+    # Required so mount.cifs inside an unprivileged container can call
+    # the cifs.upcall helper for credential negotiation. Skip if your
+    # host doesn't allow security_opt overrides.
+    security_opt:
+      - apparmor:unconfined
     labels:
       - com.centurylinklabs.watchtower.enable=true
 

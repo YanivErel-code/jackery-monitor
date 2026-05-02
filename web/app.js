@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadBackupAll(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
     loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
@@ -5261,3 +5261,326 @@ function initHeroSortable() {
   // the modal hides and the WS snapshot will populate the UI.
   setInterval(checkAuth, 30000);
 })();
+
+// ===========================================================================
+// Backup & restore — Settings tab.
+// Three logical groupings: (1) destination credentials + connectivity test,
+// (2) status / run history / run-now, (3) snapshot list + restore picker.
+// All UI state is derived from /api/backup/*. Polling is event-driven (only
+// while the Settings tab is visible) — see loadBackupAll() above.
+// ===========================================================================
+
+async function loadBackupAll() {
+  // Fan-out the three independent loads. Status & creds are cheap (local
+  // file reads); snapshot listing requires mounting the remote so we leave
+  // it lazy until the user clicks "List snapshots".
+  loadBackupCreds();
+  loadBackupStatus();
+}
+
+function _backupSetMsg(id, text, kind) {
+  // kind: '', 'ok', 'err'. We just toggle inline color; styles in style.css.
+  const el = $(id);
+  if (!el) return;
+  if (!text) { el.hidden = true; el.textContent = ''; el.dataset.kind = ''; return; }
+  el.hidden = false;
+  el.textContent = text;
+  el.dataset.kind = kind || '';
+}
+
+async function loadBackupCreds() {
+  const status = $('backup-creds-status');
+  if (!status) return;
+  try {
+    const r = await fetch('/api/backup/credentials');
+    const j = await r.json();
+    if (j.has_credentials && j.remote) {
+      const remote = j.remote;
+      status.textContent = `saved · \\\\${remote.host || '?'}\\${remote.share || '?'}`;
+      // Pre-fill non-secret fields from the saved record so users can edit
+      // a single field without re-typing everything. Password stays blank
+      // (we never echo it back from the server).
+      const setIfEmpty = (id, value) => {
+        const el = $(id);
+        if (!el) return;
+        if (!el.value || el.dataset.fromSaved === '1') {
+          el.value = value || '';
+          el.dataset.fromSaved = '1';
+        }
+      };
+      setIfEmpty('backup-host', remote.host);
+      setIfEmpty('backup-share', remote.share);
+      setIfEmpty('backup-subdir', remote.subdir || 'jackery-monitor');
+      setIfEmpty('backup-username', remote.username);
+      setIfEmpty('backup-domain', remote.domain || 'WORKGROUP');
+      $('backup-state-line').textContent = 'Destination configured. Daily backup will run automatically.';
+    } else {
+      status.textContent = 'not configured';
+      $('backup-state-line').textContent = 'No destination saved yet — fill in the form below and Test before saving.';
+    }
+  } catch (e) {
+    status.textContent = 'failed to load';
+  }
+}
+
+document.getElementById('backup-creds-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  _backupSetMsg('backup-creds-msg', 'Saving…', '');
+  const body = _readBackupForm();
+  if (!body.password) {
+    // The server requires a password on every save (the encrypted file
+    // can't be patched in place without re-encrypting). Tell the user
+    // up-front rather than letting the server 400.
+    _backupSetMsg('backup-creds-msg', 'Password is required to save.', 'err');
+    return;
+  }
+  try {
+    const r = await fetch('/api/backup/credentials', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    _backupSetMsg('backup-creds-msg', 'Saved.', 'ok');
+    $('backup-password').value = '';
+    setTimeout(() => _backupSetMsg('backup-creds-msg', '', ''), 2000);
+    loadBackupCreds();
+    loadBackupStatus();
+  } catch (err) {
+    _backupSetMsg('backup-creds-msg', 'Failed: ' + (err.message || err), 'err');
+  }
+});
+
+$('backup-test')?.addEventListener('click', async () => {
+  _backupSetMsg('backup-creds-msg', 'Testing connection…', '');
+  // If the form has anything filled in, test those creds (lets the user
+  // validate before saving). Otherwise fall back to whatever is persisted.
+  const formBody = _readBackupForm();
+  const hasFormInput = formBody.host || formBody.share || formBody.username || formBody.password;
+  const body = hasFormInput ? formBody : {};
+  try {
+    const r = await fetch('/api/backup/test', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      const ms = (j.latency_ms != null) ? ` (${j.latency_ms} ms)` : '';
+      _backupSetMsg('backup-creds-msg', `OK — mount + write probe succeeded${ms}.`, 'ok');
+    } else {
+      _backupSetMsg('backup-creds-msg', 'Failed: ' + (j.error || 'unknown error'), 'err');
+    }
+  } catch (err) {
+    _backupSetMsg('backup-creds-msg', 'Failed: ' + (err.message || err), 'err');
+  }
+});
+
+$('backup-clear')?.addEventListener('click', async () => {
+  if (!confirm('Forget saved backup destination? Daily backups will stop until new credentials are saved.')) return;
+  await fetch('/api/backup/credentials', { method: 'DELETE' });
+  ['backup-host','backup-share','backup-username','backup-password','backup-domain'].forEach(id => {
+    const el = $(id);
+    if (el) { el.value = ''; el.dataset.fromSaved = ''; }
+  });
+  $('backup-subdir').value = 'jackery-monitor';
+  $('backup-domain').value = 'WORKGROUP';
+  loadBackupCreds();
+  loadBackupStatus();
+});
+
+function _readBackupForm() {
+  return {
+    host: ($('backup-host').value || '').trim(),
+    share: ($('backup-share').value || '').trim(),
+    subdir: ($('backup-subdir').value || '').trim() || 'jackery-monitor',
+    username: ($('backup-username').value || '').trim(),
+    password: $('backup-password').value || '',
+    domain: ($('backup-domain').value || '').trim() || 'WORKGROUP',
+  };
+}
+
+async function loadBackupStatus() {
+  const wrap = $('backup-runs');
+  if (!wrap) return;
+  try {
+    const r = await fetch('/api/backup/status');
+    const j = await r.json();
+    const runs = j.runs || [];
+    if (j.last_ok_ts) {
+      const d = new Date(j.last_ok_ts * 1000);
+      $('backup-last-line').textContent = 'Last successful backup: ' + d.toLocaleString();
+    } else if (j.configured) {
+      $('backup-last-line').textContent = 'No successful backup yet.';
+    } else {
+      $('backup-last-line').textContent = 'No destination configured.';
+    }
+    if (!runs.length) {
+      wrap.innerHTML = '<div class="hint">No runs yet. Save credentials and click <strong>Run now</strong> to validate.</div>';
+      return;
+    }
+    wrap.innerHTML = runs.map(_renderBackupRunRow).join('');
+  } catch (e) {
+    wrap.innerHTML = '<div class="hint">Failed to load status.</div>';
+  }
+}
+
+function _renderBackupRunRow(run) {
+  const ts = run.iso || (run.ts ? new Date(run.ts * 1000).toLocaleString() : '?');
+  const ok = !!run.ok;
+  const skipped = run.skipped_reason ? ` (skipped: ${run.skipped_reason})` : '';
+  const dur = (run.duration_s != null) ? `${run.duration_s.toFixed(1)}s` : '—';
+  const bytes = run.bytes_written ? _fmtBytes(run.bytes_written) : '—';
+  const files = run.files_written != null ? `${run.files_written} files` : '—';
+  const tag = ok
+    ? '<span class="backup-pill backup-pill-ok">success</span>'
+    : (run.skipped_reason
+        ? '<span class="backup-pill backup-pill-warn">skipped</span>'
+        : '<span class="backup-pill backup-pill-err">failed</span>');
+  const detail = ok
+    ? `${files} · ${bytes} · ${dur}`
+    : (run.error ? `error: ${run.error}` : skipped || 'unknown failure');
+  return `<div class="backup-run">
+    <div class="backup-run-head">${tag}<span class="backup-run-ts">${ts}</span></div>
+    <div class="backup-run-body">${detail}</div>
+  </div>`;
+}
+
+function _fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n/1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n/(1024*1024)).toFixed(1)} MB`;
+  return `${(n/(1024*1024*1024)).toFixed(2)} GB`;
+}
+
+$('backup-status-reload')?.addEventListener('click', loadBackupStatus);
+
+$('backup-run-now')?.addEventListener('click', async () => {
+  const btn = $('backup-run-now');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  _backupSetMsg('backup-run-msg', 'Backup in progress — this may take a minute over slow links.', '');
+  try {
+    const r = await fetch('/api/backup/run', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok) {
+      _backupSetMsg('backup-run-msg', `OK — wrote ${j.files_written} files (${_fmtBytes(j.bytes_written || 0)}).`, 'ok');
+    } else if (j.skipped_reason) {
+      _backupSetMsg('backup-run-msg', `Skipped: ${j.skipped_reason}`, 'err');
+    } else {
+      _backupSetMsg('backup-run-msg', 'Failed: ' + (j.error || 'unknown error'), 'err');
+    }
+  } catch (err) {
+    _backupSetMsg('backup-run-msg', 'Failed: ' + (err.message || err), 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+    loadBackupStatus();
+  }
+});
+
+// ---- snapshots / restore --------------------------------------------------
+
+$('backup-snapshots-reload')?.addEventListener('click', loadBackupSnapshots);
+
+async function loadBackupSnapshots() {
+  const wrap = $('backup-snapshots');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="hint">Mounting remote and listing snapshots…</div>';
+  try {
+    const r = await fetch('/api/backup/snapshots');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    const snaps = j.snapshots || [];
+    if (!snaps.length) {
+      wrap.innerHTML = '<div class="hint">No snapshots found at the destination yet.</div>';
+      return;
+    }
+    wrap.innerHTML = snaps.map(_renderSnapshotRow).join('');
+    // Wire up the per-row controls.
+    wrap.querySelectorAll('[data-restore-snap]').forEach(btn => {
+      btn.addEventListener('click', () => _doRestore(btn.dataset.restoreSnap, btn));
+    });
+    wrap.querySelectorAll('[data-toggle-files]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = wrap.querySelector(`[data-files-for="${btn.dataset.toggleFiles}"]`);
+        if (target) target.toggleAttribute('hidden');
+      });
+    });
+  } catch (err) {
+    wrap.innerHTML = `<div class="hint">Failed to list snapshots: ${err.message || err}</div>`;
+  }
+}
+
+function _renderSnapshotRow(s) {
+  if (!s.valid) {
+    return `<div class="backup-snap backup-snap-bad">
+      <div class="backup-snap-head">${s.dir}</div>
+      <div class="backup-snap-body">Invalid snapshot: ${s.error || 'manifest unreadable'}</div>
+    </div>`;
+  }
+  const bytes = s.total_bytes ? _fmtBytes(s.total_bytes) : '—';
+  const files = (s.files || []).length;
+  const ts = s.iso || s.dir;
+  const filesEsc = (s.files || []).map(f => f.replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))).join(', ');
+  return `<div class="backup-snap">
+    <div class="backup-snap-head">
+      <strong>${ts}</strong>
+      <span class="hint">${files} files · ${bytes}</span>
+    </div>
+    <div class="backup-snap-body">
+      <label class="hint" style="display:flex; gap:6px; align-items:center; margin-bottom:8px">
+        <input type="checkbox" class="backup-snap-selective" data-snap="${s.dir}" />
+        Selective restore (pick files)
+      </label>
+      <div class="backup-snap-files" data-files-for="${s.dir}" hidden>
+        <div class="hint" style="margin-bottom:6px">Uncheck files you don't want to restore:</div>
+        ${(s.files || []).map(f => `<label class="backup-file-pick"><input type="checkbox" class="backup-file-cb" data-snap="${s.dir}" value="${f}" checked> <code>${f}</code></label>`).join('')}
+      </div>
+      <button class="btn btn-ghost" type="button" data-toggle-files="${s.dir}">Show files (${filesEsc.length > 0 ? files : 0})</button>
+      <button class="btn btn-primary" type="button" data-restore-snap="${s.dir}" style="margin-left:8px">Restore this snapshot</button>
+    </div>
+  </div>`;
+}
+
+async function _doRestore(snapDir, btn) {
+  // Selective vs full is picked per-row via the "Selective restore" checkbox.
+  const wrap = $('backup-snapshots');
+  const selective = wrap.querySelector(`.backup-snap-selective[data-snap="${snapDir}"]`)?.checked;
+  let scope;
+  if (selective) {
+    const checked = Array.from(wrap.querySelectorAll(`.backup-file-cb[data-snap="${snapDir}"]:checked`)).map(cb => cb.value);
+    if (!checked.length) {
+      _backupSetMsg('backup-restore-msg', 'Pick at least one file for selective restore.', 'err');
+      return;
+    }
+    scope = { files: checked };
+  } else {
+    scope = { full: true };
+  }
+  const label = scope.full ? 'a full restore' : `restore of ${scope.files.length} file(s)`;
+  if (!confirm(`Run ${label} from snapshot ${snapDir}?\n\nThis overwrites the corresponding files in /data on this device.`)) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Restoring…';
+  _backupSetMsg('backup-restore-msg', 'Restore in progress…', '');
+  try {
+    const r = await fetch('/api/backup/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ snapshot: snapDir, scope }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+    const restoredList = j.restored_files || [];
+    const n = restoredList.length;
+    _backupSetMsg('backup-restore-msg', `Restored ${n} file(s). Reload the page to pick up restored settings.`, 'ok');
+  } catch (err) {
+    _backupSetMsg('backup-restore-msg', 'Failed: ' + (err.message || err), 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}

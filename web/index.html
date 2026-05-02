@@ -1031,6 +1031,117 @@
           </div>
         </form>
       </section>
+
+      <!-- ============== BACKUP & RESTORE ============== -->
+      <!-- Daily SMB backup of /data to a remote NAS, with on-demand restore.
+           Three cards: (1) destination credentials, (2) status + run-now,
+           (3) restore from a chosen snapshot. The backend keeps the SMB
+           password encrypted at rest, and the daily loop fires at the
+           hour configured in Runtime settings (backup_schedule_hour). -->
+      <section class="card device-card" id="backup-card-creds">
+        <div class="card-header">
+          <h2>Backup &amp; restore</h2>
+          <span id="backup-creds-status" class="hint">—</span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS over SMB. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic, etc.) get re-prompted. Backups are kept forever; prune manually on the NAS if needed.
+        </p>
+        <p id="backup-state-line" class="hint" style="margin:6px 0 12px"></p>
+        <form id="backup-creds-form">
+          <div class="settings-fields">
+            <div class="settings-row">
+              <label class="settings-label" for="backup-host">
+                <span class="settings-label-text">NAS host / IP</span>
+                <span class="settings-hint">Hostname or IP of the remote SMB server (e.g. <code>nas.local</code> or <code>192.168.1.50</code>).</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-host" type="text" class="device-select" autocomplete="off" placeholder="nas.local" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="backup-share">
+                <span class="settings-label-text">Share name</span>
+                <span class="settings-hint">The SMB share to mount (no leading slash, e.g. <code>backups</code>).</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-share" type="text" class="device-select" autocomplete="off" placeholder="backups" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="backup-subdir">
+                <span class="settings-label-text">Subdirectory</span>
+                <span class="settings-hint">Folder inside the share where snapshots get written. Created automatically on first run.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-subdir" type="text" class="device-select" autocomplete="off" placeholder="jackery-monitor" value="jackery-monitor" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="backup-username">
+                <span class="settings-label-text">Username</span>
+                <span class="settings-hint">SMB account that can write to the share above.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-username" type="text" class="device-select" autocomplete="username" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="backup-password">
+                <span class="settings-label-text">Password</span>
+                <span class="settings-hint">Encrypted at rest. Leave blank to keep the saved value when re-saving other fields.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-password" type="password" class="device-select" autocomplete="new-password" placeholder="••••••••" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="backup-domain">
+                <span class="settings-label-text">Domain (optional)</span>
+                <span class="settings-hint">Most home NAS setups can leave this as <code>WORKGROUP</code>.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-domain" type="text" class="device-select" autocomplete="off" value="WORKGROUP" style="min-width:220px" />
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+            <button class="btn btn-primary" type="submit">Save</button>
+            <button id="backup-test" class="btn btn-ghost" type="button">Test connection</button>
+            <button id="backup-clear" class="btn btn-ghost" type="button">Forget</button>
+            <span id="backup-creds-msg" class="hint" hidden></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="card device-card" id="backup-card-status">
+        <div class="card-header">
+          <h2>Status &amp; history</h2>
+          <span id="backup-last-line" class="hint">—</span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Daily run results. Click <strong>Run now</strong> to validate end-to-end immediately — useful right after saving credentials.
+        </p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px">
+          <button id="backup-run-now" class="btn btn-primary" type="button">Run now</button>
+          <button id="backup-status-reload" class="btn btn-ghost" type="button">Refresh</button>
+          <span id="backup-run-msg" class="hint" hidden></span>
+        </div>
+        <div id="backup-runs" class="backup-runs"><div class="hint">Loading…</div></div>
+      </section>
+
+      <section class="card device-card" id="backup-card-restore">
+        <div class="card-header">
+          <h2>Restore from backup</h2>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Pick a snapshot and replace the local <code>/data</code> contents. <strong>Full</strong> restore overwrites the database and every settings/credential file. <strong>Selective</strong> restore lets you pick only certain files (useful for recovering a single deleted device or settings file). The encryption key stays local — telemetry comes back, but encrypted creds will need to be re-entered after a restore on a fresh device.
+        </p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px">
+          <button id="backup-snapshots-reload" class="btn btn-ghost" type="button">List snapshots</button>
+          <span id="backup-restore-msg" class="hint" hidden></span>
+        </div>
+        <div id="backup-snapshots" class="backup-snapshots"><div class="hint">Click <em>List snapshots</em> to load.</div></div>
+      </section>
     </section>
 
     <div id="alert-banner" class="alert" hidden></div>

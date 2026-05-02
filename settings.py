@@ -75,6 +75,15 @@ SCHEMA: dict[str, dict[str, Any]] = {
         "label": "AI advisor daily-review hour",
         "hint": "Local hour (0-23) when Claude reviews yesterday's data per device. 8 = 8 AM local. Requires an Anthropic API key on this page; runs once per device per day.",
     },
+    "backup_schedule_hour": {
+        "env": "JACKERY_BACKUP_HOUR",
+        "default": 3,
+        "type": "int",
+        "min": 0,
+        "max": 23,
+        "label": "Backup daily-run hour",
+        "hint": "Local hour (0-23) when the daily SMB backup to the remote NAS runs. 3 = 3 AM local. Configure the remote target on the Settings page → Backup & Restore section before this fires for the first time.",
+    },
 }
 
 

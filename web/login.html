@@ -14,6 +14,7 @@
 </head>
 <body>
   <main class="auth-page">
+    <!-- =================== STANDARD SIGN-IN / SETUP FORM =================== -->
     <form id="auth-form" class="login-card" autocomplete="on">
       <div class="login-brand">
         <span class="logo-dot"></span>
@@ -38,7 +39,94 @@
 
       <button id="auth-submit" class="btn btn-primary" type="submit">Sign in</button>
       <p class="login-foot">Stored locally on this NAS, never sent off-device. The session cookie is HMAC-signed and lasts 30 days.</p>
+
+      <!-- Setup-only: offer to restore from a remote backup instead of
+           creating a fresh account. Hidden on /login. The button toggles
+           this whole form out and the restore wizard in. -->
+      <div id="setup-alt-row" hidden style="margin-top:16px; text-align:center; border-top:1px solid var(--border); padding-top:14px">
+        <p class="hint" style="margin:0 0 8px">Already have a backup on a NAS?</p>
+        <button id="show-restore" class="btn btn-ghost" type="button">Restore from backup instead</button>
+      </div>
     </form>
+
+    <!-- =================== RESTORE-FROM-BACKUP WIZARD ====================== -->
+    <!-- Multi-step:
+           step 1: enter SMB creds + Test
+           step 2: pick a snapshot
+           step 3: confirm + run
+           step 4: success → redirect to /login (auth.json now restored).
+         Only available pre-auth (server enforces _require_no_user()). -->
+    <section id="restore-card" class="login-card" hidden>
+      <div class="login-brand">
+        <span class="logo-dot"></span>
+        <h1>Restore from backup</h1>
+      </div>
+      <p class="login-sub">Pull settings + telemetry from a remote NAS. After restoring you'll sign in with the credentials from the original install.</p>
+
+      <!-- step 1: creds -->
+      <div id="restore-step-creds">
+        <label class="field">
+          <span class="field-label">NAS host / IP</span>
+          <input id="rs-host" type="text" placeholder="nas.local" autocomplete="off" required />
+        </label>
+        <label class="field">
+          <span class="field-label">Share name</span>
+          <input id="rs-share" type="text" placeholder="backups" autocomplete="off" required />
+        </label>
+        <label class="field">
+          <span class="field-label">Subdirectory</span>
+          <input id="rs-subdir" type="text" value="jackery-monitor" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="field-label">Username</span>
+          <input id="rs-username" type="text" autocomplete="username" required />
+        </label>
+        <label class="field">
+          <span class="field-label">Password</span>
+          <input id="rs-password" type="password" autocomplete="current-password" required />
+        </label>
+        <label class="field">
+          <span class="field-label">Domain</span>
+          <input id="rs-domain" type="text" value="WORKGROUP" autocomplete="off" />
+        </label>
+
+        <div id="restore-error" class="login-error" hidden></div>
+        <div id="restore-info" class="login-error" hidden style="background:rgba(74,222,128,.12); color:var(--accent); border-color:rgba(74,222,128,.2)"></div>
+
+        <div style="display:flex; gap:8px; margin-top:6px">
+          <button id="rs-test" class="btn btn-ghost" type="button">Test</button>
+          <button id="rs-list" class="btn btn-primary" type="button" style="flex:1">List snapshots →</button>
+        </div>
+      </div>
+
+      <!-- step 2: snapshot picker -->
+      <div id="restore-step-pick" hidden>
+        <p class="login-sub" id="rs-pick-sub">Pick a snapshot to restore.</p>
+        <div id="rs-snapshot-list" style="display:flex; flex-direction:column; gap:8px; margin:6px 0 12px"></div>
+        <div style="display:flex; gap:8px">
+          <button id="rs-back" class="btn btn-ghost" type="button">← Back</button>
+        </div>
+      </div>
+
+      <!-- step 3: confirm + run -->
+      <div id="restore-step-confirm" hidden>
+        <p class="login-sub" id="rs-confirm-sub"></p>
+        <div id="restore-confirm-error" class="login-error" hidden></div>
+        <div style="display:flex; gap:8px; margin-top:8px">
+          <button id="rs-confirm-back" class="btn btn-ghost" type="button">← Back</button>
+          <button id="rs-confirm-go" class="btn btn-primary" type="button" style="flex:1">Restore now</button>
+        </div>
+      </div>
+
+      <!-- step 4: success -->
+      <div id="restore-step-done" hidden>
+        <p class="login-sub" style="color:var(--accent)">Restore complete.</p>
+        <p class="hint">Your old settings, telemetry, and user account are now on this device. Sign in with the credentials from the original install.</p>
+        <button id="rs-go-login" class="btn btn-primary" type="button">Continue to sign in</button>
+      </div>
+
+      <p class="login-foot" style="margin-top:14px"><a href="#" id="rs-cancel">Cancel and create a new account instead</a></p>
+    </section>
   </main>
 
   <script>
@@ -50,6 +138,7 @@
       const submitBtn = $('auth-submit');
       const confirmRow = $('auth-confirm-row');
       const confirmInput = $('auth-confirm');
+      const setupAltRow = $('setup-alt-row');
 
       if (setup) {
         document.title = 'Jackery Monitor — Set up';
@@ -58,12 +147,11 @@
         confirmRow.hidden = false;
         confirmInput.required = true;
         $('auth-password').autocomplete = 'new-password';
+        // Show the "Restore from backup" alternative — only meaningful pre-auth.
+        setupAltRow.hidden = false;
       }
 
-      function showError(msg) {
-        errEl.textContent = msg;
-        errEl.hidden = false;
-      }
+      function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
       function clearError() { errEl.hidden = true; errEl.textContent = ''; }
 
       document.getElementById('auth-form').addEventListener('submit', async (e) => {
@@ -99,11 +187,196 @@
         }
       });
 
-      // If we're on /login but no user is set up yet, redirect to /setup.
-      // (Edge case if someone bookmarks /login pre-setup.)
       if (!setup) {
         fetch('/api/auth/me', { credentials: 'same-origin' }).catch(() => {});
       }
+
+      // ====================================================================
+      // RESTORE-FROM-BACKUP wizard. Only wired up on /setup. Endpoints used
+      // here all live under /api/backup/setup_restore/* and self-disable
+      // once an admin user exists, so this code is harmless on /login.
+      // ====================================================================
+      if (!setup) return;
+
+      const restoreCard = $('restore-card');
+      const authForm = document.getElementById('auth-form');
+      const rsErr = $('restore-error');
+      const rsInfo = $('restore-info');
+
+      function rsShowError(msg) { rsErr.textContent = msg; rsErr.hidden = false; rsInfo.hidden = true; }
+      function rsShowInfo(msg)  { rsInfo.textContent = msg; rsInfo.hidden = false; rsErr.hidden = true; }
+      function rsClearAlerts()  { rsErr.hidden = true; rsInfo.hidden = true; }
+
+      $('show-restore').addEventListener('click', () => {
+        authForm.hidden = true;
+        restoreCard.hidden = false;
+        rsClearAlerts();
+      });
+      $('rs-cancel').addEventListener('click', (e) => {
+        e.preventDefault();
+        restoreCard.hidden = true;
+        authForm.hidden = false;
+      });
+
+      function readCreds() {
+        return {
+          host: $('rs-host').value.trim(),
+          share: $('rs-share').value.trim(),
+          subdir: $('rs-subdir').value.trim() || 'jackery-monitor',
+          username: $('rs-username').value.trim(),
+          password: $('rs-password').value,
+          domain: $('rs-domain').value.trim() || 'WORKGROUP',
+        };
+      }
+
+      function validateCreds(c) {
+        if (!c.host || !c.share || !c.username || !c.password) {
+          rsShowError('Fill in host, share, username, and password.');
+          return false;
+        }
+        return true;
+      }
+
+      $('rs-test').addEventListener('click', async () => {
+        rsClearAlerts();
+        const creds = readCreds();
+        if (!validateCreds(creds)) return;
+        const btn = $('rs-test');
+        btn.disabled = true;
+        const orig = btn.textContent; btn.textContent = 'Testing…';
+        try {
+          const r = await fetch('/api/backup/setup_restore/test', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(creds),
+          });
+          const j = await r.json();
+          if (j.ok) {
+            const ms = (j.latency_ms != null) ? ` (${j.latency_ms} ms)` : '';
+            rsShowInfo(`Mount + write probe OK${ms}.`);
+          } else {
+            rsShowError('Failed: ' + (j.error || 'unknown'));
+          }
+        } catch (err) {
+          rsShowError('Failed: ' + (err.message || err));
+        } finally {
+          btn.disabled = false; btn.textContent = orig;
+        }
+      });
+
+      let _pickedSnapshot = null;
+
+      $('rs-list').addEventListener('click', async () => {
+        rsClearAlerts();
+        const creds = readCreds();
+        if (!validateCreds(creds)) return;
+        const btn = $('rs-list');
+        btn.disabled = true;
+        const orig = btn.textContent; btn.textContent = 'Loading…';
+        try {
+          const r = await fetch('/api/backup/setup_restore/snapshots', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(creds),
+          });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+          const snaps = j.snapshots || [];
+          if (!snaps.length) {
+            rsShowError('No snapshots found at that destination.');
+            return;
+          }
+          renderSnapshots(snaps);
+          $('restore-step-creds').hidden = true;
+          $('restore-step-pick').hidden = false;
+        } catch (err) {
+          rsShowError('Failed: ' + (err.message || err));
+        } finally {
+          btn.disabled = false; btn.textContent = orig;
+        }
+      });
+
+      function renderSnapshots(snaps) {
+        const wrap = $('rs-snapshot-list');
+        wrap.innerHTML = '';
+        snaps.forEach(s => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'btn btn-ghost';
+          row.style.cssText = 'text-align:left; justify-content:flex-start; padding:10px 12px; line-height:1.4';
+          if (!s.valid) {
+            row.disabled = true;
+            row.innerHTML = `<div><strong>${s.dir}</strong></div><div class="hint" style="font-size:11px">Invalid: ${s.error || '?'}</div>`;
+          } else {
+            const bytes = s.total_bytes ? humanBytes(s.total_bytes) : '—';
+            const files = (s.files || []).length;
+            row.innerHTML = `<div><strong>${s.iso || s.dir}</strong></div><div class="hint" style="font-size:11px">${files} files · ${bytes}</div>`;
+            row.addEventListener('click', () => goConfirm(s));
+          }
+          wrap.appendChild(row);
+        });
+      }
+
+      function humanBytes(n) {
+        if (n < 1024) return n + ' B';
+        if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+        if (n < 1024*1024*1024) return (n/(1024*1024)).toFixed(1) + ' MB';
+        return (n/(1024*1024*1024)).toFixed(2) + ' GB';
+      }
+
+      $('rs-back').addEventListener('click', () => {
+        $('restore-step-pick').hidden = true;
+        $('restore-step-creds').hidden = false;
+      });
+
+      function goConfirm(snap) {
+        _pickedSnapshot = snap;
+        $('restore-step-pick').hidden = true;
+        $('restore-step-confirm').hidden = false;
+        $('rs-confirm-sub').innerHTML =
+          `Restore <strong>${snap.iso || snap.dir}</strong>? This writes the snapshot's ${(snap.files || []).length} files into <code>/data</code> and replaces anything already there. Your existing user account (if any) is overwritten by the one from the backup.`;
+      }
+
+      $('rs-confirm-back').addEventListener('click', () => {
+        $('restore-step-confirm').hidden = true;
+        $('restore-step-pick').hidden = false;
+      });
+
+      $('rs-confirm-go').addEventListener('click', async () => {
+        if (!_pickedSnapshot) return;
+        const errBox = $('restore-confirm-error');
+        errBox.hidden = true;
+        const btn = $('rs-confirm-go');
+        btn.disabled = true;
+        const orig = btn.textContent; btn.textContent = 'Restoring…';
+        try {
+          const creds = readCreds();
+          const body = Object.assign({}, creds, {
+            snapshot: _pickedSnapshot.dir,
+            scope: { full: true },
+          });
+          const r = await fetch('/api/backup/setup_restore/restore', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const j = await r.json();
+          if (!r.ok || !j.ok) throw new Error(j.error || j.detail || ('HTTP ' + r.status));
+          $('restore-step-confirm').hidden = true;
+          $('restore-step-done').hidden = false;
+        } catch (err) {
+          errBox.textContent = 'Failed: ' + (err.message || err);
+          errBox.hidden = false;
+        } finally {
+          btn.disabled = false; btn.textContent = orig;
+        }
+      });
+
+      $('rs-go-login').addEventListener('click', () => {
+        // Auth.json was just restored, so the original credentials work.
+        // /login will see has_user() === true and stay on the login form.
+        window.location.replace('/login');
+      });
     })();
   </script>
 </body>

@@ -36,6 +36,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import auth
+import backup
+import backup_creds
 import cost as cost_module
 import energy_db
 import forecaster
@@ -2067,6 +2069,14 @@ async def lifespan(app: FastAPI):
     state.advisor_task = asyncio.create_task(advisor_loop())
     state.kasa_reconciler_task = asyncio.create_task(kasa_reconciler_loop())
     state.forecast_recorder_task = asyncio.create_task(forecast_recorder_loop())
+    # Backup runs daily at the user-configured local time. The schedule
+    # callback re-reads settings on every iteration so the user can
+    # change the time at runtime without an app restart.
+    state.backup_task = asyncio.create_task(
+        backup.backup_loop(
+            get_schedule=lambda: user_settings.get("backup_schedule_hour"),
+        ),
+    )
     yield
     if state.poll_task:
         state.poll_task.cancel()
@@ -2078,6 +2088,8 @@ async def lifespan(app: FastAPI):
         state.kasa_reconciler_task.cancel()
     if getattr(state, "forecast_recorder_task", None):
         state.forecast_recorder_task.cancel()
+    if getattr(state, "backup_task", None):
+        state.backup_task.cancel()
     try:
         await state.client.disconnect()
     except Exception:
@@ -2103,6 +2115,10 @@ _AUTH_PUBLIC_PREFIXES = (
     "/login",
     "/setup",
     "/api/auth/",
+    # Pre-auth restore: lets a fresh install pull data from backup
+    # before creating an admin account. Endpoint handlers verify
+    # auth.has_user() == False themselves — see _require_no_user().
+    "/api/backup/setup_restore/",
 )
 
 
@@ -3998,6 +4014,230 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     finally:
         state.ws_clients.pop(ws, None)
+
+
+# ==========================================================================
+# Backup & Restore
+# ==========================================================================
+# Daily snapshot of /data to a remote SMB/CIFS share. Configured + monitored
+# from the Settings page. The actual work lives in backup.py — this section
+# is a thin REST veneer.
+#
+# Two auth tiers:
+#   - Normal endpoints: require an authenticated session (covered by the
+#     global /api/* middleware).
+#   - "setup_restore_*" endpoints: usable BEFORE first-run setup, so a
+#     user installing on a new NAS can pull their data back from backup
+#     without first creating a fresh admin account on top of an empty DB.
+#     They self-disable as soon as auth.has_user() becomes True.
+
+@app.get("/api/backup/credentials")
+def api_backup_creds_status():
+    """Return the saved SMB credentials with the password redacted.
+    Drives the "configured / not configured" UI state in the Settings
+    page."""
+    return {
+        "has_credentials": backup_creds.has_credentials(),
+        "remote": backup_creds.public_view(),
+    }
+
+
+@app.post("/api/backup/credentials")
+def api_backup_creds_save(body: dict):
+    """Persist remote-NAS SMB credentials. Required fields: host, share,
+    username, password. Optional: subdir (default 'jackery-monitor'),
+    domain (default 'WORKGROUP'). Saving overwrites any prior config.
+    The save itself doesn't validate connectivity — the UI is expected
+    to call /api/backup/test immediately after to surface errors before
+    the user leaves the form."""
+    body = body or {}
+    host = (body.get("host") or "").strip()
+    share = (body.get("share") or "").strip()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    subdir = (body.get("subdir") or "jackery-monitor").strip()
+    domain = (body.get("domain") or "WORKGROUP").strip()
+    if not host or not share or not username or not password:
+        raise HTTPException(400, "host, share, username, password are required")
+    if not backup_creds.save(host=host, share=share, subdir=subdir,
+                              username=username, password=password,
+                              domain=domain):
+        raise HTTPException(500, "failed to save backup credentials")
+    return {"ok": True}
+
+
+@app.delete("/api/backup/credentials")
+def api_backup_creds_clear():
+    backup_creds.clear()
+    return {"ok": True}
+
+
+@app.post("/api/backup/test")
+async def api_backup_test(body: dict | None = None):
+    """Connectivity test: mount, write a probe file, read it back, delete,
+    unmount. Doesn't run a real backup. Returns {ok, latency_ms} on
+    success or {ok: False, error: ...} on failure. Run in a thread
+    because mount.cifs blocks.
+
+    If `body` provides override creds (host/share/username/password/
+    subdir/domain), test those instead of the saved ones — lets the UI
+    validate creds *before* persisting them.
+    """
+    creds = None
+    if body and any(body.get(k) for k in ("host", "share", "username", "password")):
+        creds = {
+            "host": (body.get("host") or "").strip(),
+            "share": (body.get("share") or "").strip(),
+            "subdir": (body.get("subdir") or "jackery-monitor").strip(),
+            "username": (body.get("username") or "").strip(),
+            "password": body.get("password") or "",
+            "domain": (body.get("domain") or "WORKGROUP").strip(),
+        }
+        if not all(creds[k] for k in ("host", "share", "username", "password")):
+            raise HTTPException(400, "host, share, username, password are required")
+    return await asyncio.to_thread(backup.test_connectivity, creds)
+
+
+@app.get("/api/backup/status")
+def api_backup_status():
+    """Top-level UI status: whether backups are configured, when the last
+    successful run was, and the last 20 run results (success+failure).
+    Cheap — reads /data/backup-status.json."""
+    return backup.get_status()
+
+
+@app.post("/api/backup/run")
+async def api_backup_run_now():
+    """Trigger a one-shot backup right now. Same code path as the
+    scheduled run. Returns the BackupResult so the UI can show inline
+    success/failure without waiting for the next status poll."""
+    result = await asyncio.to_thread(backup.run_backup)
+    return result.as_dict()
+
+
+@app.get("/api/backup/snapshots")
+async def api_backup_list_snapshots():
+    """List every snapshot directory on the remote share. Used by the
+    Restore picker."""
+    snaps = await asyncio.to_thread(backup.list_remote_snapshots)
+    return {"snapshots": snaps}
+
+
+@app.post("/api/backup/restore")
+async def api_backup_restore(body: dict):
+    """Restore a named snapshot into /data.
+
+    Body:
+      {
+        "snapshot": "2026-05-02_030000",
+        "scope":    {"full": true}        // OR
+                    {"files": ["energy.db", "settings.json"]}
+      }
+
+    The encryption key is restored only if scope.include_key is true
+    AND the manifest contains it.
+    """
+    body = body or {}
+    snapshot = (body.get("snapshot") or "").strip()
+    if not snapshot:
+        raise HTTPException(400, "snapshot is required")
+    scope = body.get("scope") or {"full": True}
+    return await asyncio.to_thread(
+        backup.run_restore,
+        snapshot_dir_name=snapshot, scope=scope,
+    )
+
+
+# ---- fresh-install restore ----------------------------------------------
+# These three endpoints are exempt from the auth middleware (see
+# _AUTH_PUBLIC_PREFIXES below). They self-disable once the admin user is
+# created. The UX flow on a new NAS install:
+#   1. User hits the dashboard, gets redirected to /setup.
+#   2. /setup page offers "Restore from backup" alongside "Create account".
+#   3. If they pick restore: enter SMB creds -> test -> list snapshots ->
+#      pick one -> restore -> redirect to /setup so they can sign in (the
+#      restored auth.json contains their old credentials, so login works).
+#
+# Why a separate endpoint set instead of just exempting the main ones:
+# we don't want pre-auth callers poking at /api/backup/run (which writes
+# fresh data on a remote) or modifying credentials in a way that
+# affects an already-set-up app.
+
+def _require_no_user():
+    if auth.has_user():
+        raise HTTPException(403, "already_set_up")
+
+
+@app.post("/api/backup/setup_restore/test")
+async def api_backup_setup_restore_test(body: dict):
+    """Pre-auth connectivity test. Same logic as /api/backup/test but
+    only works on a fresh install."""
+    _require_no_user()
+    if not body or not all(body.get(k) for k in ("host", "share", "username", "password")):
+        raise HTTPException(400, "host, share, username, password are required")
+    creds = {
+        "host": (body.get("host") or "").strip(),
+        "share": (body.get("share") or "").strip(),
+        "subdir": (body.get("subdir") or "jackery-monitor").strip(),
+        "username": (body.get("username") or "").strip(),
+        "password": body.get("password") or "",
+        "domain": (body.get("domain") or "WORKGROUP").strip(),
+    }
+    return await asyncio.to_thread(backup.test_connectivity, creds)
+
+
+@app.post("/api/backup/setup_restore/snapshots")
+async def api_backup_setup_restore_snapshots(body: dict):
+    """Pre-auth snapshot listing."""
+    _require_no_user()
+    if not body or not all(body.get(k) for k in ("host", "share", "username", "password")):
+        raise HTTPException(400, "host, share, username, password are required")
+    creds = {
+        "host": (body.get("host") or "").strip(),
+        "share": (body.get("share") or "").strip(),
+        "subdir": (body.get("subdir") or "jackery-monitor").strip(),
+        "username": (body.get("username") or "").strip(),
+        "password": body.get("password") or "",
+        "domain": (body.get("domain") or "WORKGROUP").strip(),
+    }
+    snaps = await asyncio.to_thread(backup.list_remote_snapshots, creds)
+    return {"snapshots": snaps}
+
+
+@app.post("/api/backup/setup_restore/restore")
+async def api_backup_setup_restore_run(body: dict):
+    """Pre-auth restore. Drops the snapshot into /data and persists the
+    SMB creds for the daily backup loop. After this returns ok=True the
+    UI redirects to /login (the restored auth.json has the old user)."""
+    _require_no_user()
+    body = body or {}
+    if not all(body.get(k) for k in ("host", "share", "username", "password")):
+        raise HTTPException(400, "host, share, username, password are required")
+    snapshot = (body.get("snapshot") or "").strip()
+    if not snapshot:
+        raise HTTPException(400, "snapshot is required")
+    creds = {
+        "host": (body.get("host") or "").strip(),
+        "share": (body.get("share") or "").strip(),
+        "subdir": (body.get("subdir") or "jackery-monitor").strip(),
+        "username": (body.get("username") or "").strip(),
+        "password": body.get("password") or "",
+        "domain": (body.get("domain") or "WORKGROUP").strip(),
+    }
+    scope = body.get("scope") or {"full": True}
+    result = await asyncio.to_thread(
+        backup.run_restore,
+        snapshot_dir_name=snapshot, scope=scope, creds=creds,
+    )
+    if result.get("ok"):
+        # Persist the same SMB creds so the daily loop can keep
+        # backing up to the same destination after the user signs in.
+        backup_creds.save(
+            host=creds["host"], share=creds["share"], subdir=creds["subdir"],
+            username=creds["username"], password=creds["password"],
+            domain=creds["domain"],
+        )
+    return result
 
 
 # Static UI
