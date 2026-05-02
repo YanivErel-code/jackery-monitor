@@ -508,6 +508,35 @@ main {
 }
 .card-header .hint { font-size: 12px; color: var(--text-mute); }
 
+/* Collapsible card: only the header is visible by default; clicking
+   it expands. Summary stays in the header always. Used by the
+   Battery packs card so the live tab isn't dominated by a stack of
+   per-pack rows the user rarely needs to glance at. */
+.card.collapsible .collapsible-header {
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 0;
+}
+.card.collapsible .collapsible-chevron {
+  display: inline-block;
+  transition: transform .2s;
+  color: var(--text-mute);
+  font-size: 14px;
+  margin-left: 4px;
+}
+.card.collapsible:not(.collapsed) .collapsible-header {
+  margin-bottom: 14px;
+}
+.card.collapsible.collapsed .collapsible-chevron {
+  transform: rotate(-90deg);
+}
+.card.collapsible.collapsed > :not(.collapsible-header) {
+  display: none;
+}
+.card.collapsible .collapsible-header:hover .collapsible-chevron {
+  color: var(--text);
+}
+
 /* ============== Battery card ============== */
 .battery-card {
   display: flex; flex-direction: column; gap: 14px;

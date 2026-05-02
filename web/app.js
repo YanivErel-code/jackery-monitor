@@ -4027,12 +4027,18 @@ function renderBatteryPacks() {
       isMain: true,
     }));
   }
-  for (const p of packs) {
+  packs.forEach((p, i) => {
     const sn = String(p.deviceSn || '');
     const ip = p.ip != null ? Math.round(p.ip) : 0;
     const op = p.op != null ? Math.round(p.op) : 0;
+    // deviceOrder is the cloud's authoritative pack ordering; some
+    // payload paths (older WS broadcasts, the bridge cache when it
+    // hasn't seen a fresh /v1/device/property yet) omit it. Fall
+    // back to the array index so the user sees 1..N instead of every
+    // row labeled "1".
+    const order = (typeof p.deviceOrder === 'number') ? p.deviceOrder : i;
     rows.push(packRow({
-      idx: (p.deviceOrder ?? 0) + 1,
+      idx: order + 1,
       soc: p.rb,
       flow: ip > 0 ? `+${ip}W` : (op > 0 ? `−${op}W` : 'idle'),
       flowClass: ip > 0 ? 'flow-in' : (op > 0 ? 'flow-out' : 'flow-idle'),
@@ -4041,10 +4047,49 @@ function renderBatteryPacks() {
       snTitle: sn,
       isMain: false,
     }));
-  }
+  });
   list.innerHTML = rows.join('');
   card.hidden = false;
 }
+
+// Battery packs collapse toggle. Default is collapsed; user
+// preference is sticky across reloads via localStorage. The detail
+// rows aren't decision-critical at glance — the header summary
+// ("5 packs · avg 75% · system 76% · 237W in") tells the user
+// whether anything's wrong. Open the card only when investigating.
+const PACKS_COLLAPSE_KEY = 'jackery-battery-packs-collapsed';
+
+function applyBatteryPacksCollapseState() {
+  const card = document.getElementById('battery-packs-card');
+  const hdr  = document.getElementById('battery-packs-toggle');
+  if (!card || !hdr) return;
+  const saved = localStorage.getItem(PACKS_COLLAPSE_KEY);
+  // Default to collapsed when the key has never been set.
+  const collapsed = saved == null ? true : (saved === '1');
+  card.classList.toggle('collapsed', collapsed);
+  hdr.setAttribute('aria-expanded', String(!collapsed));
+}
+
+function toggleBatteryPacksCollapsed() {
+  const card = document.getElementById('battery-packs-card');
+  const hdr  = document.getElementById('battery-packs-toggle');
+  if (!card || !hdr) return;
+  const nowCollapsed = !card.classList.contains('collapsed');
+  card.classList.toggle('collapsed', nowCollapsed);
+  hdr.setAttribute('aria-expanded', String(!nowCollapsed));
+  localStorage.setItem(PACKS_COLLAPSE_KEY, nowCollapsed ? '1' : '0');
+}
+
+document.getElementById('battery-packs-toggle')?.addEventListener('click', toggleBatteryPacksCollapsed);
+document.getElementById('battery-packs-toggle')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    toggleBatteryPacksCollapsed();
+  }
+});
+// Apply persisted state on load. (Body of the function tolerates
+// the elements being absent so order-of-script-load doesn't matter.)
+applyBatteryPacksCollapseState();
 
 // Apply the cached system SOC to the SOC card's big number + bar.
 // applyStatus() runs on every WS tick and writes the main-only SOC; we
