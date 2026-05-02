@@ -850,10 +850,13 @@
             <label class="settings-label" for="ak-advisor-model">
               <span class="settings-label-text">Advisor model</span>
               <span class="settings-hint">
-                Daily review — quality-sensitive. 1M-capable models
-                (currently the Opus line) get a separate "(1M context)"
-                entry that toggles the <code>context-1m</code> beta
-                header on for that call. Default: Opus 4.7 1M.
+                Daily review — quality-sensitive. Pick a high-tier
+                model (the Opus line is the typical choice).
+                1M-capable models get a separate "(1M context)" entry
+                that toggles the <code>context-1m</code> beta header
+                on for that call. Whatever's selected here is what
+                runs — switch to a newer model whenever Anthropic
+                ships one.
               </span>
             </label>
             <div class="settings-control">
@@ -864,9 +867,9 @@
             <label class="settings-label" for="ak-advisor-effort">
               <span class="settings-label-text">Thinking effort</span>
               <span class="settings-hint">
-                Adaptive thinking budget for the advisor (Opus 4.7+).
-                Higher = the model self-allocates more tokens to think.
-                Default: high.
+                Adaptive thinking budget for the advisor (Opus 4.7+
+                and newer). Higher = the model self-allocates more
+                tokens to think before answering.
               </span>
             </label>
             <div class="settings-control">
@@ -880,7 +883,11 @@
           <div class="settings-row">
             <label class="settings-label" for="ak-narrator-model">
               <span class="settings-label-text">Narrator model</span>
-              <span class="settings-hint">Per-decision narration — cost-sensitive. Default: Haiku 4.5.</span>
+              <span class="settings-hint">
+                Per-decision narration — cost-sensitive. A fast/cheap
+                model (the Haiku line is the typical choice) is
+                plenty for a 1-2 sentence rationale.
+              </span>
             </label>
             <div class="settings-control">
               <select id="ak-narrator-model" class="device-select" disabled><option>—</option></select>

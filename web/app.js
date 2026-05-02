@@ -3086,14 +3086,37 @@ document.getElementById('ac-charge-toggle')?.addEventListener('click', async () 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ host, on: wantOn }),
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    if (btn) { btn.classList.toggle('on', wantOn); btn.classList.remove('pending'); }
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${r.status}`);
+    }
+    // Optimistic update + clear any stale error decoration left over
+    // from a prior failed click. refreshAcChargeButton fires on the
+    // next 30s tick to confirm the actual plug state.
+    if (btn) {
+      btn.classList.toggle('on', wantOn);
+      btn.classList.remove('pending', 'warn');
+    }
     if (stateEl) stateEl.textContent = wantOn ? 'ON' : 'OFF';
-  } catch (e) {
-    if (btn) btn.classList.remove('pending');
-    if (stateEl) stateEl.textContent = 'err';
-  } finally {
     _acChargeBusy = false;
+    refreshAcChargeButton().catch(() => {}); // re-sync title + state
+  } catch (e) {
+    // Backend already retried 3x (kasa_client._with_retry) before
+    // bubbling up here, so by the time we see this the plug is
+    // genuinely unreachable or returning an auth error. Two fixes
+    // for the "stuck on err / refresh required" pain:
+    //   1. Re-sync to actual plug state so the button reflects truth
+    //      (may have succeeded server-side even if the response was
+    //      lost) — user can immediately click again to retry.
+    //   2. Surface the error as a tooltip + yellow border, NOT as a
+    //      replacement button label. State stays readable.
+    _acChargeBusy = false;
+    if (btn) btn.classList.remove('pending');
+    await refreshAcChargeButton().catch(() => {});
+    if (btn) {
+      btn.classList.add('warn');
+      btn.title = `Last toggle failed: ${e.message || e}\nClick to retry. Hover for details.`;
+    }
   }
 });
 

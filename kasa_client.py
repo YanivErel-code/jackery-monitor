@@ -82,21 +82,67 @@ async def discover(timeout: float = 3.0) -> list[dict]:
     return out
 
 
+# Per-call retry for transient kasa failures. Network blips, the
+# device being briefly busy after a recent toggle, and TCP RSTs all
+# fail the first attempt and succeed the second. Auth errors are
+# permanent and skip the retry — no point hammering bad creds.
+_KASA_RETRY_ATTEMPTS = 3
+_KASA_RETRY_BACKOFF_S = (0.4, 0.8)  # delays between attempts
+
+
+async def _with_retry(operation_name: str, fn):
+    """Run an async kasa operation with bounded retries on transient
+    failures. `fn` is a no-arg async callable that does one attempt
+    and returns its result (or raises). Auth failures break out of
+    the retry loop so a misconfigured credential doesn't multiply
+    its error spam by 3x."""
+    import asyncio
+    last_err: Exception | None = None
+    for attempt in range(_KASA_RETRY_ATTEMPTS):
+        try:
+            return await fn()
+        except KasaError as e:
+            # _connect() already classifies auth failures up-front
+            # and surfaces them as KasaError. Don't retry those.
+            if "credentials" in str(e).lower() or "auth" in str(e).lower():
+                raise
+            last_err = e
+        except Exception as e:
+            last_err = e
+        if attempt < _KASA_RETRY_ATTEMPTS - 1:
+            delay = _KASA_RETRY_BACKOFF_S[min(attempt, len(_KASA_RETRY_BACKOFF_S) - 1)]
+            log.info("Kasa %s attempt %d/%d failed: %s; retrying in %.1fs",
+                     operation_name, attempt + 1, _KASA_RETRY_ATTEMPTS,
+                     last_err, delay)
+            await asyncio.sleep(delay)
+    # All attempts failed — re-raise the last error so callers see
+    # the actual underlying message rather than a generic "retry
+    # exhausted" string.
+    raise last_err if last_err is not None else KasaError(f"{operation_name} failed")
+
+
 async def status(host: str) -> dict:
-    """Read the current state of a single device by IP."""
-    dev = await _connect(host)
-    return _describe(host, dev)
+    """Read the current state of a single device by IP. Retries
+    transient failures (network blip, device busy)."""
+    async def _attempt():
+        dev = await _connect(host)
+        return _describe(host, dev)
+    return await _with_retry(f"status({host})", _attempt)
 
 
 async def set_state(host: str, on: bool) -> dict:
-    """Turn a device on/off by IP. Returns the new state."""
-    dev = await _connect(host)
-    if on:
-        await dev.turn_on()
-    else:
-        await dev.turn_off()
-    await dev.update()
-    return _describe(host, dev)
+    """Turn a device on/off by IP. Retries transient failures so a
+    single network blip during a UI toggle doesn't bubble up as
+    'err' to the user — most kasa hiccups recover on attempt 2."""
+    async def _attempt():
+        dev = await _connect(host)
+        if on:
+            await dev.turn_on()
+        else:
+            await dev.turn_off()
+        await dev.update()
+        return _describe(host, dev)
+    return await _with_retry(f"set_state({host}, on={on})", _attempt)
 
 
 _logged_kasa_version = False
