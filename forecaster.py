@@ -968,7 +968,7 @@ def build_forecast(
         "fit_samples": n_fit,
         # Anchors the recent-peak solar cap. `solar_recent_peak_w` is
         # the highest solar_w sample in the last 48h; `solar_cap_w` is
-        # that × SOLAR_RECENT_CAP_MULT (or null when the cap is
+        # that x SOLAR_RECENT_CAP_MULT (or null when the cap is
         # disabled because there's no recent data > 50W). Useful for
         # diagnosing whether a high forecast solar_w is being capped
         # or running away — pair with the per-hour `solar_capped` flag.
