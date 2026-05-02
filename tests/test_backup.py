@@ -1,13 +1,14 @@
 """Tests for backup.py — snapshot integrity, manifest checksums,
-restore round-trip. The remote SMB mount is replaced by a local
-directory (faux_mount) so these tests don't require a NAS or
-CAP_SYS_ADMIN."""
+restore round-trip. The remote SMB transport is replaced by a local
+directory (fake_remote) so these tests don't require a NAS, network,
+or smbclient binary."""
 from __future__ import annotations
 
-import contextlib
 import importlib
 import json
+import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -50,14 +51,85 @@ def backup_env(tmp_path, monkeypatch):
     return data_dir, tmp_path, bk, bc
 
 
-def _patch_mount(monkeypatch, bk, fake_remote):
-    """Replace mount_cifs with a context manager that yields a local
-    directory standing in for the CIFS mountpoint."""
-    @contextlib.contextmanager
-    def fake(*_args, **_kwargs):
-        fake_remote.mkdir(parents=True, exist_ok=True)
-        yield fake_remote
-    monkeypatch.setattr(bk, "mount_cifs", fake)
+def _patch_smb(monkeypatch, bk, fake_remote: Path):
+    """Replace the smbclient helpers in backup.py with thin shims that
+    operate on a local directory (`fake_remote`) standing in for the
+    SMB share root. Mirrors what smbclient would do for our usage —
+    enough surface for snapshot/list/restore round-trips and the
+    truncation simulation, without any subprocess work.
+    """
+    fake_remote.mkdir(parents=True, exist_ok=True)
+
+    def _resolve(remote: str) -> Path:
+        # remote paths in the production code are share-root-relative
+        # ('jackery/2026-05-02_030000/...'); strip leading slash for
+        # safety and join under the fake-remote root.
+        return fake_remote / remote.lstrip("/")
+
+    def fake_mkdir(_creds, remote_path):
+        _resolve(remote_path).mkdir(parents=True, exist_ok=True)
+
+    def fake_put(_creds, local, remote, **_kw):
+        target = _resolve(remote)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local, target)
+
+    def fake_put_dir(_creds, local_dir, remote_dir, **_kw):
+        target = _resolve(remote_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        for child in Path(local_dir).iterdir():
+            if child.is_file():
+                shutil.copy2(child, target / child.name)
+
+    def fake_get(_creds, remote, local, **_kw):
+        src = _resolve(remote)
+        if not src.exists():
+            raise bk.SMBClientError(
+                f"NT_STATUS_OBJECT_NAME_NOT_FOUND opening {remote}")
+        Path(local).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, local)
+
+    def fake_get_text(creds, remote):
+        from tempfile import NamedTemporaryFile
+        with NamedTemporaryFile(mode="r", delete=False) as tf:
+            tmp_name = tf.name
+        try:
+            fake_get(creds, remote, Path(tmp_name))
+            return Path(tmp_name).read_text()
+        finally:
+            Path(tmp_name).unlink(missing_ok=True)
+
+    def fake_delete(_creds, remote):
+        target = _resolve(remote)
+        target.unlink(missing_ok=True)
+
+    def fake_ls(_creds, remote_dir):
+        d = _resolve(remote_dir) if remote_dir else fake_remote
+        if not d.exists():
+            raise bk.SMBClientError(
+                f"NT_STATUS_OBJECT_NAME_NOT_FOUND opening {remote_dir}")
+        out = []
+        for child in sorted(d.iterdir()):
+            out.append({
+                "name": child.name,
+                "is_dir": child.is_dir(),
+                "size": child.stat().st_size if child.is_file() else 0,
+            })
+        return out
+
+    def fake_rmtree(_creds, remote_dir):
+        d = _resolve(remote_dir)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+
+    monkeypatch.setattr(bk, "_smb_mkdir", fake_mkdir)
+    monkeypatch.setattr(bk, "_smb_put", fake_put)
+    monkeypatch.setattr(bk, "_smb_put_dir", fake_put_dir)
+    monkeypatch.setattr(bk, "_smb_get", fake_get)
+    monkeypatch.setattr(bk, "_smb_get_text", fake_get_text)
+    monkeypatch.setattr(bk, "_smb_delete", fake_delete)
+    monkeypatch.setattr(bk, "_smb_ls", fake_ls)
+    monkeypatch.setattr(bk, "_smb_rmtree", fake_rmtree)
 
 
 # -----------------------------------------------------------------------
@@ -132,7 +204,7 @@ def test_collect_snapshot_selective_only_includes_requested(backup_env, tmp_path
 def test_run_backup_round_trip_full(backup_env, tmp_path, monkeypatch):
     _data_dir, _work, bk, _bc = backup_env
     fake_remote = tmp_path / "fake-nas"
-    _patch_mount(monkeypatch, bk, fake_remote)
+    _patch_smb(monkeypatch, bk, fake_remote)
 
     result = bk.run_backup()
     assert result.ok, f"run_backup failed: {result.error}"
@@ -152,7 +224,7 @@ def test_run_backup_round_trip_full(backup_env, tmp_path, monkeypatch):
 def test_list_remote_snapshots_returns_metadata(backup_env, tmp_path, monkeypatch):
     _, _, bk, _ = backup_env
     fake_remote = tmp_path / "fake-nas"
-    _patch_mount(monkeypatch, bk, fake_remote)
+    _patch_smb(monkeypatch, bk, fake_remote)
 
     bk.run_backup()
     snaps = bk.list_remote_snapshots()
@@ -166,7 +238,7 @@ def test_list_remote_snapshots_returns_metadata(backup_env, tmp_path, monkeypatc
 def test_restore_round_trip_full(backup_env, tmp_path, monkeypatch):
     data_dir, _, bk, _ = backup_env
     fake_remote = tmp_path / "fake-nas"
-    _patch_mount(monkeypatch, bk, fake_remote)
+    _patch_smb(monkeypatch, bk, fake_remote)
 
     # 1. Take a backup.
     result = bk.run_backup()
@@ -199,7 +271,7 @@ def test_restore_round_trip_full(backup_env, tmp_path, monkeypatch):
 def test_restore_selective_only_named_files(backup_env, tmp_path, monkeypatch):
     data_dir, _, bk, _ = backup_env
     fake_remote = tmp_path / "fake-nas"
-    _patch_mount(monkeypatch, bk, fake_remote)
+    _patch_smb(monkeypatch, bk, fake_remote)
 
     bk.run_backup()
     # Wipe.
@@ -225,23 +297,28 @@ def test_run_backup_skips_when_no_credentials(backup_env, tmp_path, monkeypatch)
     assert result.skipped_reason == "no_credentials"
 
 
-def test_run_backup_handles_remote_corruption(backup_env, tmp_path, monkeypatch):
-    """If the remote-side checksum verify fails (e.g. a flaky network
-    truncated a file), the partial snapshot must be cleaned up so we
-    don't litter the NAS with broken backups."""
+def test_run_backup_handles_remote_truncation(backup_env, tmp_path, monkeypatch):
+    """If the remote-side size check fails (e.g. a flaky network
+    truncated a file mid-upload), the partial snapshot must be cleaned
+    up so we don't litter the NAS with broken backups. We simulate the
+    truncation by wrapping the fake SMB upload to shorten one file
+    after it lands on the remote — the post-upload `ls` size compare
+    in run_backup catches it and triggers cleanup.
+    """
     _data_dir, _work, bk, _bc = backup_env
     fake_remote = tmp_path / "fake-nas"
-    _patch_mount(monkeypatch, bk, fake_remote)
+    _patch_smb(monkeypatch, bk, fake_remote)
 
-    real_copytree = bk.shutil.copytree
+    # Wrap the fake _smb_put_dir to truncate one file after upload —
+    # mimics a transfer that finished but lost bytes off the end.
+    real_put_dir = bk._smb_put_dir
 
-    def flaky_copytree(src, dst, *a, **kw):
-        real_copytree(src, dst, *a, **kw)
-        # Simulate corruption: truncate one file post-copy.
-        bad = dst / "settings.json"
+    def flaky_put_dir(creds, local_dir, remote_dir, **kw):
+        real_put_dir(creds, local_dir, remote_dir, **kw)
+        bad = fake_remote / remote_dir.lstrip("/") / "settings.json"
         if bad.exists():
-            bad.write_text("CORRUPTED")
-    monkeypatch.setattr(bk.shutil, "copytree", flaky_copytree)
+            bad.write_text("X")  # 1 byte vs. real size — size check fails
+    monkeypatch.setattr(bk, "_smb_put_dir", flaky_put_dir)
 
     result = bk.run_backup()
     assert not result.ok

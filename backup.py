@@ -1,13 +1,20 @@
 """
-Backup & restore — snapshots /data to a remote SMB/CIFS share.
+Backup & restore — snapshots /data to a remote SMB share.
 
 Design (see also docs/backup.md):
-  * Daily at 03:00 local (configurable via settings) we mount the remote
-    share, take an online SQLite backup of /data/energy.db (consistent
-    even with active writers thanks to sqlite3's online .backup API),
-    copy the small JSON files alongside it (auth, kasa-creds,
-    anthropic-creds, jackery-creds, settings, location), write a
-    MANIFEST.json with sha256 checksums, and unmount.
+  * Daily at 03:00 local (configurable via settings) we open an SMB
+    session to the remote share, take an online SQLite backup of
+    /data/energy.db (consistent even with active writers thanks to
+    sqlite3's online .backup API), copy the small JSON files alongside
+    it (auth, kasa-creds, anthropic-creds, jackery-creds, settings,
+    location), write a MANIFEST.json with sha256 checksums, then
+    upload the whole staging directory.
+  * Transport is `smbclient` from the samba package — pure userspace.
+    We deliberately do NOT use `mount.cifs`, which requires
+    CAP_SYS_ADMIN + capset() seccomp permission inside the container
+    and tends to fail on Synology with "Unable to apply new capability
+    set." smbclient avoids the kernel mount path entirely; the
+    container can stay fully unprivileged.
   * The encryption key (.jackery-creds.key) is intentionally NOT
     backed up — see SCOPE_INCLUDES_KEY below. Restoring on a fresh
     install brings back the DB but credentials need to be re-entered.
@@ -26,13 +33,13 @@ The async loop in server.py calls run_backup() on schedule.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import datetime as _dt
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -259,131 +266,292 @@ def verify_manifest(snapshot_dir: Path) -> tuple[bool, str | None]:
     return True, None
 
 
-# ---- SMB mount / copy ------------------------------------------------------
-
-
-class CIFSMountError(RuntimeError):
-    """mount.cifs failed (host unreachable, bad creds, no share, etc)."""
-
-
-@contextlib.contextmanager
-def mount_cifs(host: str, share: str, username: str, password: str,
-               *, domain: str = "WORKGROUP",
-               mountpoint: Path | None = None,
-               timeout_s: float = 20.0):
-    """Mount //host/share at a temporary mountpoint, yield the path,
-    and unmount on exit. mount.cifs needs CAP_SYS_ADMIN inside the
-    container.
-
-    `share` may be either a share-name ("backups") or a path-style
-    ("/volume1/backups") — we strip the leading slash because Synology
-    SMB shares are rooted at the share name itself, not the volume
-    path. The remote path inside the share is handled separately by
-    the caller (subdir).
+def _verify_remote_sizes(creds: dict, target_dir: str,
+                          manifest: dict) -> str | None:
+    """After upload, compare each file's remote size against the manifest.
+    Cheap (one ls round trip, no file re-download) but catches the most
+    common corruption modes: truncation, missing files. Byte-level
+    corruption mid-file is left to SMB's transport CRC + the next
+    restore-time verify_manifest. Returns None on success or an error
+    string on mismatch.
     """
-    cleanup_mount = mountpoint is None
-    if mountpoint is None:
-        mountpoint = Path(tempfile.mkdtemp(prefix="jackery-bak-"))
-    else:
-        mountpoint.mkdir(parents=True, exist_ok=True)
-
-    # Synology shares: strip leading slash, take only the first segment
-    # as the share name. Anything after is mounted-path inside.
-    share_clean = share.lstrip("/")
-    # If the operator gave a multi-segment path, only the first segment
-    # is the share name; the rest is a sub-path that we'll address via
-    # the subdir parameter at copy time.
-    share_name = share_clean.split("/")[0] if share_clean else share_clean
-    mount_extra_subpath = "/".join(share_clean.split("/")[1:])
-
-    # Build the credentials file in /tmp so the password doesn't show
-    # up in `ps`. Mode 0600.
-    creds_path = Path(tempfile.mkstemp(prefix="jackery-bak-cred-")[1])
+    expected = {f.get("name"): int(f.get("size") or 0)
+                for f in (manifest.get("files") or [])
+                if f.get("name")}
+    # Manifest itself is also uploaded but isn't in `files`; add it.
+    expected["MANIFEST.json"] = -1  # presence-only check
     try:
-        creds_path.write_text(
-            f"username={username}\npassword={password}\ndomain={domain}\n")
-        creds_path.chmod(0o600)
-        unc = f"//{host}/{share_name}"
-        cmd = [
-            "mount", "-t", "cifs", unc, str(mountpoint),
-            "-o", f"credentials={creds_path},vers=3.0,iocharset=utf8,"
-                  "rw,uid=0,gid=0,file_mode=0600,dir_mode=0700,nounix",
-        ]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout_s, check=False)
-        except subprocess.TimeoutExpired as e:
-            raise CIFSMountError(f"mount timed out: {e}") from e
-        except FileNotFoundError as e:
-            raise CIFSMountError(
-                "mount.cifs not installed in container — "
-                "install cifs-utils") from e
-        if r.returncode != 0:
-            raise CIFSMountError(
-                f"mount failed (code {r.returncode}): "
-                f"{r.stderr.strip() or r.stdout.strip()}")
+        entries = _smb_ls(creds, target_dir)
+    except SMBClientError as e:
+        return f"remote ls failed: {e}"
+    by_name = {e["name"]: e for e in entries}
+    for name, exp_size in expected.items():
+        e = by_name.get(name)
+        if e is None:
+            return f"file missing on remote: {name}"
+        if exp_size >= 0 and e["size"] != exp_size:
+            return (f"size mismatch on {name}: "
+                    f"expected {exp_size}, got {e['size']}")
+    return None
 
-        if mount_extra_subpath:
-            yield mountpoint / mount_extra_subpath
-        else:
-            yield mountpoint
+
+# ---- SMB transport (userspace, via smbclient) -----------------------------
+
+
+class SMBClientError(RuntimeError):
+    """smbclient invocation failed (auth, network, protocol, etc.).
+
+    Replaces the old CIFSMountError. Kept as a separate class so
+    existing callers can still distinguish 'transport failed' from
+    'snapshot logic failed'.
+    """
+
+
+# Alias for backwards-compat with any tests / external callers that
+# still import the old name. New code should use SMBClientError.
+CIFSMountError = SMBClientError
+
+
+def _split_share(share_field: str) -> tuple[str, str]:
+    """Synology / general SMB shares: the user may type the bare share
+    name ('backups') or a path-style ('backups/jackery'). Only the first
+    segment is the share; anything after is a sub-path inside it which
+    we fold into smbclient's `cd` before the actual command.
+    """
+    share_clean = (share_field or "").lstrip("/")
+    if not share_clean:
+        return "", ""
+    parts = share_clean.split("/")
+    return parts[0], "/".join(parts[1:])
+
+
+def _smb_run(creds: dict, smb_command: str,
+             *, timeout_s: float = 30.0) -> subprocess.CompletedProcess:
+    """One smbclient session: connect, auth, run the embedded command(s),
+    disconnect. Returns the CompletedProcess; caller decides what counts
+    as success. Raises SMBClientError only for system-level failures
+    (smbclient missing, timeout). Auth / permission errors are reported
+    via the returncode + stderr captured on the returned object.
+    """
+    host = creds["host"]
+    share_name, share_subpath = _split_share(creds.get("share") or "")
+    if share_subpath:
+        smb_command = f'cd "{share_subpath}"; {smb_command}'
+    domain = (creds.get("domain") or "WORKGROUP").strip() or "WORKGROUP"
+    cmd = [
+        "smbclient", f"//{host}/{share_name}",
+        "-U", f"{domain}/{creds['username']}%{creds['password']}",
+        "-c", smb_command,
+    ]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout_s, check=False)
+    except subprocess.TimeoutExpired as e:
+        raise SMBClientError(f"smbclient timed out: {e}") from e
+    except FileNotFoundError as e:
+        raise SMBClientError(
+            "smbclient not installed in container") from e
+
+
+def _smb_extract_error(r: subprocess.CompletedProcess) -> str:
+    """Best-effort extraction of the most-actionable line from smbclient
+    output. Falls back to a generic exit-code message if neither stderr
+    nor stdout has anything useful."""
+    merged = "\n".join(s for s in (r.stderr, r.stdout) if s).strip()
+    msg_lines = merged.splitlines()
+    for line in msg_lines:
+        lower = line.lower()
+        if ("NT_STATUS_" in line
+                or "session setup failed" in lower
+                or ("connection to" in lower and "failed" in lower)):
+            return line.strip()
+    if msg_lines:
+        return msg_lines[0].strip()
+    return f"smbclient exited {r.returncode}"
+
+
+def _smb_check(r: subprocess.CompletedProcess) -> None:
+    """Raise SMBClientError if smbclient exited non-zero."""
+    if r.returncode == 0:
+        return
+    raise SMBClientError(_smb_extract_error(r))
+
+
+def _smb_mkdir(creds: dict, remote_path: str) -> None:
+    """mkdir -p equivalent over SMB. smbclient's mkdir is single-level
+    and errors if the dir already exists, so we walk segments and
+    swallow the 'object name collision' / 'already exists' errors
+    from each level."""
+    parts = [p for p in remote_path.split("/") if p]
+    for i in range(1, len(parts) + 1):
+        sub = "/".join(parts[:i])
+        r = _smb_run(creds, f'mkdir "{sub}"')
+        if r.returncode == 0:
+            continue
+        merged = ((r.stderr or "") + (r.stdout or "")).lower()
+        if ("nt_status_object_name_collision" in merged
+                or "already exists" in merged):
+            continue
+        _smb_check(r)
+
+
+def _smb_put(creds: dict, local: Path, remote: str,
+             *, timeout_s: float = 300.0) -> None:
+    """Upload one file to a path relative to the share root."""
+    r = _smb_run(creds, f'prompt OFF; put "{local}" "{remote}"',
+                 timeout_s=timeout_s)
+    _smb_check(r)
+
+
+def _smb_put_dir(creds: dict, local_dir: Path, remote_dir: str,
+                 *, timeout_s: float = 600.0) -> None:
+    """Upload every file in `local_dir` into `remote_dir` on the share.
+    `remote_dir` must already exist (call _smb_mkdir first). Uses mput
+    so the whole snapshot ships in one smbclient session."""
+    cmd = (
+        f'prompt OFF; recurse OFF; '
+        f'lcd "{local_dir}"; cd "{remote_dir}"; mput *'
+    )
+    r = _smb_run(creds, cmd, timeout_s=timeout_s)
+    _smb_check(r)
+
+
+def _smb_get(creds: dict, remote: str, local: Path,
+             *, timeout_s: float = 300.0) -> None:
+    """Download a file from the share to a local path."""
+    r = _smb_run(creds, f'get "{remote}" "{local}"', timeout_s=timeout_s)
+    _smb_check(r)
+
+
+def _smb_get_text(creds: dict, remote: str) -> str:
+    """Pull a remote text file into a string (used for MANIFEST.json)."""
+    fd, name = tempfile.mkstemp(prefix="jackery-bak-get-")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        _smb_get(creds, remote, tmp)
+        return tmp.read_text()
     finally:
-        # Unmount even if the body raised. Use lazy unmount as a
-        # fallback so a stuck handle doesn't strand the mountpoint.
-        try:
-            subprocess.run(["umount", str(mountpoint)],
-                           capture_output=True, timeout=10, check=False)
-        except Exception:
-            pass
-        # Always clean creds file.
-        try:
-            creds_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        if cleanup_mount:
-            try:
-                # If unmount actually succeeded the dir is empty; rmtree
-                # is safe. If it didn't, rmtree might fail silently —
-                # not a leak risk, just one stray /tmp dir per failure.
-                shutil.rmtree(mountpoint, ignore_errors=True)
-            except Exception:
-                pass
+        tmp.unlink(missing_ok=True)
+
+
+def _smb_delete(creds: dict, remote: str) -> None:
+    """Best-effort delete; ignore not-found. Used for probe file cleanup
+    and rolling back a half-uploaded snapshot."""
+    r = _smb_run(creds, f'del "{remote}"')
+    if r.returncode == 0:
+        return
+    merged = ((r.stderr or "") + (r.stdout or "")).lower()
+    if "nt_status_object_name_not_found" in merged:
+        return
+    log.warning("smb delete %s: %s", remote, _smb_extract_error(r))
+
+
+# smbclient's `ls` output format. With default settings each entry is
+#   <ws>name<ws>flags<ws>size<ws>day mon dd hh:mm:ss yyyy
+# where flags is a string of letters from {D, A, H, S, R, N}. The 'D'
+# flag marks directories; '.' and '..' are returned and filtered.
+_LS_LINE = re.compile(r"^\s+(?P<name>\S+)\s+(?P<flags>[DAHSRN]+)\s+(?P<size>\d+)\s")
+
+
+def _smb_ls(creds: dict, remote_dir: str) -> list[dict[str, Any]]:
+    """List entries in `remote_dir` (relative to share root). Returns
+    a list of {name, is_dir, size}. Used to enumerate snapshot dirs
+    and to size-check files after upload."""
+    cd = f'cd "{remote_dir}"; ls' if remote_dir else "ls"
+    r = _smb_run(creds, cd)
+    _smb_check(r)
+    out: list[dict[str, Any]] = []
+    for line in (r.stdout or "").splitlines():
+        m = _LS_LINE.match(line)
+        if not m:
+            continue
+        name = m.group("name")
+        if name in (".", ".."):
+            continue
+        out.append({
+            "name": name,
+            "is_dir": "D" in m.group("flags"),
+            "size": int(m.group("size")),
+        })
+    return out
+
+
+def _smb_rmtree(creds: dict, remote_dir: str) -> None:
+    """Recursively delete a directory tree on the remote (best-effort).
+    Used to clean up a half-uploaded snapshot when the post-upload size
+    check fails — leaving a corrupt remote dir would make the next
+    list_remote_snapshots show a broken entry."""
+    try:
+        entries = _smb_ls(creds, remote_dir)
+    except SMBClientError:
+        # Dir is gone or inaccessible — nothing to clean.
+        return
+    for e in entries:
+        path = f"{remote_dir}/{e['name']}"
+        if e["is_dir"]:
+            _smb_rmtree(creds, path)
+        else:
+            _smb_delete(creds, path)
+    # Empty dir — rmdir.
+    r = _smb_run(creds, f'rd "{remote_dir}"')
+    if r.returncode != 0:
+        log.warning("smb rmdir %s: %s", remote_dir, _smb_extract_error(r))
 
 
 def test_connectivity(creds: dict | None = None,
                       *, timeout_s: float = 15.0) -> dict[str, Any]:
-    """Mount the remote, write a tiny probe file, read it back, delete
-    it, unmount. Returns {ok, latency_ms, error?}.
-
-    Designed to run synchronously from the API handler (it's quick —
-    a few seconds). The handler should call this in a thread to avoid
-    blocking the asyncio loop.
+    """Open an SMB session, ensure the destination subdir exists, write
+    a tiny probe file, read it back, delete it. Returns {ok, latency_ms,
+    error?}. Designed to run synchronously from the API handler — quick
+    enough that the handler can call it in a thread without ceremony.
     """
     creds = creds or backup_creds.load()
     if not creds:
         return {"ok": False, "error": "no_credentials"}
     started = time.time()
+    subdir = (creds.get("subdir") or "").strip("/")
+    probe_name = f".jackery-probe-{int(started)}"
+    probe_remote = f"{subdir}/{probe_name}" if subdir else probe_name
+
     try:
-        with mount_cifs(
-            host=creds["host"], share=creds["share"],
-            username=creds["username"], password=creds["password"],
-            domain=creds.get("domain") or "WORKGROUP",
-            timeout_s=timeout_s,
-        ) as mp:
-            subdir = (creds.get("subdir") or "").lstrip("/")
-            target = (mp / subdir) if subdir else mp
-            target.mkdir(parents=True, exist_ok=True)
-            probe = target / f".jackery-probe-{int(started)}"
-            probe.write_text("ok")
-            content = probe.read_text()
-            probe.unlink(missing_ok=True)
-            if content != "ok":
-                return {"ok": False, "error": "probe_roundtrip_failed"}
+        if subdir:
+            _smb_mkdir(creds, subdir)
+        # Probe write + read-back. We use a tempfile so the probe content
+        # is on disk in /tmp, not constructed inline (smbclient `put`
+        # takes a path).
+        fd, name = tempfile.mkstemp(prefix="jackery-probe-")
+        os.close(fd)
+        local_in = Path(name)
+        try:
+            local_in.write_text("ok")
+            _smb_put(creds, local_in, probe_remote, timeout_s=timeout_s)
+        finally:
+            local_in.unlink(missing_ok=True)
+
+        fd, name = tempfile.mkstemp(prefix="jackery-probe-back-")
+        os.close(fd)
+        local_out = Path(name)
+        try:
+            _smb_get(creds, probe_remote, local_out, timeout_s=timeout_s)
+            content = local_out.read_text()
+        finally:
+            local_out.unlink(missing_ok=True)
+
+        # Clean up the probe even if the read-back content was wrong —
+        # we don't want to leave litter on the NAS.
+        _smb_delete(creds, probe_remote)
+
+        if content != "ok":
+            return {"ok": False, "error": "probe_roundtrip_failed"}
         return {"ok": True, "latency_ms": int((time.time() - started) * 1000)}
-    except CIFSMountError as e:
-        return {"ok": False, "error": f"mount_failed: {e}"}
-    except PermissionError as e:
-        return {"ok": False, "error": f"permission_denied: {e}"}
+    except SMBClientError as e:
+        # Best-effort cleanup of the probe — same prefix the UI saw.
+        try:
+            _smb_delete(creds, probe_remote)
+        except Exception:
+            pass
+        return {"ok": False, "error": f"smb_failed: {e}"}
     except Exception as e:
         log.exception("backup connectivity test failed")
         return {"ok": False, "error": str(e)}
@@ -424,56 +592,65 @@ def _record_run(result: BackupResult) -> None:
 
 
 def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
-    """Mount the remote and list every snapshot directory inside the
-    user's subdir. Each entry has {dir, ts, iso, total_bytes, files}
-    drawn from MANIFEST.json (or marked invalid if the manifest is
-    missing).
+    """List every snapshot directory inside the user's subdir on the
+    remote. Each entry has {dir, ts, iso, total_bytes, files} drawn
+    from MANIFEST.json (or marked invalid if the manifest is missing
+    or unreadable). One smbclient ls round-trip plus one get per
+    snapshot dir to fetch its manifest.
     """
     creds = creds or backup_creds.load()
     if not creds:
         return []
+    subdir = (creds.get("subdir") or "").strip("/")
     out: list[dict[str, Any]] = []
     try:
-        with mount_cifs(
-            host=creds["host"], share=creds["share"],
-            username=creds["username"], password=creds["password"],
-            domain=creds.get("domain") or "WORKGROUP",
-        ) as mp:
-            subdir = (creds.get("subdir") or "").lstrip("/")
-            root = (mp / subdir) if subdir else mp
-            if not root.exists():
+        try:
+            entries = _smb_ls(creds, subdir)
+        except SMBClientError as e:
+            # Subdir doesn't exist yet (first run, never backed up) →
+            # treat as empty list, not an error.
+            merged = str(e).lower()
+            if "nt_status_object_name_not_found" in merged or "no such" in merged:
                 return []
-            for entry in sorted(root.iterdir(), reverse=True):
-                if not entry.is_dir():
-                    continue
-                # Skip hidden / temp dirs.
-                if entry.name.startswith("."):
-                    continue
-                manifest_path = entry / "MANIFEST.json"
-                if not manifest_path.exists():
-                    out.append({
-                        "dir": entry.name, "valid": False,
-                        "error": "manifest_missing",
-                    })
-                    continue
-                try:
-                    m = json.loads(manifest_path.read_text())
-                    out.append({
-                        "dir": entry.name,
-                        "valid": True,
-                        "ts": m.get("ts"),
-                        "iso": m.get("iso"),
-                        "total_bytes": m.get("total_bytes"),
-                        "files": [f.get("name") for f in (m.get("files") or [])],
-                        "include_key": bool(m.get("include_key")),
-                    })
-                except Exception as e:
-                    out.append({
-                        "dir": entry.name, "valid": False,
-                        "error": f"manifest_unreadable: {e}",
-                    })
-    except CIFSMountError as e:
-        log.warning("list snapshots: mount failed: %s", e)
+            raise
+        # Newest first — directory names are timestamp-prefixed
+        # (YYYY-MM-DD_HHMMSS) so a reverse-string sort is the right
+        # chronological order.
+        dir_entries = sorted(
+            (e for e in entries if e["is_dir"] and not e["name"].startswith(".")),
+            key=lambda e: e["name"],
+            reverse=True,
+        )
+        for entry in dir_entries:
+            name = entry["name"]
+            manifest_remote = f"{subdir}/{name}/MANIFEST.json" if subdir else f"{name}/MANIFEST.json"
+            try:
+                manifest_text = _smb_get_text(creds, manifest_remote)
+            except SMBClientError as e:
+                merged = str(e).lower()
+                if "nt_status_object_name_not_found" in merged or "no such" in merged:
+                    out.append({"dir": name, "valid": False,
+                                "error": "manifest_missing"})
+                else:
+                    out.append({"dir": name, "valid": False,
+                                "error": f"manifest_unreadable: {e}"})
+                continue
+            try:
+                m = json.loads(manifest_text)
+                out.append({
+                    "dir": name,
+                    "valid": True,
+                    "ts": m.get("ts"),
+                    "iso": m.get("iso"),
+                    "total_bytes": m.get("total_bytes"),
+                    "files": [f.get("name") for f in (m.get("files") or [])],
+                    "include_key": bool(m.get("include_key")),
+                })
+            except Exception as e:
+                out.append({"dir": name, "valid": False,
+                            "error": f"manifest_unreadable: {e}"})
+    except SMBClientError as e:
+        log.warning("list snapshots: smb failed: %s", e)
     except Exception:
         log.exception("list snapshots failed")
     return out
@@ -535,31 +712,34 @@ def run_backup(*, creds: dict | None = None,
             _record_run(result)
             return result
 
-        # Mount + copy.
+        # Upload via smbclient. Pre-flight verify (above) already caught
+        # local corruption; SMB transport handles wire integrity. After
+        # upload we cross-check sizes via a remote `ls` so a truncated
+        # transfer (rare but possible on a flaky link) is caught before
+        # the snapshot is declared a success.
+        subdir = (creds.get("subdir") or "").strip("/")
+        target_dir = f"{subdir}/{dir_stamp}" if subdir else dir_stamp
         try:
-            with mount_cifs(
-                host=creds["host"], share=creds["share"],
-                username=creds["username"], password=creds["password"],
-                domain=creds.get("domain") or "WORKGROUP",
-            ) as mp:
-                subdir = (creds.get("subdir") or "").lstrip("/")
-                target_root = (mp / subdir) if subdir else mp
-                target_root.mkdir(parents=True, exist_ok=True)
-                target_dir = target_root / dir_stamp
-                # Copy via shutil — small file count, no need for rsync.
-                shutil.copytree(staging_dir, target_dir)
-                # Verify the remote copy matches.
-                ok, err = verify_manifest(target_dir)
-                if not ok:
-                    # Don't leave a corrupt remote snapshot.
-                    shutil.rmtree(target_dir, ignore_errors=True)
-                    raise RuntimeError(f"remote_verify_failed: {err}")
-        except CIFSMountError as e:
+            if subdir:
+                _smb_mkdir(creds, subdir)
+            _smb_mkdir(creds, target_dir)
+            _smb_put_dir(creds, staging_dir, target_dir)
+            # Cheap remote sanity check: list the just-uploaded dir,
+            # compare each file size against the manifest. Catches
+            # truncation / missing files without re-downloading every
+            # file to re-hash (which mount.cifs let us do for free
+            # but smbclient does not).
+            err = _verify_remote_sizes(creds, target_dir, manifest)
+            if err:
+                # Don't leave a corrupt remote snapshot.
+                _smb_rmtree(creds, target_dir)
+                raise RuntimeError(f"remote_verify_failed: {err}")
+        except SMBClientError as e:
             result = BackupResult(
                 ok=False, ts=ts, iso=iso, snapshot_dir=None,
                 duration_s=time.time() - started,
                 bytes_written=0, files_written=0,
-                error=f"mount_failed: {e}",
+                error=f"smb_failed: {e}",
             )
             _record_run(result)
             return result
@@ -614,64 +794,92 @@ def run_restore(*, snapshot_dir_name: str,
         if listed:
             files_filter = {str(x) for x in listed}
 
+    subdir = (creds.get("subdir") or "").strip("/")
+    snapshot_remote = (f"{subdir}/{snapshot_dir_name}"
+                       if subdir else snapshot_dir_name)
+
+    # Stage the restore in a temp dir on the local side. We download the
+    # whole snapshot, verify checksums against MANIFEST.json, and only
+    # THEN swap files into /data — so a partial transfer or corrupted
+    # file can't half-overwrite the live state.
+    staging_root = Path(tempfile.mkdtemp(prefix="jackery-bak-restore-"))
     try:
-        with mount_cifs(
-            host=creds["host"], share=creds["share"],
-            username=creds["username"], password=creds["password"],
-            domain=creds.get("domain") or "WORKGROUP",
-        ) as mp:
-            subdir = (creds.get("subdir") or "").lstrip("/")
-            root = (mp / subdir) if subdir else mp
-            snapshot = root / snapshot_dir_name
-            if not snapshot.exists():
-                return {"ok": False,
-                        "error": f"snapshot_not_found: {snapshot_dir_name}"}
-            ok, err = verify_manifest(snapshot)
-            if not ok:
-                return {"ok": False, "error": f"verify_failed: {err}"}
+        try:
+            # Pull the manifest first; if the snapshot doesn't exist
+            # we get a clear error here without downloading anything.
+            try:
+                manifest_text = _smb_get_text(
+                    creds, f"{snapshot_remote}/MANIFEST.json")
+            except SMBClientError as e:
+                merged = str(e).lower()
+                if "nt_status_object_name_not_found" in merged or "no such" in merged:
+                    return {"ok": False,
+                            "error": f"snapshot_not_found: {snapshot_dir_name}"}
+                raise
+            manifest = json.loads(manifest_text)
+            (staging_root / "MANIFEST.json").write_text(manifest_text)
 
-            manifest = json.loads(
-                (snapshot / "MANIFEST.json").read_text())
-
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            restored: list[str] = []
+            # Decide which files we actually need to fetch.
+            files_to_fetch: list[str] = []
             for entry in (manifest.get("files") or []):
                 name = entry.get("name")
                 if not name:
                     continue
                 if files_filter is not None and name not in files_filter:
                     continue
-                # Skip the key file unless explicitly opted in via scope.
-                if name == KEY_FILE:
-                    if not (scope and scope.get("include_key")):
-                        continue
-                src = snapshot / name
-                dst = DATA_DIR / name
-                # Swap-and-replace for atomic-ish replacement.
-                tmp = dst.with_suffix(dst.suffix + ".restoring")
-                shutil.copy2(src, tmp)
-                # On Linux os.replace is atomic when src/dst on the
-                # same filesystem (they are — both /data).
-                os.replace(tmp, dst)
-                # Tighten perms on credentials/key files.
-                if name.endswith(".json") or name == KEY_FILE:
-                    try:
-                        os.chmod(dst, 0o600)
-                    except Exception:
-                        pass
-                restored.append(name)
+                if name == KEY_FILE and not (scope and scope.get("include_key")):
+                    continue
+                files_to_fetch.append(name)
 
-            return {
-                "ok": True,
-                "restored_files": restored,
-                "snapshot": snapshot_dir_name,
-                "manifest_iso": manifest.get("iso"),
-            }
-    except CIFSMountError as e:
-        return {"ok": False, "error": f"mount_failed: {e}"}
+            for name in files_to_fetch:
+                _smb_get(creds, f"{snapshot_remote}/{name}",
+                         staging_root / name)
+
+            # verify_manifest only checks files that physically exist
+            # in the staging dir, but it errors on "file missing in
+            # snapshot" when a manifest entry has no on-disk file. To
+            # support selective restore we filter the manifest to just
+            # the files we fetched before verifying.
+            staged_manifest = dict(manifest)
+            staged_manifest["files"] = [
+                f for f in (manifest.get("files") or [])
+                if f.get("name") in set(files_to_fetch)
+            ]
+            (staging_root / "MANIFEST.json").write_text(
+                json.dumps(staged_manifest, indent=2, sort_keys=True))
+            ok, err = verify_manifest(staging_root)
+            if not ok:
+                return {"ok": False, "error": f"verify_failed: {err}"}
+        except SMBClientError as e:
+            return {"ok": False, "error": f"smb_failed: {e}"}
+
+        # Restore to /data via swap-and-replace.
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        restored: list[str] = []
+        for name in files_to_fetch:
+            src = staging_root / name
+            dst = DATA_DIR / name
+            tmp = dst.with_suffix(dst.suffix + ".restoring")
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            if name.endswith(".json") or name == KEY_FILE:
+                try:
+                    os.chmod(dst, 0o600)
+                except Exception:
+                    pass
+            restored.append(name)
+
+        return {
+            "ok": True,
+            "restored_files": restored,
+            "snapshot": snapshot_dir_name,
+            "manifest_iso": manifest.get("iso"),
+        }
     except Exception as e:
         log.exception("restore failed")
         return {"ok": False, "error": str(e)}
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
 
 
 # ---- async scheduler -------------------------------------------------------

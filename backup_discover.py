@@ -228,16 +228,29 @@ def list_shares(host: str, username: str, password: str,
     #   Disk|sharename|comment
     #   Disk|video|
     #   IPC|IPC$|IPC Service
-    cmd = [
-        "smbclient", "-L", f"//{host}",
-        "-U", f"{domain}/{username}%{password}",
-        "-g", "-N" if not password else "-d", "0",
-    ]
-    # If a password was supplied, the -U arg already carries it; -N
-    # (no password) above only kicks in for guest mode. Strip it back
-    # out when we have creds.
+    #
+    # Important: do NOT pass `-d 0`. It silences smbclient entirely,
+    # including the NT_STATUS_* lines that go to stderr on auth /
+    # protocol failures — leaving the user staring at a generic
+    # "smbclient exited 1" with no actionable detail. The default
+    # debug level is fine; we capture and parse only the relevant
+    # lines below, the rest get filtered out.
     if password:
-        cmd = [c for c in cmd if c != "-N"]
+        # Authenticated mode. Embed the password in -U so smbclient
+        # doesn't prompt on stdin (we have no TTY).
+        cmd = [
+            "smbclient", "-L", f"//{host}",
+            "-U", f"{domain}/{username}%{password}",
+            "-g",
+        ]
+    else:
+        # Guest / anonymous mode. -N tells smbclient to skip the
+        # password prompt; -U still needs to carry the user/domain.
+        cmd = [
+            "smbclient", "-L", f"//{host}",
+            "-U", f"{domain}/{username}",
+            "-g", "-N",
+        ]
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
@@ -249,18 +262,27 @@ def list_shares(host: str, username: str, password: str,
                 "error": "smbclient not installed in container"}
 
     if r.returncode != 0:
-        # smbclient writes auth errors to stderr; surface the most
-        # useful line back to the UI.
-        msg = (r.stderr or r.stdout).strip().splitlines()
+        # smbclient writes the most useful diagnostic to stderr (auth
+        # failures, protocol negotiation failures, connection refused).
+        # Merge stderr + stdout so we never silently lose the line that
+        # explains what actually went wrong.
+        merged = "\n".join(s for s in (r.stderr, r.stdout) if s).strip()
+        log.warning("smbclient -L //%s exited %d:\n%s",
+                    host, r.returncode, merged or "(no output)")
+        msg_lines = merged.splitlines()
         # Trim noise; pick the first line that mentions an SMB error
-        # code or "NT_STATUS_*", else the first non-empty line.
+        # code or "session setup failed" / "Connection ... failed",
+        # else the first non-empty line.
         chosen = ""
-        for line in msg:
-            if "NT_STATUS_" in line or "session setup failed" in line.lower():
+        for line in msg_lines:
+            lower = line.lower()
+            if ("NT_STATUS_" in line
+                    or "session setup failed" in lower
+                    or ("connection to" in lower and "failed" in lower)):
                 chosen = line.strip()
                 break
-        if not chosen and msg:
-            chosen = msg[0].strip()
+        if not chosen and msg_lines:
+            chosen = msg_lines[0].strip()
         return {"ok": False,
                 "error": chosen or f"smbclient exited {r.returncode}"}
 

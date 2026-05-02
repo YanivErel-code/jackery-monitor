@@ -21,14 +21,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# cifs-utils provides /sbin/mount.cifs which backup.py shells out to in
-# order to mount the remote NAS share for the daily backup feature.
-# Requires CAP_SYS_ADMIN at runtime (see docker-compose.yml).
-# smbclient is used by backup_discover.py to enumerate share names on a
-# host once credentials are entered (powers the share-name dropdown in
-# the Settings UI). Both come from the samba project.
+# smbclient is the only Samba binary we need now: backup.py uses it to
+# upload snapshots over SMB (no kernel mount → no CAP_SYS_ADMIN needed),
+# and backup_discover.py uses it to enumerate share names for the
+# Settings UI's share-name dropdown.
+#
+# We deliberately do NOT install cifs-utils / mount.cifs anymore. That
+# path required CAP_SYS_ADMIN + capset() seccomp permission inside the
+# container and tended to fail on Synology with "Unable to apply new
+# capability set." smbclient avoids the kernel mount entirely.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cifs-utils smbclient \
+    && apt-get install -y --no-install-recommends smbclient \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
