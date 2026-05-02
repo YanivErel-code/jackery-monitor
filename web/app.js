@@ -2779,6 +2779,14 @@ function applyStatus(s) {
     window._systemSoc = null;
     window._mainSoc = null;
     renderBatteryPacks();
+    // AC-charge button is per-device too — hide it eagerly so the
+    // user doesn't see the old device's plug state for up to 30s
+    // until the next periodic refresh fires. refreshAcChargeButton()
+    // re-shows it with the correct state if the new device has a
+    // plug configured.
+    const acBtn = $('ac-charge-toggle');
+    if (acBtn) acBtn.hidden = true;
+    refreshAcChargeButton().catch(() => {});
   }
 
   // Pack data piggy-backs on the WS payload — the bridge has it pushed
@@ -2972,15 +2980,6 @@ function applyStatus(s) {
 
   // Live chart
   if (activeTab === 'live') drawLiveChart(s);
-
-  // Refresh AC-charge card only when the active device changes — the
-  // periodic 30s setInterval handles steady-state updates. Avoids
-  // hammering /api/kasa/status on every WS tick.
-  const acDevSn = dev.device_sn || null;
-  if (acDevSn !== _acChargeLastDeviceSn) {
-    _acChargeLastDeviceSn = acDevSn;
-    refreshAcChargeCard().catch(() => {});
-  }
 }
 
 // ============================================================
