@@ -20,9 +20,9 @@ per-device automation rules and AI insights.
 
 It connects through the **Jackery cloud account** (the same one the official app uses). On first launch the dashboard prompts you to sign in; credentials are encrypted on disk (AES-256-GCM on Linux/Synology, macOS Keychain on Mac) and never leave your host.
 
-![Dashboard — Live tab with state of charge, power flow, today's energy, per-pack battery breakdown, output toggles, and 6-hour history chart](docs/screenshots/dashboard-live.png)
+![Dashboard — Live tab with state of charge, today's energy with savings breakdown, animated Tesla-style power flow diagram, output toggles, collapsible battery packs, and 6-hour history chart](docs/screenshots/dashboard-live.png)
 
-*Live tab: state of charge, power flow (output / input / solar), today's kWh and dollar value, per-expansion-pack SOC + temperature + charging power, output toggles, and the 6-hour battery + power chart.*
+*Live tab: state of charge with sunset SOC prediction, today's kWh + solar/grid dollar breakdown, animated power flow diagram (Solar → Battery → Loads with traveling-dot animation, speed proportional to wattage), output toggles + AC-charge plug control, collapsible per-pack SOC card, and the 6-hour battery + power chart.*
 
 > **🤖 New: AI advisor.** Each morning Claude Opus (with extended thinking) reviews the last 48h of forecast errors, smart-charge decisions, samples, and weather, then proposes specific config tweaks — *"raise `max_charge_w` from 1500 → 1850, your unit consistently pulls more during fast-charge mode"* — that you approve with one click. Nothing applies automatically. See [AI features](#ai-features-optional) below.
 
@@ -30,14 +30,19 @@ It connects through the **Jackery cloud account** (the same one the official app
 
 ## What's in it
 
-- **Live tab** — hero battery card with mood-aware glow (green when charging,
-  blue when discharging, red when low), KPI cards for output / input / today's
-  energy, smooth-bezier 6-hour chart with gradient area fills, dual-axis
-  battery %, hover tooltip.
-- **Output control** — click an AC/DC/USB/Car card to toggle. Goes over
-  Jackery cloud MQTT (`emqx.jackeryapp.com`), confirms before turning AC off.
-  Optimistic UI holds during the device's apply window so you don't see
-  flicker.
+- **Live tab** — hero battery card with mood-aware glow (green when
+  charging, blue when discharging, red when low), today's KPIs with
+  solar / grid / net savings breakdown, **Tesla-style animated power
+  flow diagram** (Solar / Grid → Battery → Loads with travelling
+  dots whose speed encodes wattage), 6-hour chart with smooth-bezier
+  fills + dual-axis battery %, hover tooltip.
+- **Output + grid control** — one toggle row covers all five power
+  paths: AC, DC, USB, Car output ports plus the AC-charge Kasa plug
+  (the latter only renders when configured for the active device).
+  Outputs go over Jackery cloud MQTT (`emqx.jackeryapp.com`), AC-charge
+  goes via direct LAN call to the Kasa plug. Backend retries transient
+  failures up to 3× before surfacing an error; UI re-syncs to actual
+  plug state on failure (no more stuck "err" labels).
 - **Energy tab** — today / 7d / 30d / lifetime kWh totals, time-bucketed
   history chart with 6h / 24h / 7d / 30d ranges, per-device totals.
 - **Device tab** — model, serial, cloud connection state, last update time.
@@ -47,14 +52,23 @@ It connects through the **Jackery cloud account** (the same one the official app
   from your own observed solar-vs-GHI pairs (Open-Meteo); load model uses
   per-hour-of-day medians with a runaway-bucket cap so a single high-output
   event doesn't dominate. Predicted-vs-actual chart accumulates over time.
-- **Battery packs card** (5000 Plus + expansions) — per-pack SOC, input W,
-  temp. Real-time updates over MQTT (no polling). Auto-detected total
-  capacity = main + N × expansion. Hidden cleanly on no-pack devices.
-- **Smart charge** (per-device, in Automation tab) — every 5 minutes,
-  forecasts overnight SOC; if the prediction says you'll fall below your
-  target sunrise SOC, schedules a Kasa-plug-on window during the cheapest
-  TOU rate. Test mode logs decisions without toggling; active mode toggles
-  the plug. All decisions persisted with predicted-vs-actual analytics.
+- **Battery packs card** (5000 Plus + expansions) — per-pack SOC,
+  input W, temp. Real-time updates over MQTT (no polling).
+  Auto-detected total capacity = main + N × expansion. Collapsed by
+  default with the summary line always visible (`5 packs · avg 76%
+  · system 76% · 237W in`); click the header to drill in. Hidden
+  cleanly on no-pack devices.
+- **Smart charge** (per-device, in Automation tab) — every 5
+  minutes, runs a counterfactual forecast (what would SOC do without
+  any AC charging?). If the predicted sunrise SOC falls below your
+  target, picks the cheapest TOU hours up to sunrise–1h margin, with
+  the deadline anchor mandatory so charging always finishes in time.
+  Locks ON past sunrise if the target hasn't been hit. Re-enters on
+  drift below target. All decisions persisted with predicted-vs-
+  actual analytics. **Backtest button** replays the last N days of
+  decisions through the current code so behavior changes can be
+  validated without waiting for fresh data; supports a `target_override`
+  to stress-test the discontinuous-schedule path.
 - **AI advisor** (optional, daily Claude Opus) — diagnoses the residual
   errors in your forecast and smart-charge tracking, proposes config
   tweaks bounded to a safe whitelist, surfaces anomalies. Human approves
@@ -63,10 +77,16 @@ It connects through the **Jackery cloud account** (the same one the official app
 - **Decision narration** (optional, Haiku per fired decision) —
   1-2 sentence plain-English explanation of each smart-charge decision,
   attached to the persisted history row.
-- **Automation tab** — Kasa smart-plug rules driven by battery SOC. Each
-  rule targets a specific Jackery device, fires once per threshold crossing,
-  retries automatically on transient failures. Plugs are assigned to a
-  specific Jackery so the smart-charge picker only shows the relevant ones.
+- **Automation tab** — Kasa smart-plug rules driven by battery SOC.
+  Each rule targets a specific Jackery device, fires once per
+  threshold crossing, retries automatically on transient failures.
+  Plugs are assigned to a specific Jackery so the smart-charge
+  picker only shows the relevant ones. **Self-healing reachability**:
+  a background reconciler probes every saved Kasa plug every 5 min
+  with per-device exponential backoff (5/10/20/30 min, capped) on
+  failure, persists `last_seen` / `last_error` / `consecutive_failures`,
+  and lights up a red dot on the Automation tab when any plug is
+  offline so you know to look.
 - **Logs tab** — ring buffer of bridge events (login, MQTT pushes, contested
   sessions, automation fires, errors). Filter by level or category.
 - **Settings tab** — runtime-tunable poll cadences, low-battery threshold,
@@ -260,9 +280,26 @@ Anomaly callouts (e.g. *"the unit drew 3 kW between 2-4 AM yesterday —
 unusual vs the prior week"*) appear without an Apply button.
 
 Cost: ~$0.20-0.30 per review with Opus. Daily cadence + manual "Run
-review now" button. Set `JACKERY_ADVISOR_MODEL=claude-sonnet-4-5` in
-your Docker env if you want cheaper reviews — Sonnet still has extended
-thinking.
+review now" button.
+
+**Model + thinking effort selectable in the Settings tab** under
+the Anthropic API key card:
+- **Advisor model** dropdown — populated live from Anthropic's
+  `/v1/models` endpoint (cached 5 min) when a key is saved, or a
+  static fallback list otherwise. 1M-capable models get a separate
+  "(1M context)" entry that toggles the `context-1m` beta header
+  on for that call. Pattern matching for "1M-capable" is config-
+  driven via `JACKERY_1M_MODEL_PATTERNS` (default `opus`) so
+  future models pick up the variant without code changes.
+- **Thinking effort** dropdown (low / medium / high) — adaptive
+  thinking budget for Opus 4.7+. Higher = the model self-allocates
+  more tokens to think before answering.
+- **Narrator model** dropdown — pick a fast/cheap model for the
+  per-decision rationale (typically the Haiku line).
+
+Both models read at call time so a Settings change applies on the
+next tick without a container restart. `JACKERY_ADVISOR_MODEL` env
+var still works as an ops-control override.
 
 **2. Decision narration (Haiku, per fired smart-charge decision)**
 
