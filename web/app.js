@@ -5340,7 +5340,8 @@ document.getElementById('backup-creds-form')?.addEventListener('submit', async (
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const j = await r.json();
+    let j = {};
+    try { j = await r.json(); } catch (_) {}
     if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
     _backupSetMsg('backup-creds-msg', 'Saved.', 'ok');
     $('backup-password').value = '';
@@ -5352,30 +5353,72 @@ document.getElementById('backup-creds-form')?.addEventListener('submit', async (
   }
 });
 
-$('backup-test')?.addEventListener('click', async () => {
-  _backupSetMsg('backup-creds-msg', 'Testing connection…', '');
-  // If the form has anything filled in, test those creds (lets the user
-  // validate before saving). Otherwise fall back to whatever is persisted.
+// Shared connectivity-test runner. `mode` controls how we treat partial
+// form input: 'manual' (button click) tests saved creds when the form is
+// blank; 'auto' (live debounce) only runs when the form is fully filled
+// in to avoid noisy errors mid-typing.
+async function _runBackupTest(mode = 'manual') {
   const formBody = _readBackupForm();
-  const hasFormInput = formBody.host || formBody.share || formBody.username || formBody.password;
-  const body = hasFormInput ? formBody : {};
+  const completeForm = formBody.host && formBody.share && formBody.username && formBody.password;
+  if (mode === 'auto' && !completeForm) {
+    // Quietly do nothing while the user is still typing.
+    return;
+  }
+  // The /api/backup/test endpoint requires either a complete creds set in
+  // the body OR no body at all (in which case it uses the saved creds).
+  const body = completeForm ? formBody : {};
+  _backupSetMsg('backup-creds-msg', 'Testing connection…', '');
   try {
     const r = await fetch('/api/backup/test', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const j = await r.json();
-    if (j.ok) {
+    let j = {};
+    try { j = await r.json(); } catch (_) { /* non-JSON body */ }
+    if (r.ok && j.ok) {
       const ms = (j.latency_ms != null) ? ` (${j.latency_ms} ms)` : '';
       _backupSetMsg('backup-creds-msg', `OK — mount + write probe succeeded${ms}.`, 'ok');
     } else {
-      _backupSetMsg('backup-creds-msg', 'Failed: ' + (j.error || 'unknown error'), 'err');
+      // FastAPI HTTPException returns {detail: "..."} on 4xx/5xx; our own
+      // ok:false body uses {error: "..."}. Try both, then HTTP status, so
+      // the user always sees something specific.
+      const reason = j.error || j.detail || `HTTP ${r.status}`;
+      _backupSetMsg('backup-creds-msg', 'Failed: ' + reason, 'err');
     }
   } catch (err) {
     _backupSetMsg('backup-creds-msg', 'Failed: ' + (err.message || err), 'err');
   }
-});
+}
+
+$('backup-test')?.addEventListener('click', () => _runBackupTest('manual'));
+
+// Live auto-test: as soon as host + share + username + password are all
+// non-empty, fire a connectivity check 700ms after the last keystroke. The
+// debounce keeps us from hammering the NAS while the user is still typing
+// and keeps the message line stable.
+(function _wireBackupAutoTest() {
+  const ids = ['backup-host', 'backup-share', 'backup-subdir',
+               'backup-username', 'backup-password', 'backup-domain'];
+  let timer = null;
+  let lastSig = '';
+  function schedule() {
+    const f = _readBackupForm();
+    const complete = f.host && f.share && f.username && f.password;
+    if (!complete) return;
+    // Skip if nothing actually changed since the last successful trigger
+    // (e.g. focus blur events on the same value).
+    const sig = `${f.host}|${f.share}|${f.subdir}|${f.username}|${f.password}|${f.domain}`;
+    if (sig === lastSig) return;
+    lastSig = sig;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => _runBackupTest('auto'), 700);
+  }
+  ids.forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('input', schedule);
+  });
+})();
 
 $('backup-clear')?.addEventListener('click', async () => {
   if (!confirm('Forget saved backup destination? Daily backups will stop until new credentials are saved.')) return;
@@ -5464,13 +5507,15 @@ $('backup-run-now')?.addEventListener('click', async () => {
   _backupSetMsg('backup-run-msg', 'Backup in progress — this may take a minute over slow links.', '');
   try {
     const r = await fetch('/api/backup/run', { method: 'POST' });
-    const j = await r.json();
-    if (j.ok) {
+    let j = {};
+    try { j = await r.json(); } catch (_) {}
+    if (r.ok && j.ok) {
       _backupSetMsg('backup-run-msg', `OK — wrote ${j.files_written} files (${_fmtBytes(j.bytes_written || 0)}).`, 'ok');
     } else if (j.skipped_reason) {
       _backupSetMsg('backup-run-msg', `Skipped: ${j.skipped_reason}`, 'err');
     } else {
-      _backupSetMsg('backup-run-msg', 'Failed: ' + (j.error || 'unknown error'), 'err');
+      const reason = j.error || j.detail || `HTTP ${r.status}`;
+      _backupSetMsg('backup-run-msg', 'Failed: ' + reason, 'err');
     }
   } catch (err) {
     _backupSetMsg('backup-run-msg', 'Failed: ' + (err.message || err), 'err');
