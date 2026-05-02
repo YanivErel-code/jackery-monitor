@@ -13,6 +13,11 @@
       "capacity_wh": 5040,
       "name": "Explorer 5000 Plus",
       "comment": "Same hardware as model_code 13."
+    },
+    "19": {
+      "capacity_wh": 3024,
+      "name": "HomePower 3000",
+      "comment": "Jackery model_name HTE1163000B; reported as model_code 19 from the cloud API. Confirmed against a real unit on 2026-05-02."
     }
   }
 }
