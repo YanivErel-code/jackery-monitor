@@ -3173,6 +3173,28 @@ function renderPowerFlow(t) {
     if (t.ac_output_hz != null) parts.push(`${Math.round(t.ac_output_hz)} Hz`);
     meta.textContent = parts.join(' · ') || '—';
   }
+
+  // Time-to-full (charging) / time-to-empty (discharging). Pulled
+  // straight from device telemetry, same fields the SOC card uses.
+  // Picking the positive one is enough — Jackery zeroes the inactive
+  // direction. Color-coded green/amber to match the battery node ring.
+  const timerEl = $('flow-timer');
+  if (timerEl) {
+    const ttFull  = Number(t.time_to_full_h    ?? 0);
+    const ttEmpty = Number(t.time_remaining_h  ?? 0);
+    let txt = '—';
+    let cls = '';
+    if (ttFull > 0) {
+      txt = `${ttFull.toFixed(1)} h until full`;
+      cls = 'charging';
+    } else if (ttEmpty > 0) {
+      txt = `${ttEmpty.toFixed(1)} h remaining`;
+      cls = 'discharging';
+    }
+    timerEl.textContent = txt;
+    timerEl.classList.remove('charging', 'discharging');
+    if (cls) timerEl.classList.add(cls);
+  }
 }
 
 function setFlow(kind, watts) {

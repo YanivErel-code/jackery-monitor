@@ -494,6 +494,26 @@ main {
   text-transform: uppercase;
 }
 
+/* Time-to-full / time-to-empty under the flow diagram. Mirrors the
+   SOC card's meta line (e.g. "4.1 h until full") so the Power Flow
+   card stands on its own. Hidden visually when the unit is balanced
+   (we render an em-dash, but it's dim and centred so it's not
+   distracting). */
+.flow-timer {
+  margin-top: 6px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+  min-height: 1em;
+}
+.flow-timer.charging { color: #4ade80; }      /* green when adding energy */
+.flow-timer.discharging { color: #fbbf24; }   /* amber when draining */
+@media (max-width: 600px) {
+  .flow-timer { font-size: 15px; }
+}
+
 /* iPhone / narrow-viewport legibility for the flow diagram.
    The SVG has viewBox 0 0 1000 300 and renders at the card's full
    width (~340px on iPhone), giving a content scale ≈0.34. Default

@@ -220,6 +220,13 @@
               <tspan id="flow-load-w">0</tspan> W
             </text>
           </svg>
+          <!-- Time-to-full / time-to-empty pulled live from telemetry
+               (`time_to_full_h` when charging, `time_remaining_h` when
+               discharging). Same data the SOC card surfaces in its
+               meta line, repeated here so the Power Flow card stands
+               on its own without needing to glance up. Falls back to
+               an em-dash when the unit is balanced/idle. -->
+          <div class="flow-timer" id="flow-timer">—</div>
         </section>
 
         <section class="card kpi-card today has-accent" data-card="today">
