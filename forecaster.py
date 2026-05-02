@@ -930,13 +930,26 @@ def build_forecast(
     for w in future:
         ts = int(w["ts"])
         ghi = float(w.get("ghi_w_m2") or 0)
-        solar_w = max(0.0, k * ghi)
-        if solar_cap is not None:
-            solar_w = min(solar_w, solar_cap)
+        solar_w_uncapped = max(0.0, k * ghi)
+        solar_w = solar_w_uncapped
+        capped = False
+        if solar_cap is not None and solar_w > solar_cap:
+            solar_w = solar_cap
+            capped = True
         load_w = expected_load_w(profile, ts, inverter_overhead_pct=overhead_pct)
         forecast_hours.append({
             "ts": ts,
             "solar_w": round(solar_w, 1),
+            # Surfacing the underlying GHI + uncapped k*GHI value lets
+            # the dashboard tell whether a high solar_w prediction came
+            # from a high Open-Meteo GHI (model trusts the weather feed)
+            # or from the recent-peak cap NOT binding. cloud_cover is
+            # informational only — the forecaster does NOT attenuate
+            # GHI by it; Open-Meteo's `shortwave_radiation` already
+            # incorporates cloud cover by spec.
+            "ghi_w_m2": round(ghi, 1),
+            "solar_w_uncapped": round(solar_w_uncapped, 1),
+            "solar_capped": capped,
             "load_w": round(load_w, 1),
             "cloud_cover_pct": round(float(w.get("cloud_cover_pct") or 0), 1),
         })
@@ -953,6 +966,14 @@ def build_forecast(
         "capacity_wh": capacity_wh,
         "solar_coefficient": round(k, 4),
         "fit_samples": n_fit,
+        # Anchors the recent-peak solar cap. `solar_recent_peak_w` is
+        # the highest solar_w sample in the last 48h; `solar_cap_w` is
+        # that × SOLAR_RECENT_CAP_MULT (or null when the cap is
+        # disabled because there's no recent data > 50W). Useful for
+        # diagnosing whether a high forecast solar_w is being capped
+        # or running away — pair with the per-hour `solar_capped` flag.
+        "solar_recent_peak_w": round(recent_peak, 1),
+        "solar_cap_w": round(solar_cap, 1) if solar_cap is not None else None,
         "overall_load_w": round(overall_load, 1),
         # NEW: p95 of output_w. Used as the per-bucket ceiling in the
         # load profile, replacing the old 2*mean heuristic that biased
