@@ -188,6 +188,22 @@
         </div>
       </section>
 
+      <!-- AC charging — manual override of the Kasa plug assigned to
+           smart-charge. Only renders when a plug is configured. -->
+      <section class="card" id="ac-charge-card" hidden>
+        <div class="card-header">
+          <h2>AC charging</h2>
+          <span class="hint" id="ac-charge-hint">—</span>
+        </div>
+        <div id="ac-charge-warning" class="hint" style="margin:0 0 8px; color:#fbbc04" hidden></div>
+        <div class="switches">
+          <button class="switch" id="ac-charge-toggle" type="button">
+            <span class="sw-label">Grid plug</span>
+            <span class="sw-state" id="ac-charge-state">—</span>
+          </button>
+        </div>
+      </section>
+
       <!-- Live chart -->
       <section class="card">
         <div class="card-header">

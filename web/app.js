@@ -2950,7 +2950,113 @@ function applyStatus(s) {
 
   // Live chart
   if (activeTab === 'live') drawLiveChart(s);
+
+  // Refresh AC-charge card only when the active device changes — the
+  // periodic 30s setInterval handles steady-state updates. Avoids
+  // hammering /api/kasa/status on every WS tick.
+  const acDevSn = dev.device_sn || null;
+  if (acDevSn !== _acChargeLastDeviceSn) {
+    _acChargeLastDeviceSn = acDevSn;
+    refreshAcChargeCard().catch(() => {});
+  }
 }
+
+// ============================================================
+// AC CHARGING — manual override of the smart-charge plug.
+// Renders only when the user has assigned a Kasa plug to this
+// device's smart-charge config. Clicks toggle via /api/kasa/test;
+// state is read via /api/kasa/status. When smart-charge mode is
+// 'active' a warning banner explains the loop will re-decide on
+// the next 5-min tick (Q4-A: warn but don't block).
+// ============================================================
+let _acChargeBusy = false;
+let _acChargeLastDeviceSn = null;
+
+async function refreshAcChargeCard() {
+  const card = $('ac-charge-card');
+  if (!card) return;
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) { card.hidden = true; return; }
+  let cfg = null;
+  try {
+    const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`);
+    if (r.ok) cfg = (await r.json()).config;
+  } catch (e) { /* ignore */ }
+  const host = cfg?.kasa_device_host;
+  if (!host) { card.hidden = true; return; }
+  card.hidden = false;
+  const mode = cfg.mode || 'off';
+  const hint = $('ac-charge-hint');
+  if (hint) hint.textContent = `Kasa plug ${host} · smart-charge ${mode}`;
+  const warn = $('ac-charge-warning');
+  if (warn) {
+    if (mode === 'active') {
+      warn.hidden = false;
+      warn.textContent = '⚠ Smart-charge is active — your manual toggle may be reverted within 5 min.';
+    } else {
+      warn.hidden = true;
+    }
+  }
+  // Read plug state. Failures = unknown (—).
+  const stateEl = $('ac-charge-state');
+  const sw = $('ac-charge-toggle');
+  if (!_acChargeBusy) {
+    try {
+      const r = await fetch(`/api/kasa/status?host=${encodeURIComponent(host)}`);
+      if (r.ok) {
+        const j = await r.json();
+        const isOn = !!j.is_on;
+        if (sw) sw.classList.toggle('on', isOn);
+        if (stateEl) stateEl.textContent = isOn ? 'ON' : 'OFF';
+      } else {
+        if (sw) sw.classList.remove('on');
+        if (stateEl) stateEl.textContent = '—';
+      }
+    } catch (e) {
+      if (sw) sw.classList.remove('on');
+      if (stateEl) stateEl.textContent = '—';
+    }
+  }
+}
+
+document.getElementById('ac-charge-toggle')?.addEventListener('click', async () => {
+  if (_acChargeBusy) return;
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) return;
+  let host = null;
+  try {
+    const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`);
+    if (r.ok) host = (await r.json()).config?.kasa_device_host;
+  } catch (e) { return; }
+  if (!host) return;
+  const sw = $('ac-charge-toggle');
+  const stateEl = $('ac-charge-state');
+  const wantOn = !sw?.classList.contains('on');
+  _acChargeBusy = true;
+  if (sw) sw.classList.add('pending');
+  if (stateEl) stateEl.textContent = wantOn ? 'ON…' : 'OFF…';
+  try {
+    const r = await fetch('/api/kasa/test', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ host, on: wantOn }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (sw) { sw.classList.toggle('on', wantOn); sw.classList.remove('pending'); }
+    if (stateEl) stateEl.textContent = wantOn ? 'ON' : 'OFF';
+  } catch (e) {
+    if (sw) sw.classList.remove('pending');
+    if (stateEl) stateEl.textContent = `err: ${String(e.message || e).slice(0, 24)}`;
+  } finally {
+    _acChargeBusy = false;
+  }
+});
+
+// Periodic refresh — plug state changes infrequently so 30s is plenty.
+setInterval(refreshAcChargeCard, 30_000);
+// Initial render — fire once at module load AND once when applyStatus
+// resolves an active device, so the card shows up without waiting 30s.
+refreshAcChargeCard().catch(() => {});
 
 function describeSrc(meta) {
   if (!meta) return '—';
