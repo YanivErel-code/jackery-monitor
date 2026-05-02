@@ -841,6 +841,31 @@
           <button class="btn btn-primary" type="submit">Save & test</button>
           <button id="ak-clear" class="btn btn-ghost" type="button">Forget</button>
         </form>
+        <div id="ak-models-block" style="margin-top:18px">
+          <h3 style="margin:0 0 6px; font-size:13px; color:var(--text-dim); font-weight:500">Model selection</h3>
+          <p class="hint" style="margin:0 0 10px">
+            Pick which Claude model each role uses. <strong>Advisor</strong> runs the daily heavy review (multi-turn reasoning, costs more); <strong>narrator</strong> writes the 1-2 sentence rationale on each smart-charge decision (cheap + fast). The dropdown auto-refreshes when you open this tab.
+          </p>
+          <div class="settings-row">
+            <label class="settings-label" for="ak-advisor-model">
+              <span class="settings-label-text">Advisor model</span>
+              <span class="settings-hint">Daily review — quality-sensitive. Default: Opus 4.7.</span>
+            </label>
+            <div class="settings-control">
+              <select id="ak-advisor-model" class="device-select" disabled><option>—</option></select>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="ak-narrator-model">
+              <span class="settings-label-text">Narrator model</span>
+              <span class="settings-hint">Per-decision narration — cost-sensitive. Default: Haiku 4.5.</span>
+            </label>
+            <div class="settings-control">
+              <select id="ak-narrator-model" class="device-select" disabled><option>—</option></select>
+            </div>
+          </div>
+          <div id="ak-models-status" class="hint" style="margin-top:6px"></div>
+        </div>
       </section>
 
       <section class="card device-card">

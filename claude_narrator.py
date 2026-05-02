@@ -24,11 +24,22 @@ import os
 from typing import Any
 
 import anthropic_creds
+import anthropic_prefs
 
 log = logging.getLogger("claude_narrator")
 
-MODEL = "claude-haiku-4-5"
+# Resolved at call time (not module load) so a Settings-tab change
+# applies on the next tick without a container restart. Default is
+# Haiku — cheap + fast for the per-decision narration use case.
+DEFAULT_MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 200
+
+
+def _get_model() -> str:
+    try:
+        return anthropic_prefs.get_model("narrator")
+    except Exception:
+        return DEFAULT_MODEL
 
 
 def _resolve_key() -> str | None:
@@ -54,7 +65,7 @@ async def validate_key(api_key: str) -> tuple[bool, str]:
     try:
         # 1-token completion is the cheapest way to confirm auth + model access.
         await client.messages.create(
-            model=MODEL,
+            model=_get_model(),
             max_tokens=1,
             messages=[{"role": "user", "content": "ok"}],
         )
@@ -85,7 +96,7 @@ async def narrate_smart_charge(plan: Any) -> str:
     client = AsyncAnthropic(api_key=api_key)
     try:
         resp = await client.messages.create(
-            model=MODEL,
+            model=_get_model(),
             max_tokens=MAX_TOKENS,
             system=(
                 "You explain solar-battery automation decisions in 1-2 plain "

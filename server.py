@@ -3274,6 +3274,96 @@ def api_anthropic_key_clear():
     return {"ok": True}
 
 
+# Server-side model-list cache. Anthropic's /v1/models is cheap, but we
+# don't want to hammer it on every Settings tab open + we need a
+# graceful fallback when the API key is missing or the network is down.
+_anthropic_models_cache: dict[str, Any] = {"ts": 0.0, "models": []}
+ANTHROPIC_MODELS_CACHE_TTL_S = 5 * 60
+
+# Static fallback list — what the UI offers when no key is configured
+# or the live fetch fails. Order = recommended first. IDs match the
+# aliases users typically see in Anthropic's docs.
+ANTHROPIC_MODELS_FALLBACK: list[dict[str, str]] = [
+    {"id": "claude-opus-4-7", "display_name": "Claude Opus 4.7"},
+    {"id": "claude-sonnet-4-7", "display_name": "Claude Sonnet 4.7"},
+    {"id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5"},
+]
+
+
+@app.get("/api/anthropic/models")
+async def api_anthropic_models(refresh: bool = False):
+    """Return the list of Claude models the user can pick from.
+
+    When an Anthropic API key is configured, fetches the live list
+    from the Anthropic API (cached 5 min). When no key is configured
+    or the fetch fails, falls back to a static list of well-known
+    aliases. Always succeeds — the UI dropdown will always have
+    options to render.
+
+    `refresh=true` busts the cache."""
+    import anthropic_creds as ac
+    now = time.time()
+    if not refresh and (now - _anthropic_models_cache["ts"]) < ANTHROPIC_MODELS_CACHE_TTL_S:
+        cached = _anthropic_models_cache["models"]
+        if cached:
+            return {"models": cached, "source": "cache"}
+
+    api_key = ac.load() or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"models": ANTHROPIC_MODELS_FALLBACK, "source": "fallback_no_key"}
+
+    try:
+        from anthropic import AsyncAnthropic
+    except ImportError:
+        return {"models": ANTHROPIC_MODELS_FALLBACK, "source": "fallback_no_sdk"}
+
+    try:
+        client = AsyncAnthropic(api_key=api_key)
+        # SDK exposes models.list() but the page is small enough that
+        # one call is fine.
+        page = await client.models.list(limit=50)
+        models = [
+            {"id": m.id, "display_name": getattr(m, "display_name", m.id)}
+            for m in (page.data or [])
+        ]
+    except Exception as e:
+        log.info("anthropic models list failed (%s); using fallback", e)
+        return {"models": ANTHROPIC_MODELS_FALLBACK,
+                "source": "fallback_fetch_failed",
+                "error": str(e)[:200]}
+
+    if not models:
+        return {"models": ANTHROPIC_MODELS_FALLBACK, "source": "fallback_empty"}
+    _anthropic_models_cache["ts"] = now
+    _anthropic_models_cache["models"] = models
+    return {"models": models, "source": "live"}
+
+
+@app.get("/api/anthropic/prefs")
+def api_anthropic_prefs_get():
+    """Current model preference per role (advisor, narrator). Defaults
+    fill in missing keys so the UI always renders something."""
+    import anthropic_prefs
+    return anthropic_prefs.get_all()
+
+
+@app.post("/api/anthropic/prefs")
+async def api_anthropic_prefs_save(body: dict):
+    """Persist the user's model selection per role. Either or both of
+    advisor_model / narrator_model may be present; missing keys leave
+    the existing preference untouched. Returns the resulting full
+    snapshot so the UI can re-render."""
+    import anthropic_prefs
+    advisor = (body or {}).get("advisor_model")
+    narrator = (body or {}).get("narrator_model")
+    if not advisor and not narrator:
+        raise HTTPException(
+            400, "at least one of advisor_model / narrator_model required")
+    return anthropic_prefs.set_models(
+        advisor_model=advisor, narrator_model=narrator,
+    )
+
+
 @app.get("/api/kasa/devices")
 async def api_kasa_devices():
     """Discover Kasa devices on the LAN. May return [] if Docker bridge

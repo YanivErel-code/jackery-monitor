@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
     loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
@@ -4742,6 +4742,9 @@ document.getElementById('ak-form')?.addEventListener('submit', async (e) => {
     input.value = '';
     setTimeout(() => { status.hidden = true; }, 3000);
     loadAnthropicKeyStatus();
+    // Newly-saved key → re-fetch the model list so the dropdown
+    // switches from fallback to the live Anthropic list.
+    loadAnthropicModelPickers();
   } catch (err) {
     status.textContent = String(err.message || err);
   }
@@ -4761,6 +4764,103 @@ document.getElementById('ak-clear')?.addEventListener('click', async () => {
   } catch (err) {
     status.textContent = String(err.message || err);
   }
+});
+
+// ============================================================
+// ANTHROPIC MODEL PICKERS — populated from /api/anthropic/models
+// (live list when an API key is saved, static fallback otherwise),
+// persisted via /api/anthropic/prefs. Refreshes every time the
+// Settings tab opens.
+// ============================================================
+async function loadAnthropicModelPickers() {
+  const advisorSel = $('ak-advisor-model');
+  const narratorSel = $('ak-narrator-model');
+  const statusEl = $('ak-models-status');
+  if (!advisorSel || !narratorSel) return;
+  if (statusEl) statusEl.textContent = 'Loading model list…';
+  try {
+    // Parallel: fetch the available list + the user's current selection.
+    const [modelsR, prefsR] = await Promise.all([
+      fetch('/api/anthropic/models'),
+      fetch('/api/anthropic/prefs'),
+    ]);
+    const modelsJ = modelsR.ok ? await modelsR.json() : { models: [], source: 'fetch_failed' };
+    const prefsJ = prefsR.ok ? await prefsR.json() : {};
+    const models = modelsJ.models || [];
+    const prefs = {
+      advisor_model: prefsJ.advisor_model || '',
+      narrator_model: prefsJ.narrator_model || '',
+    };
+    // Populate both dropdowns. If the user's current pref isn't in the
+    // fetched list (e.g. they saved a custom ID), still preserve it as
+    // the selected option so we don't silently change their choice.
+    const populate = (sel, current) => {
+      sel.innerHTML = '';
+      const seen = new Set();
+      const addOpt = (id, label) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = label || id;
+        if (id === current) o.selected = true;
+        sel.appendChild(o);
+      };
+      for (const m of models) addOpt(m.id, m.display_name);
+      if (current && !seen.has(current)) {
+        addOpt(current, `${current} (saved)`);
+      }
+      sel.disabled = false;
+    };
+    populate(advisorSel, prefs.advisor_model);
+    populate(narratorSel, prefs.narrator_model);
+    if (statusEl) {
+      const sourceLabel = ({
+        live: '✅ Live list from Anthropic.',
+        cache: '✅ Live list (cached).',
+        fallback_no_key: '⚠ No API key saved — showing well-known model aliases as a fallback.',
+        fallback_no_sdk: '⚠ Anthropic SDK not in this image — showing fallback list.',
+        fallback_fetch_failed: `⚠ Couldn't reach Anthropic to refresh the list — showing fallback. ${modelsJ.error || ''}`,
+        fallback_empty: '⚠ Anthropic returned an empty list — showing fallback.',
+      })[modelsJ.source] || `Source: ${modelsJ.source || 'unknown'}.`;
+      statusEl.textContent = sourceLabel;
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `Failed to load model list: ${e.message || e}`;
+  }
+}
+
+async function saveAnthropicModelPref(role, model) {
+  const statusEl = $('ak-models-status');
+  if (!model) return;
+  if (statusEl) statusEl.textContent = `Saving ${role} model…`;
+  try {
+    const body = role === 'advisor'
+      ? { advisor_model: model }
+      : { narrator_model: model };
+    const r = await fetch('/api/anthropic/prefs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${r.status}`);
+    }
+    if (statusEl) {
+      statusEl.textContent = `Saved. ${role} role will use ${model} on the next call.`;
+      setTimeout(() => { statusEl.textContent = ''; }, 3500);
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `Save failed: ${e.message || e}`;
+  }
+}
+
+document.getElementById('ak-advisor-model')?.addEventListener('change', (e) => {
+  saveAnthropicModelPref('advisor', e.target.value);
+});
+document.getElementById('ak-narrator-model')?.addEventListener('change', (e) => {
+  saveAnthropicModelPref('narrator', e.target.value);
 });
 
 // ============================================================

@@ -36,14 +36,27 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anthropic_creds
+import anthropic_prefs
 
 log = logging.getLogger("claude_advisor")
 
-# Latest Claude Opus model. The 1M-context capability is opted into via
-# the anthropic-beta header below — for models that don't support it the
-# header is ignored. Override via env var if Anthropic ships a newer
-# point release before this codebase updates.
-MODEL = os.environ.get("JACKERY_ADVISOR_MODEL", "claude-opus-4-7")
+# Resolution order at call time:
+#   1. JACKERY_ADVISOR_MODEL env var (legacy ops control)
+#   2. anthropic_prefs (UI-set value from Settings tab)
+#   3. hardcoded fallback
+# Reading at call time (not module load) means a UI change applies on
+# the next daily review without a container restart.
+DEFAULT_MODEL = "claude-opus-4-7"
+
+
+def _get_model() -> str:
+    env = os.environ.get("JACKERY_ADVISOR_MODEL")
+    if env:
+        return env
+    try:
+        return anthropic_prefs.get_model("advisor")
+    except Exception:
+        return DEFAULT_MODEL
 
 # Beta header to opt into the 1M-token context window. The advisor's
 # multi-turn agent loop with tool results can grow context fast on a
@@ -453,7 +466,7 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
             # The model rejects the wrong shape. JACKERY_ADVISOR_THINKING_MODE
             # selects between them; default "adaptive" matches Opus 4.7.
             kwargs: dict = dict(
-                model=MODEL,
+                model=_get_model(),
                 max_tokens=MAX_TOKENS,
                 tools=tools,
                 tool_choice={"type": "auto"},
@@ -568,7 +581,7 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
         "summary": final_payload.get("summary") or "",
         "config_suggestions": valid,
         "anomalies": final_payload.get("anomalies") or [],
-        "model": MODEL,
+        "model": _get_model(),
         "thinking_used": True,
         "turns": turn,
         "tool_calls": tool_calls_made,
