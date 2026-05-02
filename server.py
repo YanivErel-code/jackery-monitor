@@ -46,7 +46,13 @@ import settings as user_settings
 import smart_charge
 import weather_client
 from automation import AutomationEngine, AutomationError
-from device_client import DeviceClient, DeviceClientError, DeviceInfo, make_client
+from device_client import (
+    DeviceClient,
+    DeviceClientError,
+    DeviceInfo,
+    device_type_for,
+    make_client,
+)
 from energy_db import EnergyDB
 from kasa_devices import KasaRegistry
 
@@ -89,6 +95,15 @@ FORECASTER_BREAKING_CHANGE_TS = int(
     os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777678272")
 )
 
+# Per-browser "viewing this Jackery" preference. Independent of the bridge's
+# active-device (which the worker manages), so two browsers can look at
+# different Jackerys at the same time without stomping each other. Plain
+# device_id stored in the cookie — server validates against the current
+# account's known devices on every read, so a stale cookie just falls back
+# to the bridge-active view.
+VIEW_DEVICE_COOKIE = "view_device_id"
+VIEW_DEVICE_COOKIE_TTL_S = 365 * 24 * 3600
+
 
 # ---------- app state ----------
 class AppState:
@@ -109,7 +124,11 @@ class AppState:
         self.connection_error: str | None = None
         self.low_battery_alerted = False
         self.poll_task: asyncio.Task | None = None
-        self.ws_clients: set[WebSocket] = set()
+        # WebSocket -> view_device_id (cookie value at connect time, may be
+        # None for clients that haven't picked a device — they default to
+        # bridge-active). Each broadcast renders status once per unique
+        # view_id and fans out to the matching clients.
+        self.ws_clients: dict[WebSocket, str | None] = {}
         self.last_source: str | None = None
         self.last_cloud_meta: dict | None = None
         # Per-expansion-battery cache. Refreshed every BATTERY_PACK_REFRESH_S
@@ -162,7 +181,7 @@ state = AppState()
 async def connect_device() -> bool:
     state.connection_status = "scanning"
     state.connection_error = None
-    await broadcast({"type": "status", "data": serialize_status()})
+    await broadcast_status("status")
 
     try:
         ok, info, err = await state.client.connect()
@@ -170,14 +189,14 @@ async def connect_device() -> bool:
         log.exception("connect raised")
         state.connection_status = "error"
         state.connection_error = f"{type(e).__name__}: {e}"
-        await broadcast({"type": "status", "data": serialize_status()})
+        await broadcast_status("status")
         return False
 
     if not ok:
         state.connection_status = "error"
         state.connection_error = err or "connect failed"
         log.warning(state.connection_error)
-        await broadcast({"type": "status", "data": serialize_status()})
+        await broadcast_status("status")
         return False
 
     state.device = info
@@ -185,7 +204,7 @@ async def connect_device() -> bool:
     state.connection_error = None
     log.info("Connected via %s backend: %s", state.backend,
              info.name if info else "?")
-    await broadcast({"type": "status", "data": serialize_status()})
+    await broadcast_status("status")
     return True
 
 
@@ -213,7 +232,7 @@ async def poll_loop() -> None:
             ):
                 state.reset_live_history()
                 state.device = new_dev
-                await broadcast({"type": "status", "data": serialize_status()})
+                await broadcast_status("status")
 
             if status_dict:
                 ts = time.time()
@@ -298,62 +317,24 @@ async def poll_loop() -> None:
                             bucket_s=LIVE_CHART_INTERVAL_S,
                         )
                         for p in past:
-                            state.history.append({
-                                "ts": p["ts"],
-                                "battery_percent": p["battery_pct"] or 0,
-                                "input_power_w": p["input_w"] or 0,
-                                "output_power_w": p["output_w"] or 0,
-                            })
+                            state.history.append(_energy_db_row_to_chart_point(p))
                         log.info("Live chart hydrated with %d historical points (last %dh)",
                                  len(past), LIVE_CHART_HOURS)
                     except Exception as e:
                         log.warning("history hydrate failed: %s", e)
                     state.history_hydrated = True
 
-                # Per-expansion-battery refresh. Throttled per-device since
-                # pack state moves slowly. Cached on state for the API,
-                # persisted to energy_db for the daily-learning job. On
-                # failure we deliberately DO NOT advance the per-device
-                # timestamp — that would delay retry by a full refresh window.
-                last_ts = state.last_packs_ts_by_sn.get(dev_sn, 0.0) if dev_sn else 0.0
-                if dev_sn and ts - last_ts >= BATTERY_PACK_REFRESH_S:
-                    rpc = getattr(state.client, "_rpc", None)
-                    if rpc is not None:
-                        try:
-                            result = await rpc("get_battery_packs", device_sn=dev_sn)
-                            err = (result or {}).get("error")
-                            packs = (result or {}).get("packs") or []
-                            if err:
-                                log.warning("battery_packs RPC error for %s: %s",
-                                            dev_sn, err)
-                            elif packs:
-                                # Strip BMS sensor garbage at ingestion so it
-                                # doesn't flow into the cache, the DB, or the
-                                # advisor's analysis. Bad pack temps in
-                                # particular have shown up as 4°C and 135°C —
-                                # impossibilities the sensor would never produce
-                                # if it were working. Drop them; downstream
-                                # code already handles missing values gracefully.
-                                packs = _sanitize_pack_telemetry(packs)
-                                state.battery_packs_by_sn[dev_sn] = packs
-                                state.last_packs_ts_by_sn[dev_sn] = ts
-                                # DB persist throttled separately — the cache
-                                # is fresh on every iteration but the daily-
-                                # learning trace only needs minute-resolution.
-                                last_db = state.last_packs_db_ts_by_sn.get(dev_sn, 0.0)
-                                if ts - last_db >= BATTERY_PACK_DB_PERSIST_S:
-                                    state.energy.record_battery_packs(dev_sn, packs, int(ts))
-                                    state.last_packs_db_ts_by_sn[dev_sn] = ts
-                            else:
-                                # Empty list with no error means the device
-                                # has no expansion packs (e.g. HomePower 3000).
-                                # Record that explicitly so the UI hides the
-                                # pack card for this device.
-                                state.battery_packs_by_sn[dev_sn] = []
-                                state.last_packs_ts_by_sn[dev_sn] = ts
-                        except Exception as e:
-                            log.warning("battery_packs refresh failed for %s: %s",
-                                        dev_sn, e)
+                # Per-expansion-battery refresh. Refresh packs for every
+                # device on the account, not just the bridge-active one,
+                # so per-browser views of secondary devices show the same
+                # pack rows the bridge-active view would. The bridge
+                # serves these from its MQTT push cache so a no-op
+                # refresh is essentially free.
+                pack_sns = {sn for sn, *_ in samples_to_write}
+                if dev_sn:
+                    pack_sns.add(dev_sn)
+                for pack_sn in pack_sns:
+                    await _refresh_packs_for(pack_sn, ts)
 
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
@@ -366,7 +347,7 @@ async def poll_loop() -> None:
                         "output_power_w": status_dict["output_power_w"],
                     })
                     state.last_history_ts = ts
-                await broadcast({"type": "telemetry", "data": serialize_status()})
+                await broadcast_status("telemetry")
 
                 threshold = user_settings.get("low_battery_threshold")
                 bp = status_dict["battery_percent"]
@@ -423,6 +404,10 @@ async def poll_loop() -> None:
 
 # ---------- WebSocket fan-out ----------
 async def broadcast(message: dict[str, Any]) -> None:
+    """Send the same payload to every connected client. Use for global
+    events (alerts, automation_fired) where every browser sees the same
+    thing. For status/telemetry use `broadcast_status` so each client
+    gets their per-view render."""
     if not state.ws_clients:
         return
     payload = json.dumps(message)
@@ -433,7 +418,29 @@ async def broadcast(message: dict[str, Any]) -> None:
         except Exception:
             dead.append(ws)
     for ws in dead:
-        state.ws_clients.discard(ws)
+        state.ws_clients.pop(ws, None)
+
+
+async def broadcast_status(message_type: str = "status") -> None:
+    """Render `serialize_status` per unique view_device_id and fan out
+    to the matching clients. Memoizes by view so we render once even
+    when several browsers share the same selection (the common case)."""
+    if not state.ws_clients:
+        return
+    rendered: dict[str | None, str] = {}
+    dead: list[WebSocket] = []
+    for ws, view_id in state.ws_clients.items():
+        if view_id not in rendered:
+            rendered[view_id] = json.dumps({
+                "type": message_type,
+                "data": serialize_status(view_device_id=view_id),
+            })
+        try:
+            await ws.send_text(rendered[view_id])
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        state.ws_clients.pop(ws, None)
 
 
 def _system_soc_pct(main_pct: float, device_sn: str | None,
@@ -539,32 +546,173 @@ def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
     return totals
 
 
-def serialize_status() -> dict[str, Any]:
-    device_info = state.device.to_dict() if state.device else None
-    energy = None
+async def _refresh_packs_for(device_sn: str, ts: float) -> None:
+    """Pull the latest expansion-pack telemetry for `device_sn` and
+    update the in-memory cache + (throttled) the energy DB. Throttled
+    per-SN by BATTERY_PACK_REFRESH_S; on failure we deliberately do
+    NOT advance the per-device timestamp so the next tick retries
+    immediately rather than waiting a full refresh window."""
+    last_ts = state.last_packs_ts_by_sn.get(device_sn, 0.0)
+    if ts - last_ts < BATTERY_PACK_REFRESH_S:
+        return
+    rpc = getattr(state.client, "_rpc", None)
+    if rpc is None:
+        return
     try:
-        if state.device and state.device.device_sn:
-            energy = _decorate_totals_with_savings(
-                state.energy.totals(state.device.device_sn),
-                state.device.device_sn,
-            )
+        result = await rpc("get_battery_packs", device_sn=device_sn)
     except Exception as e:
-        log.debug("energy totals lookup failed: %s", e)
+        log.warning("battery_packs refresh failed for %s: %s", device_sn, e)
+        return
+    err = (result or {}).get("error")
+    packs = (result or {}).get("packs") or []
+    if err:
+        log.warning("battery_packs RPC error for %s: %s", device_sn, err)
+        return
+    if packs:
+        # Strip BMS sensor garbage at ingestion so it doesn't flow into
+        # the cache, the DB, or the advisor's analysis. Bad pack temps
+        # in particular have shown up as 4C and 135C — impossibilities
+        # the sensor would never produce if it were working. Drop them;
+        # downstream code already handles missing values gracefully.
+        packs = _sanitize_pack_telemetry(packs)
+        state.battery_packs_by_sn[device_sn] = packs
+        state.last_packs_ts_by_sn[device_sn] = ts
+        # DB persist throttled separately — the cache is fresh on every
+        # iteration but the daily-learning trace only needs minute
+        # resolution.
+        last_db = state.last_packs_db_ts_by_sn.get(device_sn, 0.0)
+        if ts - last_db >= BATTERY_PACK_DB_PERSIST_S:
+            state.energy.record_battery_packs(device_sn, packs, int(ts))
+            state.last_packs_db_ts_by_sn[device_sn] = ts
+    else:
+        # Empty list with no error means the device has no expansion
+        # packs (e.g. HomePower 3000). Record that explicitly so the UI
+        # hides the pack card for this device.
+        state.battery_packs_by_sn[device_sn] = []
+        state.last_packs_ts_by_sn[device_sn] = ts
+
+
+def _energy_db_row_to_chart_point(p: dict) -> dict:
+    """Rename the energy_db.history columns into the live-chart shape
+    the frontend expects. Used by both the startup hydrate path and
+    the per-view history fetch."""
+    return {
+        "ts": p["ts"],
+        "battery_percent": p["battery_pct"] or 0,
+        "input_power_w": p["input_w"] or 0,
+        "output_power_w": p["output_w"] or 0,
+    }
+
+
+_VIEW_HISTORY_TTL_S = 30
+_view_history_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _view_history(device_sn: str | None) -> list[dict]:
+    """Live-chart points for a non-bridge-active view. Hydrated from the
+    energy DB and cached for _VIEW_HISTORY_TTL_S so the broadcast loop
+    doesn't requery on every tick."""
+    if not device_sn:
+        return []
+    now = time.time()
+    cached = _view_history_cache.get(device_sn)
+    if cached and now - cached[0] < _VIEW_HISTORY_TTL_S:
+        return cached[1]
+    try:
+        rows = state.energy.history(
+            device_sn, hours=LIVE_CHART_HOURS, bucket_s=LIVE_CHART_INTERVAL_S,
+        )
+        out = [_energy_db_row_to_chart_point(p) for p in rows]
+        _view_history_cache[device_sn] = (now, out)
+        return out
+    except Exception as e:
+        log.debug("view history hydrate for %s failed: %s", device_sn, e)
+        return []
+
+
+def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
+    """Build the WS/REST status payload.
+
+    `view_device_id` is the per-browser cookie value indicating which
+    Jackery this client wants to see. When it matches the bridge-active
+    device (or is missing/unknown), we return the same rich response we
+    always have. When it points at a different device on the account, we
+    synthesize the response from cached per-device data: telemetry from
+    `cloud_meta.devices_telemetry`, packs from the per-device cache, live
+    history from the energy DB. The bridge polls every device on every
+    tick, so all this data is fresh.
+
+    `cloud.selected_device_id` in the response is overridden with the
+    chosen view so the frontend's `activeJackeryDevice()` reflects the
+    per-browser selection without other code changes.
+    """
+    cloud_src = state.last_cloud_meta or {}
+    bridge_active_id = cloud_src.get("selected_device_id")
+    bridge_active_sn = state.device.device_sn if state.device else None
+
+    # Resolve the view override against currently-known devices. A stale
+    # cookie pointing at a device that's no longer on the account just
+    # falls through to the bridge-active view.
+    view_meta: dict | None = None
+    if view_device_id and str(view_device_id) != str(bridge_active_id or ""):
+        for d in (cloud_src.get("devices") or []):
+            if str(d.get("device_id")) == str(view_device_id):
+                view_meta = d
+                break
+
+    if view_meta is None:
+        device_info = state.device.to_dict() if state.device else None
+        view_sn = bridge_active_sn
+        view_id = bridge_active_id
+        telemetry = state.last_status
+        view_packs = state.battery_packs_by_sn.get(view_sn or "", [])
+        history = list(state.history)
+        model_code = getattr(state.device, "model_code", None)
+    else:
+        view_sn = str(view_meta.get("device_sn") or "") or None
+        view_id = str(view_meta["device_id"])
+        device_info = {
+            "name": view_meta.get("name") or view_meta.get("model_name"),
+            "address": "cloud",
+            "rssi": 0,
+            "model_code": view_meta.get("model_code"),
+            "device_sn": view_sn,
+            "device_type": device_type_for(view_meta.get("model_code")),
+        }
+        devs_t = (cloud_src.get("devices_telemetry") or {})
+        entry = devs_t.get(view_sn) or {}
+        telemetry = entry.get("telemetry")
+        view_packs = state.battery_packs_by_sn.get(view_sn or "", [])
+        history = _view_history(view_sn)
+        model_code = view_meta.get("model_code")
+
     # Augment telemetry with the precomputed system SOC so the SOC card
     # renders the right number on the very first paint (no main→system
-    # flash). Falls back to the raw telemetry untouched when the active
-    # device has no expansion packs (e.g. HomePower 3000).
-    telemetry = state.last_status
-    active_sn = state.device.device_sn if state.device else None
-    active_packs = state.battery_packs_by_sn.get(active_sn or "", [])
-    if telemetry and active_packs:
+    # flash). Falls back to the raw telemetry untouched when the device
+    # has no expansion packs (e.g. HomePower 3000).
+    if telemetry and view_packs:
         main_pct = telemetry.get("battery_percent")
         if main_pct is not None:
-            model_code = getattr(state.device, "model_code", None)
-            sys_pct = _system_soc_pct(float(main_pct), active_sn, model_code)
+            sys_pct = _system_soc_pct(float(main_pct), view_sn, model_code)
             telemetry = {**telemetry,
                          "main_soc_pct": main_pct,
                          "system_soc_pct": sys_pct}
+
+    energy = None
+    try:
+        if view_sn:
+            energy = _decorate_totals_with_savings(
+                state.energy.totals(view_sn), view_sn,
+            )
+    except Exception as e:
+        log.debug("energy totals lookup failed: %s", e)
+
+    # Shallow-copy cloud_meta so we can override selected_device_id without
+    # mutating the cached state shared with all other clients.
+    cloud_out = dict(state.last_cloud_meta) if state.last_cloud_meta else None
+    if cloud_out is not None:
+        cloud_out["selected_device_id"] = view_id
+
     return {
         "connection_status": state.connection_status,
         "connection_error": state.connection_error,
@@ -574,13 +722,13 @@ def serialize_status() -> dict[str, Any]:
         # Piggy-back packs on the WS broadcast so per-pack rows update at
         # the same cadence as the SOC card. Empty list for devices without
         # packs (e.g. HomePower 3000) — UI hides the card on empty.
-        "battery_packs": active_packs,
-        "history": list(state.history),
+        "battery_packs": view_packs,
+        "history": history,
         "mock_mode": state.backend == "mock",
         "backend": state.backend,
         "low_battery_threshold": user_settings.get("low_battery_threshold"),
         "source": state.last_source,
-        "cloud": state.last_cloud_meta,
+        "cloud": cloud_out,
         "energy": energy,
     }
 
@@ -1970,21 +2118,21 @@ async def _auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-def _set_session_cookie(response: Response, username: str) -> None:
-    token = auth.make_session(username)
+def _set_app_cookie(response: Response, name: str, value: str,
+                    max_age: int) -> None:
+    """Set a long-lived first-party cookie with the flags we use everywhere
+    in this app: HttpOnly, SameSite=Lax, path=/, and Secure=False because
+    Cloudflare Tunnel terminates TLS at the edge — the request to our
+    origin is HTTP, so Secure would block the cookie."""
     response.set_cookie(
-        auth.COOKIE_NAME,
-        token,
-        max_age=auth.SESSION_TTL_S,
-        httponly=True,
-        samesite="lax",
-        # Secure cookies require HTTPS — Cloudflare Tunnel terminates TLS at
-        # the edge, so the request to our origin is HTTP and `Secure` would
-        # block the cookie. The CF-injected `X-Forwarded-Proto` header is
-        # how we know the original was HTTPS.
-        secure=False,
-        path="/",
+        name, value, max_age=max_age,
+        httponly=True, samesite="lax", secure=False, path="/",
     )
+
+
+def _set_session_cookie(response: Response, username: str) -> None:
+    _set_app_cookie(response, auth.COOKIE_NAME,
+                    auth.make_session(username), auth.SESSION_TTL_S)
 
 
 @app.post("/api/auth/setup")
@@ -2060,8 +2208,9 @@ def setup_page():
 
 
 @app.get("/api/status")
-def api_status():
-    return serialize_status()
+def api_status(request: Request):
+    view_id = request.cookies.get(VIEW_DEVICE_COOKIE)
+    return serialize_status(view_device_id=view_id)
 
 
 @app.post("/api/reconnect")
@@ -2331,14 +2480,36 @@ async def api_forecast(device_sn: str | None = None):
     if not device_sn:
         return {"error": "no active device", "configured": True}
 
-    # Starting SOC: the latest battery reading we have. Falls back to 50% if
-    # the bridge hasn't returned a fresh poll yet (the simulation still works,
-    # the curve will just be offset by the SOC error).
+    # Resolve the model_code + current SOC from the *requested* device's
+    # cloud_meta entry (or its energy-DB row), not from `state.device` —
+    # otherwise asking /api/forecast?device_sn=<secondary> while bridge-
+    # active is the primary returns the secondary's history paired with
+    # the primary's capacity / SOC, which produces nonsense (and is the
+    # source of the multi-device "wrong forecast" symptom).
+    bridge_active_sn = state.device.device_sn if state.device else None
+    bridge_is_target = bridge_active_sn and str(bridge_active_sn) == str(device_sn)
+    model_code: int | None = None
     main_soc = 50.0
-    if state.last_status and state.last_status.get("battery_percent") is not None:
-        main_soc = float(state.last_status["battery_percent"])
+    cloud = state.last_cloud_meta or {}
+    if bridge_is_target:
+        # Bridge-active path: use the rich state.device + state.last_status.
+        model_code = getattr(state.device, "model_code", None)
+        if state.last_status and state.last_status.get("battery_percent") is not None:
+            main_soc = float(state.last_status["battery_percent"])
+    else:
+        # Non-active device: pull model_code from cloud_meta.devices and
+        # current SOC from cloud_meta.devices_telemetry. Both are kept up
+        # to date by the bridge polling every device on every tick.
+        for d in (cloud.get("devices") or []):
+            if str(d.get("device_sn")) == str(device_sn):
+                mc = d.get("model_code")
+                model_code = int(mc) if mc is not None else None
+                break
+        entry = (cloud.get("devices_telemetry") or {}).get(device_sn) or {}
+        tele = entry.get("telemetry") or {}
+        if tele.get("battery_percent") is not None:
+            main_soc = float(tele["battery_percent"])
 
-    model_code = getattr(state.device, "model_code", None) if state.device else None
     # _total_capacity_wh() auto-derives total capacity from the live
     # battery_packs cache (main + N x pack), with the manual override
     # winning if set and the spec capacity as the fallback.
@@ -3179,7 +3350,7 @@ async def api_clear_credentials():
     state.device = None
     state.last_status = None
     state.last_update_ts = None
-    await broadcast({"type": "status", "data": serialize_status()})
+    await broadcast_status("status")
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
@@ -3609,7 +3780,7 @@ async def api_pause_polling(body: dict | None = None):
         result = await pauser(seconds)
     except DeviceClientError as e:
         raise HTTPException(400, str(e)) from e
-    await broadcast({"type": "status", "data": serialize_status()})
+    await broadcast_status("status")
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
@@ -3623,7 +3794,7 @@ async def api_resume_polling():
         result = await resumer()
     except DeviceClientError as e:
         raise HTTPException(400, str(e)) from e
-    await broadcast({"type": "status", "data": serialize_status()})
+    await broadcast_status("status")
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
 
 
@@ -3646,10 +3817,51 @@ async def api_select_device(body: dict):
     state.last_status = None
     state.last_update_ts = None
     state.reset_live_history()
-    await broadcast({"type": "status", "data": serialize_status()})
+    await broadcast_status("status")
 
     asyncio.create_task(force_poll())
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
+
+
+@app.post("/api/view/select_device")
+async def api_view_select_device(body: dict, request: Request, response: Response):
+    """Per-browser device-view picker. Sets a `view_device_id` cookie so
+    this browser's UI renders that Jackery's data, without changing what
+    the bridge polls (every device is polled on every tick) or which
+    device the automation worker manages. Two browsers can therefore
+    look at different Jackerys at the same time without stomping each
+    other.
+
+    Validates against the current account's known devices so a typo
+    can't poison the cookie. Also bumps the connected WS (if any) so
+    the same browser's open WebSocket switches view immediately
+    instead of waiting until reconnect."""
+    device_id = (body or {}).get("device_id")
+    if not device_id:
+        raise HTTPException(400, "device_id required")
+    cloud = state.last_cloud_meta or {}
+    devs = cloud.get("devices") or []
+    if not any(str(d.get("device_id")) == str(device_id) for d in devs):
+        raise HTTPException(404, "device not found in current account")
+    _set_app_cookie(response, VIEW_DEVICE_COOKIE, str(device_id),
+                    VIEW_DEVICE_COOKIE_TTL_S)
+    # Update any of THIS browser's open WS connections so the next
+    # broadcast switches view without waiting for a reconnect. We can't
+    # uniquely identify "this browser's" WS from the HTTP request, so we
+    # match by the previous view_device_id cookie value: any WS that
+    # connected with the same prior selection (including None) gets
+    # bumped. In practice each browser usually has at most one WS open.
+    prior = request.cookies.get(VIEW_DEVICE_COOKIE)
+    new_id = str(device_id)
+    # Updating values in-place — no key insert/delete, so iterating the
+    # live dict is safe.
+    for ws, prior_view in state.ws_clients.items():
+        if prior_view == prior:
+            state.ws_clients[ws] = new_id
+    # Push an immediate refresh so the UI doesn't wait for the next
+    # poll tick to repaint.
+    await broadcast_status("status")
+    return {"ok": True, "device_id": new_id}
 
 
 async def force_poll():
@@ -3673,7 +3885,7 @@ async def force_poll():
         state.last_status = status_dict
         state.last_update_ts = time.time()
 
-    await broadcast({"type": "telemetry", "data": serialize_status()})
+    await broadcast_status("telemetry")
 
 
 @app.websocket("/ws")
@@ -3685,16 +3897,23 @@ async def websocket_endpoint(ws: WebSocket):
         if not auth.verify_session(token):
             await ws.close(code=1008)  # policy violation
             return
+    # Stash the per-browser view selection from the cookie so later
+    # broadcasts render this client's chosen Jackery. None means "no
+    # explicit pick, follow the bridge-active device."
+    view_id = ws.cookies.get(VIEW_DEVICE_COOKIE) or None
     await ws.accept()
-    state.ws_clients.add(ws)
+    state.ws_clients[ws] = view_id
     try:
-        await ws.send_text(json.dumps({"type": "snapshot", "data": serialize_status()}))
+        await ws.send_text(json.dumps({
+            "type": "snapshot",
+            "data": serialize_status(view_device_id=view_id),
+        }))
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
-        state.ws_clients.discard(ws)
+        state.ws_clients.pop(ws, None)
 
 
 # Static UI

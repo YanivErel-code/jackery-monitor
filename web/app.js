@@ -2696,14 +2696,19 @@ function renderBacktestResult(j) {
 $('device-select')?.addEventListener('change', async (e) => {
   const device_id = e.target.value;
   if (!device_id) return;
+  // Per-browser view selection — sets a cookie so this browser's UI shows
+  // the chosen Jackery without changing what other browsers see, and
+  // without changing which device the automation worker manages. The
+  // bridge polls every device on every tick, so picking a non-bridge-
+  // active device just switches which slice of cloud_meta we render.
   try {
-    await fetch('/api/select_device', {
+    await fetch('/api/view/select_device', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device_id }),
     });
   } catch (err) {
-    console.warn('select_device failed', err);
+    console.warn('view/select_device failed', err);
   }
 });
 
@@ -3673,7 +3678,11 @@ async function fetchForecast() {
     if (p) body.textContent = p;
   };
   try {
-    const r = await fetch('/api/forecast');
+    // Forecast is per-device — pass the currently-viewed Jackery's SN so
+    // the Forecast tab follows the per-browser picker.
+    const sn = activeJackeryDevice()?.device_sn;
+    const url = sn ? `/api/forecast?device_sn=${encodeURIComponent(sn)}` : '/api/forecast';
+    const r = await fetch(url);
     if (!r.ok) { showNeedsConfig(); return; }
     const j = await r.json();
     if (!j.configured) {
@@ -3839,14 +3848,49 @@ async function fetchEodForecast() {
   const el = $('eod-forecast');
   if (!el) return;
   _eodLastFetchAt = Date.now();
+
+  // Helper: surface the "still calibrating" state with progress hints
+  // instead of silently hiding. The forecast tab has the same info; this
+  // saves the user a tab switch to find out why the hero number is
+  // missing for a freshly-added device.
+  const showCalibrating = (readiness) => {
+    const r = readiness || {};
+    const haveH = Math.round(r.have_hours ?? 0);
+    const needH = r.needed_hours ?? 24;
+    const haveW = r.have_idle_windows ?? 0;
+    const needW = r.needed_idle_windows ?? 5;
+    const labelEl = el.querySelector('.eod-label');
+    if (labelEl) labelEl.textContent = 'Calibrating';
+    const pct = $('eod-pct');
+    const trend = $('eod-trend');
+    if (trend) { trend.textContent = ''; trend.classList.remove('up', 'down'); }
+    // Reuse #eod-pct as the message slot — keeps the layout stable.
+    if (pct) pct.textContent = `${haveH}/${needH} h · ${haveW}/${needW} cycles`;
+    el.classList.remove('low');
+    el.classList.add('calibrating');
+    el.title = 'Forecaster needs more history before it can predict this device. '
+      + `Need ${needH}h of samples (${haveH}h captured) and ${needW} clean discharge windows (${haveW} so far).`;
+    el.hidden = false;
+  };
+
   try {
-    const r = await fetch('/api/forecast');
+    // Forecast is per-device — pass the currently-viewed Jackery's SN so
+    // the hero card's prediction follows the picker (each browser may be
+    // viewing a different device).
+    const sn = activeJackeryDevice()?.device_sn;
+    const url = sn ? `/api/forecast?device_sn=${encodeURIComponent(sn)}` : '/api/forecast';
+    const r = await fetch(url);
     if (!r.ok) { el.hidden = true; return; }
     const j = await r.json();
-    if (!j.configured || j.error || !Array.isArray(j.forecast) || !j.forecast.length) {
+    if (!j.configured || j.error) { el.hidden = true; return; }
+    // Readiness gate failed — show progress instead of hiding.
+    if (j.ready === false) { showCalibrating(j.readiness); return; }
+    if (!Array.isArray(j.forecast) || !j.forecast.length) {
       el.hidden = true;
       return;
     }
+    // Ready path — clear any prior calibrating styling.
+    el.classList.remove('calibrating');
     const fc = j.forecast;
     // The first forecast hour represents "now-ish"; its solar tells us
     // whether we're currently in daylight or darkness.
@@ -3878,6 +3922,9 @@ async function fetchEodForecast() {
 
     const pct = $('eod-pct');
     const trend = $('eod-trend');
+    // Restore the original tooltip on the ready path (showCalibrating
+    // overrode it with calibration progress).
+    el.title = 'Predicted state of charge at the next sun-phase boundary (sunset during the day, sunrise at night). Refits every 30 min and on live SOC drift.';
     pct.textContent = Math.round(best.predicted_soc);
     const start = j.starting_soc_pct ?? best.predicted_soc;
     _eodAnchorSOC = start;

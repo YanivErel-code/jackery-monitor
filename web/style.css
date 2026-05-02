@@ -646,6 +646,12 @@ main {
   background: rgba(239,68,68,.06);
 }
 .eod-forecast.low .eod-row { color: #ef4444; }
+/* Calibrating state — shown when forecast_readiness fails. Replaces the
+   numeric prediction with a progress hint so the user knows the card is
+   waiting on data, not silently broken. */
+.eod-forecast.calibrating .eod-row { font-size: 13px; font-weight: 500; color: var(--text-dim); }
+.eod-forecast.calibrating .eod-row small { display: none; }
+.eod-forecast.calibrating { border-style: dashed; }
 @media (max-width: 600px) {
   .eod-forecast { top: 60px; right: 12px; min-width: 84px; padding: 6px 10px; }
   .eod-row { font-size: 18px; }

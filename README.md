@@ -16,7 +16,10 @@ and suggests one-click tweaks** to the algorithm constants.
 Designed to run on a Synology NAS in Docker. Works anywhere with Docker
 Compose. Multi-device — handles multiple Jackery devices on the same account
 (e.g. Explorer 5000 Plus with up to 5 expansion packs + HomePower 3000) and
-per-device automation rules and AI insights.
+per-device automation rules and AI insights. **Each browser picks which
+Jackery it's viewing independently** (per-browser cookie), so the phone and
+the laptop can look at different units at the same time without stomping
+each other.
 
 It connects through the **Jackery cloud account** (the same one the official app uses). On first launch the dashboard prompts you to sign in; credentials are encrypted on disk (AES-256-GCM on Linux/Synology, macOS Keychain on Mac) and never leave your host.
 

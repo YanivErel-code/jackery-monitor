@@ -73,6 +73,9 @@ PORT = int(os.environ.get("BRIDGE_PORT", "8766"))
 # inside the settings module. We read them per-loop-iteration so a settings
 # change applies on the next cycle without a bridge restart.
 import settings as user_settings  # noqa: E402  -- after env reads above
+from device_client import (  # noqa: E402  shares the model_code -> "portable"/"box" heuristic with the server
+    device_type_for,
+)
 
 # ---- credential storage (multi-backend) ----
 #
@@ -575,7 +578,7 @@ async def cloud_loop() -> None:
                     "rssi": 0,
                     "model_code": sel.model_code,
                     "device_sn": sel.device_sn,
-                    "device_type": "portable" if sel.model_code != 22 else "box",
+                    "device_type": device_type_for(sel.model_code),
                 }
                 log.info("Cloud device active: %s (model %s); %d total on account",
                          sel.name, sel.model_code, len(devs))
@@ -803,7 +806,7 @@ async def handle(method: str, params: dict) -> dict:
                 "rssi": 0,
                 "model_code": match["model_code"],
                 "device_sn": match["device_sn"],
-                "device_type": "portable" if match["model_code"] != 22 else "box",
+                "device_type": device_type_for(match["model_code"]),
             }
             # Drop stale telemetry so the UI doesn't briefly show old data
             state.cloud_telemetry = None

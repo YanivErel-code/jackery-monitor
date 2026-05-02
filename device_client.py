@@ -44,6 +44,15 @@ class DeviceInfo:
         }
 
 
+def device_type_for(model_code: int | None) -> str:
+    """Classify a device by Jackery model code into the form-factor
+    bucket the UI uses. Currently model_code=22 is the HomePower 3000
+    "box"; everything else (5000 Plus, etc.) is "portable". Centralized
+    here so the heuristic doesn't drift across the bridge poll loop and
+    the per-browser-view synthesizer."""
+    return "box" if model_code == 22 else "portable"
+
+
 class DeviceClientError(RuntimeError):
     pass
 
