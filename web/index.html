@@ -879,6 +879,26 @@
 
     <!-- ============== SETTINGS TAB ============== -->
     <section id="tab-settings" class="tab-panel" hidden>
+      <!-- Sub-tabs inside Settings. Splits the seven cards into four
+           thematic groups so the user doesn't have to scroll past
+           ~3500 px of unrelated config to find one input. Cards
+           themselves are unchanged — we only wrap them in
+           <div data-settings-group="..."> containers and toggle
+           which group is visible. The active group persists per
+           browser via localStorage so a refresh lands you back on
+           the same view. -->
+      <nav id="settings-subtabs" class="settings-subtabs" role="tablist" aria-label="Settings sections">
+        <button class="settings-subtab on" type="button" role="tab"
+                data-settings-tab="general">General</button>
+        <button class="settings-subtab" type="button" role="tab"
+                data-settings-tab="intelligence">Intelligence</button>
+        <button class="settings-subtab" type="button" role="tab"
+                data-settings-tab="rates">Rates</button>
+        <button class="settings-subtab" type="button" role="tab"
+                data-settings-tab="backup">Backup</button>
+      </nav>
+
+      <div data-settings-group="general">
       <section class="card device-card">
         <div class="card-header">
           <h2>Runtime settings</h2>
@@ -919,7 +939,9 @@
           </div>
         </div>
       </section>
+      </div><!-- /data-settings-group=general -->
 
+      <div data-settings-group="intelligence" hidden>
       <section class="card device-card">
         <div class="card-header">
           <h2>Anthropic API key</h2>
@@ -989,7 +1011,9 @@
           <div id="ak-models-status" class="hint" style="margin-top:6px"></div>
         </div>
       </section>
+      </div><!-- /data-settings-group=intelligence -->
 
+      <div data-settings-group="rates" hidden>
       <section class="card device-card">
         <div class="card-header">
           <h2>Electricity rates</h2>
@@ -1031,7 +1055,9 @@
           </div>
         </form>
       </section>
+      </div><!-- /data-settings-group=rates -->
 
+      <div data-settings-group="backup" hidden>
       <!-- ============== BACKUP & RESTORE ============== -->
       <!-- Daily SMB backup of /data to a remote NAS, with on-demand restore.
            Three cards: (1) destination credentials, (2) status + run-now,
@@ -1194,6 +1220,7 @@
         </div>
         <div id="backup-snapshots" class="backup-snapshots"><div class="hint">Click <em>List snapshots</em> to load.</div></div>
       </section>
+      </div><!-- /data-settings-group=backup -->
     </section>
 
     <div id="alert-banner" class="alert" hidden></div>

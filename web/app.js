@@ -350,7 +350,7 @@ function switchTab(name) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadBackupAll(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
     loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
@@ -359,6 +359,37 @@ function switchTab(name) {
   }
   if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); }
 }
+
+// ---- Settings sub-tabs ---------------------------------------------------
+// The Settings tab grew enough to need internal grouping (general /
+// intelligence / rates / backup). Each card is wrapped in a
+// <div data-settings-group="..."> in index.html; this toggles which
+// group is visible. Selection persists per-browser via localStorage so
+// a refresh / reload lands you back on the same view.
+const SETTINGS_SUBTAB_KEY = 'jackery-settings-subtab';
+const SETTINGS_SUBTABS = ['general', 'intelligence', 'rates', 'backup'];
+
+function selectSettingsSubtab(name) {
+  if (!SETTINGS_SUBTABS.includes(name)) name = 'general';
+  document.querySelectorAll('.settings-subtab').forEach(btn => {
+    btn.classList.toggle('on', btn.dataset.settingsTab === name);
+    btn.setAttribute('aria-selected', btn.dataset.settingsTab === name ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-settings-group]').forEach(group => {
+    group.toggleAttribute('hidden', group.dataset.settingsGroup !== name);
+  });
+  try { localStorage.setItem(SETTINGS_SUBTAB_KEY, name); } catch (_) {}
+}
+
+function restoreSettingsSubtab() {
+  let saved = null;
+  try { saved = localStorage.getItem(SETTINGS_SUBTAB_KEY); } catch (_) {}
+  selectSettingsSubtab(saved || 'general');
+}
+
+document.querySelectorAll('.settings-subtab').forEach((btn) => {
+  btn.addEventListener('click', () => selectSettingsSubtab(btn.dataset.settingsTab));
+});
 
 // Tab-level "new insights pending" badge. Lights up when the daily
 // advisor (or a manual run) leaves pending items behind and the user

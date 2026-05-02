@@ -200,6 +200,47 @@ main {
   border-bottom: 1px solid var(--border-soft);
   margin-bottom: 22px;
 }
+
+/* Sub-tabs inside the Settings panel — visually distinct from the
+   main tab bar (which is "underline" style) so the user can read at
+   a glance "I'm in Settings, looking at the Backup section." Pills
+   on a faint surface, with the active pill in the accent color.
+   On mobile the row scrolls horizontally rather than wrapping so it
+   stays scannable. */
+.settings-subtabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 22px;
+  background: var(--bg-elev-2, rgba(255,255,255,.03));
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 10px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.settings-subtab {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+  white-space: nowrap;
+}
+.settings-subtab:hover { color: var(--text); }
+.settings-subtab.on {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+@media (max-width: 600px) {
+  .settings-subtabs { padding: 3px; gap: 3px; }
+  .settings-subtab { font-size: 12px; padding: 7px 12px; }
+}
 .tab {
   background: transparent;
   border: none;
