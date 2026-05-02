@@ -2076,6 +2076,7 @@ async def lifespan(app: FastAPI):
     state.backup_task = asyncio.create_task(
         backup.backup_loop(
             get_schedule=lambda: user_settings.get("backup_schedule_hour"),
+            get_keep_count=lambda: user_settings.get("backup_keep_count"),
         ),
     )
     yield
@@ -4145,9 +4146,11 @@ def api_backup_status():
 @app.post("/api/backup/run")
 async def api_backup_run_now():
     """Trigger a one-shot backup right now. Same code path as the
-    scheduled run. Returns the BackupResult so the UI can show inline
-    success/failure without waiting for the next status poll."""
-    result = await asyncio.to_thread(backup.run_backup)
+    scheduled run, including post-upload retention pruning. Returns
+    the BackupResult so the UI can show inline success/failure
+    without waiting for the next status poll."""
+    keep = user_settings.get("backup_keep_count")
+    result = await asyncio.to_thread(backup.run_backup, keep_count=keep)
     return result.as_dict()
 
 

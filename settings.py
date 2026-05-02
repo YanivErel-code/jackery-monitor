@@ -84,6 +84,15 @@ SCHEMA: dict[str, dict[str, Any]] = {
         "label": "Backup daily-run hour",
         "hint": "Local hour (0-23) when the daily SMB backup to the remote NAS runs. 3 = 3 AM local. Configure the remote target on the Settings page → Backup & Restore section before this fires for the first time.",
     },
+    "backup_keep_count": {
+        "env": "JACKERY_BACKUP_KEEP",
+        "default": 30,
+        "type": "int",
+        "min": 1,
+        "max": 3650,
+        "label": "Snapshots to keep",
+        "hint": "How many of the most recent successful snapshots to keep on the NAS. Older ones are deleted after each successful run. Set to 365 for a year of dailies; very large values approximate 'keep forever'. Only directories matching our YYYY-MM-DD_HHMMSS naming are pruned — manual files alongside are untouched.",
+    },
 }
 
 

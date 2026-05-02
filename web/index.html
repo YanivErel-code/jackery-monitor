@@ -1135,6 +1135,21 @@
                 <span id="backup-schedule-msg" class="hint" hidden style="margin-left:12px"></span>
               </div>
             </div>
+            <!-- Retention. Bound to backup_keep_count; checked after
+                 every successful upload (manual or scheduled). Older
+                 snapshots beyond the count get pruned. Manual files /
+                 non-snapshot dirs in the share are left alone. -->
+            <div class="settings-row">
+              <label class="settings-label" for="backup-keep-count">
+                <span class="settings-label-text">Snapshots to keep</span>
+                <span class="settings-hint">After each successful upload, snapshots beyond this count are deleted (newest kept). <code>30</code> ≈ 1 month of dailies. <code>365</code> ≈ a year. Saves automatically.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-keep-count" type="number" min="1" max="3650" step="1" class="device-select" style="width:90px" />
+                <span class="hint" style="margin-left:8px">snapshots</span>
+                <span id="backup-keep-msg" class="hint" hidden style="margin-left:12px"></span>
+              </div>
+            </div>
           </div>
           <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center">
             <button class="btn btn-primary" type="submit">Save</button>

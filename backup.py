@@ -591,6 +591,66 @@ def _record_run(result: BackupResult) -> None:
     _save_status(s)
 
 
+# Snapshot dir names are dir-stamps from _now_iso_local: YYYY-MM-DD_HHMMSS.
+# We only prune dirs that match this exact shape so any manually-created
+# directories the user dropped into the share alongside our snapshots stay
+# untouched. Non-greedy / forgiving by design.
+_SNAPSHOT_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
+
+
+def prune_old_snapshots(creds: dict | None = None,
+                        *, keep_count: int) -> dict[str, Any]:
+    """Delete snapshot directories on the remote past the keep_count
+    cutoff (newest first). Returns a summary dict so callers can log
+    'pruned 3 of 33 snapshots' instead of a silent side effect.
+
+    Only touches directories matching `YYYY-MM-DD_HHMMSS` so
+    user-dropped folders in the same share are safe. Failures on a
+    single rmtree don't abort the whole sweep — we log + carry on
+    so a temporarily-locked dir doesn't permanently block retention.
+    """
+    if keep_count < 1:
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": "keep_count must be >= 1"}
+    creds = creds or backup_creds.load()
+    if not creds:
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": "no_credentials"}
+    subdir = (creds.get("subdir") or "").strip("/")
+    try:
+        entries = _smb_ls(creds, subdir)
+    except SMBClientError as e:
+        merged = str(e).lower()
+        if "nt_status_object_name_not_found" in merged or "no such" in merged:
+            # Subdir doesn't exist — nothing to prune.
+            return {"considered": 0, "pruned": 0, "kept": 0}
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": f"ls_failed: {e}"}
+
+    # Newest first: directory names are timestamp-prefixed, so reverse
+    # string sort = chronological newest first.
+    snapshot_dirs = sorted(
+        (e["name"] for e in entries
+         if e["is_dir"] and _SNAPSHOT_DIR_RE.match(e["name"])),
+        reverse=True,
+    )
+    keep = snapshot_dirs[:keep_count]
+    drop = snapshot_dirs[keep_count:]
+    pruned = 0
+    for name in drop:
+        path = f"{subdir}/{name}" if subdir else name
+        try:
+            _smb_rmtree(creds, path)
+            pruned += 1
+        except SMBClientError as e:
+            log.warning("prune: rmtree of %s failed: %s", path, e)
+    if pruned:
+        log.info("prune: removed %d old snapshot(s); kept %d most recent",
+                 pruned, len(keep))
+    return {"considered": len(snapshot_dirs), "pruned": pruned,
+            "kept": len(keep)}
+
+
 def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
     """List every snapshot directory inside the user's subdir on the
     remote. Each entry has {dir, ts, iso, total_bytes, files} drawn
@@ -657,15 +717,21 @@ def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
 
 
 def run_backup(*, creds: dict | None = None,
-               include_key: bool | None = None) -> BackupResult:
+               include_key: bool | None = None,
+               keep_count: int | None = None) -> BackupResult:
     """Synchronous, end-to-end backup. Safe to call from a thread.
 
     Steps:
       1. Resolve creds (param > stored).
       2. Stage the snapshot in a tempdir.
-      3. Mount remote, copy staged dir, verify checksums.
-      4. Unmount.
+      3. Open SMB session, upload staged dir, size-check.
+      4. Optionally prune old snapshots beyond keep_count.
       5. Persist run history.
+
+    `keep_count`: when set, after a successful upload we delete
+    snapshot dirs past this count (newest kept). None / 0 means
+    'no retention, keep forever'. Prune failures are logged but
+    don't fail the backup — the snapshot is already written.
     """
     started = time.time()
     ts, iso, dir_stamp = _now_iso_local()
@@ -753,6 +819,20 @@ def run_backup(*, creds: dict | None = None,
             )
             _record_run(result)
             return result
+
+        # Prune old snapshots — best-effort, never fails the run.
+        # The fresh snapshot is already on disk and recorded; if
+        # retention can't reach the NAS for some reason the worst
+        # case is one extra night of unpruned history.
+        if keep_count is not None and keep_count > 0:
+            try:
+                summary = prune_old_snapshots(creds=creds,
+                                               keep_count=keep_count)
+                if summary.get("pruned"):
+                    log.info("post-backup prune: removed %d snapshot(s)",
+                             summary["pruned"])
+            except Exception as e:
+                log.warning("post-backup prune failed: %s", e)
 
         result = BackupResult(
             ok=True, ts=ts, iso=iso,
@@ -903,17 +983,25 @@ def _seconds_until_next_run(target_hour: int) -> float:
     return max(1.0, (target - now).total_seconds())
 
 
-async def backup_loop(get_schedule: Any | None = None) -> None:
+async def backup_loop(get_schedule: Any | None = None,
+                      get_keep_count: Any | None = None) -> None:
     """Background loop. Sleeps until the configured daily hour, then
-    runs a backup (in a thread, since SMB mount + sqlite copy block).
+    runs a backup (in a thread, since smbclient + sqlite copy block).
 
-    `get_schedule` is a callable that returns the current target hour
+    `get_schedule` is a callable returning the current target hour
     (int 0-23 in local time). Wired to settings.get(...) by server.py
     so the user can change the hour at runtime without restarting.
     Defaults to 03:00.
+
+    `get_keep_count` is a callable returning the current retention
+    count (snapshots to keep). Read fresh on every iteration so a
+    settings change applies on the next nightly run. None means
+    'keep forever' — retention disabled.
     """
     if get_schedule is None:
         get_schedule = lambda: 3  # noqa: E731
+    if get_keep_count is None:
+        get_keep_count = lambda: None  # noqa: E731
 
     while True:
         try:
@@ -922,10 +1010,11 @@ async def backup_loop(get_schedule: Any | None = None) -> None:
             log.info("backup loop: next run in %.1fh (at %02d:00 local)",
                      wait_s / 3600, int(schedule) if schedule is not None else 3)
             await asyncio.sleep(wait_s)
-            # Do the work in a thread so sqlite + mount don't block
+            # Do the work in a thread so sqlite + smbclient don't block
             # the event loop.
             log.info("backup loop: starting scheduled run")
-            result = await asyncio.to_thread(run_backup)
+            keep = get_keep_count()
+            result = await asyncio.to_thread(run_backup, keep_count=keep)
             if result.ok:
                 log.info("backup loop: ok (%d files, %d bytes, %.1fs)",
                          result.files_written, result.bytes_written,

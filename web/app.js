@@ -5689,52 +5689,81 @@ $('backup-run-now')?.addEventListener('click',
 $('backup-run-now-inline')?.addEventListener('click',
   () => _triggerBackupNow('backup-run-now-inline', 'backup-creds-msg'));
 
-// Daily-backup hour: read once on first show + auto-save on change.
-// The same key (backup_schedule_hour) the backup_loop reads every
-// iteration, so the change applies on the next tick without restart.
-let _backupScheduleSaveTimer = null;
+// Generic debounced auto-save for one numeric backup setting. Both the
+// daily-hour input and the retention input use this — the only thing
+// that changes per setting is the key, the bounds, and the formatter
+// for the success message. Keeps the keystroke -> /api/settings POST
+// throttled to one call per 500ms idle window.
+function _wireBackupNumericSetting(inputId, msgId, settingKey, opts) {
+  const el = $(inputId);
+  if (!el) return;
+  let timer = null;
+  el.addEventListener('input', () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const n = Number(el.value);
+      if (!Number.isInteger(n) || n < opts.min || n > opts.max) {
+        _backupSetMsg(msgId, opts.outOfRangeMsg, 'err');
+        return;
+      }
+      _backupSetMsg(msgId, 'Saving…', '');
+      try {
+        const r = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ [settingKey]: n }),
+        });
+        if (!r.ok) {
+          let j = {};
+          try { j = await r.json(); } catch (_) {}
+          throw new Error(j.detail || j.error || ('HTTP ' + r.status));
+        }
+        _backupSetMsg(msgId, opts.okMsg(n), 'ok');
+        setTimeout(() => _backupSetMsg(msgId, '', ''), 2500);
+      } catch (err) {
+        _backupSetMsg(msgId, 'Save failed: ' + (err.message || err), 'err');
+      }
+    }, 500);
+  });
+}
+
+_wireBackupNumericSetting('backup-schedule-hour', 'backup-schedule-msg',
+  'backup_schedule_hour', {
+    min: 0, max: 23,
+    outOfRangeMsg: 'Hour must be 0–23.',
+    okMsg: (n) => `Saved — next run at ${String(n).padStart(2, '0')}:00.`,
+  });
+
+_wireBackupNumericSetting('backup-keep-count', 'backup-keep-msg',
+  'backup_keep_count', {
+    min: 1, max: 3650,
+    outOfRangeMsg: 'Must be between 1 and 3650.',
+    okMsg: (n) => `Saved — keeping ${n} snapshot${n === 1 ? '' : 's'}.`,
+  });
+
 async function loadBackupSchedule() {
-  const el = $('backup-schedule-hour');
-  if (!el || el.dataset.loaded === '1') return;
+  const hourEl = $('backup-schedule-hour');
+  const keepEl = $('backup-keep-count');
+  if ((!hourEl || hourEl.dataset.loaded === '1')
+      && (!keepEl || keepEl.dataset.loaded === '1')) return;
   try {
     const r = await fetch('/api/settings');
     const j = await r.json();
     // /api/settings returns {settings: [{key, value, label, hint, ...}]}
-    const entry = (j?.settings || []).find(s => s.key === 'backup_schedule_hour');
-    if (entry && entry.value != null) el.value = String(entry.value);
-    el.dataset.loaded = '1';
+    const byKey = Object.fromEntries(
+      (j?.settings || []).map(s => [s.key, s]));
+    const hourEntry = byKey['backup_schedule_hour'];
+    if (hourEl && hourEntry && hourEntry.value != null) {
+      hourEl.value = String(hourEntry.value);
+      hourEl.dataset.loaded = '1';
+    }
+    const keepEntry = byKey['backup_keep_count'];
+    if (keepEl && keepEntry && keepEntry.value != null) {
+      keepEl.value = String(keepEntry.value);
+      keepEl.dataset.loaded = '1';
+    }
   } catch (_) { /* leave blank — user can still type */ }
 }
-$('backup-schedule-hour')?.addEventListener('input', () => {
-  // Debounce so we don't spam /api/settings while the user types.
-  if (_backupScheduleSaveTimer) clearTimeout(_backupScheduleSaveTimer);
-  _backupScheduleSaveTimer = setTimeout(async () => {
-    const el = $('backup-schedule-hour');
-    if (!el) return;
-    const n = Number(el.value);
-    if (!Number.isInteger(n) || n < 0 || n > 23) {
-      _backupSetMsg('backup-schedule-msg', 'Hour must be 0–23.', 'err');
-      return;
-    }
-    _backupSetMsg('backup-schedule-msg', 'Saving…', '');
-    try {
-      const r = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ backup_schedule_hour: n }),
-      });
-      if (!r.ok) {
-        let j = {};
-        try { j = await r.json(); } catch (_) {}
-        throw new Error(j.detail || j.error || ('HTTP ' + r.status));
-      }
-      _backupSetMsg('backup-schedule-msg', `Saved — next run at ${String(n).padStart(2, '0')}:00.`, 'ok');
-      setTimeout(() => _backupSetMsg('backup-schedule-msg', '', ''), 2500);
-    } catch (err) {
-      _backupSetMsg('backup-schedule-msg', 'Save failed: ' + (err.message || err), 'err');
-    }
-  }, 500);
-});
 
 // ---- snapshots / restore --------------------------------------------------
 

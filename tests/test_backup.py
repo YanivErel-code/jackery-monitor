@@ -289,6 +289,115 @@ def test_restore_selective_only_named_files(backup_env, tmp_path, monkeypatch):
     assert (data_dir / "settings.json").exists()
 
 
+def test_prune_keeps_only_newest_n(backup_env, tmp_path, monkeypatch):
+    """Direct test of prune_old_snapshots: seed five timestamped dirs,
+    keep_count=2 should leave the two newest and rmtree the three
+    older ones."""
+    _, _, bk, _ = backup_env
+    fake_remote = tmp_path / "fake-nas"
+    _patch_smb(monkeypatch, bk, fake_remote)
+    snap_root = fake_remote / "jackery"
+    snap_root.mkdir(parents=True)
+
+    # Five snapshot dirs, oldest to newest by name.
+    names = [
+        "2026-04-28_030000",
+        "2026-04-29_030000",
+        "2026-04-30_030000",
+        "2026-05-01_030000",
+        "2026-05-02_030000",
+    ]
+    for n in names:
+        d = snap_root / n
+        d.mkdir()
+        (d / "MANIFEST.json").write_text("{}")
+        (d / "energy.db").write_text("X")
+
+    # Drop a non-snapshot dir + a stray file alongside — the prune
+    # must leave both alone.
+    (snap_root / "manual-export").mkdir()
+    (snap_root / "manual-export" / "notes.txt").write_text("don't touch me")
+    (snap_root / "README.txt").write_text("nor me")
+
+    summary = bk.prune_old_snapshots(keep_count=2)
+    assert summary["considered"] == 5
+    assert summary["pruned"] == 3
+    assert summary["kept"] == 2
+
+    remaining = sorted(p.name for p in snap_root.iterdir())
+    # Two newest snapshot dirs survive, plus the manual stuff.
+    assert remaining == [
+        "2026-05-01_030000",
+        "2026-05-02_030000",
+        "README.txt",
+        "manual-export",
+    ]
+
+
+def test_prune_no_op_when_under_threshold(backup_env, tmp_path, monkeypatch):
+    """If keep_count >= number of snapshots, nothing should be deleted."""
+    _, _, bk, _ = backup_env
+    fake_remote = tmp_path / "fake-nas"
+    _patch_smb(monkeypatch, bk, fake_remote)
+    snap_root = fake_remote / "jackery"
+    snap_root.mkdir(parents=True)
+    for n in ["2026-05-01_030000", "2026-05-02_030000"]:
+        (snap_root / n).mkdir()
+        (snap_root / n / "MANIFEST.json").write_text("{}")
+
+    summary = bk.prune_old_snapshots(keep_count=10)
+    assert summary["considered"] == 2
+    assert summary["pruned"] == 0
+    assert summary["kept"] == 2
+    assert (snap_root / "2026-05-01_030000").exists()
+    assert (snap_root / "2026-05-02_030000").exists()
+
+
+def test_run_backup_prunes_after_successful_upload(backup_env, tmp_path,
+                                                    monkeypatch):
+    """End-to-end: with keep_count=1 and a pre-existing snapshot,
+    run_backup should land the new snapshot AND remove the old one
+    in one go."""
+    _, _, bk, _ = backup_env
+    fake_remote = tmp_path / "fake-nas"
+    _patch_smb(monkeypatch, bk, fake_remote)
+
+    # Seed an old snapshot that should be pruned.
+    snap_root = fake_remote / "jackery"
+    snap_root.mkdir(parents=True)
+    old = snap_root / "2026-04-01_030000"
+    old.mkdir()
+    (old / "MANIFEST.json").write_text("{}")
+
+    result = bk.run_backup(keep_count=1)
+    assert result.ok
+
+    remaining = sorted(p.name for p in snap_root.iterdir())
+    # Only the just-created snapshot should remain — the seed is gone.
+    assert len(remaining) == 1
+    assert remaining[0] != "2026-04-01_030000"
+
+
+def test_run_backup_skips_prune_when_keep_count_none(backup_env, tmp_path,
+                                                      monkeypatch):
+    """keep_count=None (the default) means 'keep forever' — even ancient
+    snapshots stay put."""
+    _, _, bk, _ = backup_env
+    fake_remote = tmp_path / "fake-nas"
+    _patch_smb(monkeypatch, bk, fake_remote)
+
+    snap_root = fake_remote / "jackery"
+    snap_root.mkdir(parents=True)
+    old = snap_root / "2020-01-01_030000"
+    old.mkdir()
+    (old / "MANIFEST.json").write_text("{}")
+
+    result = bk.run_backup()  # no keep_count
+    assert result.ok
+    # Both snapshots present.
+    assert (snap_root / "2020-01-01_030000").exists()
+
+
 def test_run_backup_skips_when_no_credentials(backup_env, tmp_path, monkeypatch):
     _, _, bk, bc = backup_env
     bc.clear()
