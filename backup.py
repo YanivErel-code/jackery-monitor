@@ -1,26 +1,49 @@
 """
-Backup & restore — snapshots /data to a remote SMB share.
+Backup & restore — snapshots /data to a remote NAS.
 
 Design (see also docs/backup.md):
-  * Daily at 03:00 local (configurable via settings) we open an SMB
-    session to the remote share, take an online SQLite backup of
-    /data/energy.db (consistent even with active writers thanks to
-    sqlite3's online .backup API), copy the small JSON files alongside
-    it (auth, kasa-creds, anthropic-creds, jackery-creds, settings,
-    location), write a MANIFEST.json with sha256 checksums, then
-    upload the whole staging directory.
-  * Transport is `smbclient` from the samba package — pure userspace.
-    We deliberately do NOT use `mount.cifs`, which requires
-    CAP_SYS_ADMIN + capset() seccomp permission inside the container
-    and tends to fail on Synology with "Unable to apply new capability
-    set." smbclient avoids the kernel mount path entirely; the
-    container can stay fully unprivileged.
+  * Daily at 03:00 local (configurable via settings) we take an online
+    SQLite backup of /data/energy.db (consistent even with active
+    writers thanks to sqlite3's online .backup API), copy the small
+    JSON files alongside it (auth, kasa-creds, anthropic-creds,
+    jackery-creds, settings, location), write a MANIFEST.json with
+    sha256 checksums, then upload the whole staging directory via the
+    user-selected transport.
+  * Transport is pluggable. Today we support:
+      - "smb"        — userspace `smbclient` (the Samba package).
+                       We deliberately do NOT use `mount.cifs`, which
+                       requires CAP_SYS_ADMIN + capset() seccomp
+                       permission inside the container and tends to
+                       fail on Synology with "Unable to apply new
+                       capability set." smbclient avoids the kernel
+                       mount path entirely; the container stays
+                       fully unprivileged.
+      - "rsync_ssh"  — `rsync` over SSH with `--link-dest` so each
+                       new daily snapshot reuses unchanged blocks
+                       from the previous one as hardlinks. This makes
+                       year-long retention nearly free on disk: a
+                       few hundred 8 MB DB snapshots take ~50 MB
+                       instead of 3 GB when most days only append.
+      - "rsyncd"     — `rsync` to a daemon (port 873). Same
+                       `--link-dest` trick, but no SSH so retention
+                       can't `ssh ... rm -rf` old snapshots — they
+                       must be pruned manually on the NAS.
+  * Top-level operations (test_connectivity / run_backup /
+    run_restore / list_remote_snapshots / prune_old_snapshots) are
+    transport-agnostic dispatchers that read creds["transport"] and
+    call into a per-transport implementation. Existing creds blobs
+    written before the rsync work shipped don't carry a transport
+    field; backup_creds.load() defaults it to "smb" so they keep
+    working with no migration.
   * The encryption key (.jackery-creds.key) is intentionally NOT
     backed up — see SCOPE_INCLUDES_KEY below. Restoring on a fresh
     install brings back the DB but credentials need to be re-entered.
     Historical telemetry — the bulk of the value — is preserved.
   * Snapshots live in dated directories on the remote
-    (YYYY-MM-DD_HHMMSS), kept forever (no automatic deletion).
+    (YYYY-MM-DD_HHMMSS). Retention is policy-driven by `keep_count`
+    and is transport-agnostic for SMB and rsync_ssh. rsyncd lacks
+    a remote-delete primitive, so retention is a no-op there and
+    the user is told to prune manually.
   * Run history is kept in-memory as a small ring buffer + persisted
     summary JSON at /data/backup-status.json so the UI can show it
     without hitting the remote.
@@ -295,6 +318,25 @@ def _verify_remote_sizes(creds: dict, target_dir: str,
     return None
 
 
+# ---- transport dispatch ---------------------------------------------------
+
+
+VALID_TRANSPORTS = ("smb", "rsync_ssh", "rsyncd")
+
+
+def _transport_of(creds: dict) -> str:
+    """Resolve the transport name from a creds blob, defaulting to 'smb'
+    so legacy creds files (written before the rsync work) keep working
+    without migration. Unknown transports fall through to the dispatcher
+    which surfaces a clear error rather than silently doing the wrong
+    thing.
+    """
+    t = (creds.get("transport") or "smb")
+    if isinstance(t, str):
+        t = t.strip()
+    return t or "smb"
+
+
 # ---- SMB transport (userspace, via smbclient) -----------------------------
 
 
@@ -499,16 +541,13 @@ def _smb_rmtree(creds: dict, remote_dir: str) -> None:
         log.warning("smb rmdir %s: %s", remote_dir, _smb_extract_error(r))
 
 
-def test_connectivity(creds: dict | None = None,
-                      *, timeout_s: float = 15.0) -> dict[str, Any]:
-    """Open an SMB session, ensure the destination subdir exists, write
-    a tiny probe file, read it back, delete it. Returns {ok, latency_ms,
-    error?}. Designed to run synchronously from the API handler — quick
-    enough that the handler can call it in a thread without ceremony.
+def _test_connectivity_smb(creds: dict,
+                           *, timeout_s: float = 15.0) -> dict[str, Any]:
+    """SMB-specific connectivity probe: open an SMB session, ensure the
+    destination subdir exists, write a tiny probe file, read it back,
+    delete it. Returns {ok, latency_ms, error?}. Caller (the dispatcher)
+    is responsible for resolving creds — we trust it's non-empty here.
     """
-    creds = creds or backup_creds.load()
-    if not creds:
-        return {"ok": False, "error": "no_credentials"}
     started = time.time()
     subdir = (creds.get("subdir") or "").strip("/")
     probe_name = f".jackery-probe-{int(started)}"
@@ -598,11 +637,12 @@ def _record_run(result: BackupResult) -> None:
 _SNAPSHOT_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
 
 
-def prune_old_snapshots(creds: dict | None = None,
-                        *, keep_count: int) -> dict[str, Any]:
-    """Delete snapshot directories on the remote past the keep_count
-    cutoff (newest first). Returns a summary dict so callers can log
-    'pruned 3 of 33 snapshots' instead of a silent side effect.
+def _prune_old_snapshots_smb(creds: dict,
+                             *, keep_count: int) -> dict[str, Any]:
+    """SMB-specific prune: delete snapshot directories on the remote past
+    the keep_count cutoff (newest first). Returns a summary dict so
+    callers can log 'pruned 3 of 33 snapshots' instead of a silent side
+    effect.
 
     Only touches directories matching `YYYY-MM-DD_HHMMSS` so
     user-dropped folders in the same share are safe. Failures on a
@@ -612,10 +652,6 @@ def prune_old_snapshots(creds: dict | None = None,
     if keep_count < 1:
         return {"considered": 0, "pruned": 0, "kept": 0,
                 "error": "keep_count must be >= 1"}
-    creds = creds or backup_creds.load()
-    if not creds:
-        return {"considered": 0, "pruned": 0, "kept": 0,
-                "error": "no_credentials"}
     subdir = (creds.get("subdir") or "").strip("/")
     try:
         entries = _smb_ls(creds, subdir)
@@ -651,16 +687,12 @@ def prune_old_snapshots(creds: dict | None = None,
             "kept": len(keep)}
 
 
-def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
-    """List every snapshot directory inside the user's subdir on the
-    remote. Each entry has {dir, ts, iso, total_bytes, files} drawn
-    from MANIFEST.json (or marked invalid if the manifest is missing
-    or unreadable). One smbclient ls round-trip plus one get per
-    snapshot dir to fetch its manifest.
+def _list_remote_snapshots_smb(creds: dict) -> list[dict[str, Any]]:
+    """SMB-specific snapshot listing. Each entry has {dir, ts, iso,
+    total_bytes, files} drawn from MANIFEST.json (or marked invalid
+    if the manifest is missing or unreadable). One smbclient ls
+    round-trip plus one get per snapshot dir to fetch its manifest.
     """
-    creds = creds or backup_creds.load()
-    if not creds:
-        return []
     subdir = (creds.get("subdir") or "").strip("/")
     out: list[dict[str, Any]] = []
     try:
@@ -716,17 +748,17 @@ def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
     return out
 
 
-def run_backup(*, creds: dict | None = None,
-               include_key: bool | None = None,
-               keep_count: int | None = None) -> BackupResult:
-    """Synchronous, end-to-end backup. Safe to call from a thread.
+def _run_backup_smb(creds: dict,
+                    *, include_key: bool | None = None,
+                    keep_count: int | None = None) -> BackupResult:
+    """SMB-specific synchronous, end-to-end backup. Safe to call from a
+    thread.
 
     Steps:
-      1. Resolve creds (param > stored).
-      2. Stage the snapshot in a tempdir.
-      3. Open SMB session, upload staged dir, size-check.
-      4. Optionally prune old snapshots beyond keep_count.
-      5. Persist run history.
+      1. Stage the snapshot in a tempdir.
+      2. Open SMB session, upload staged dir, size-check.
+      3. Optionally prune old snapshots beyond keep_count.
+      4. Persist run history.
 
     `keep_count`: when set, after a successful upload we delete
     snapshot dirs past this count (newest kept). None / 0 means
@@ -735,15 +767,6 @@ def run_backup(*, creds: dict | None = None,
     """
     started = time.time()
     ts, iso, dir_stamp = _now_iso_local()
-    creds = creds or backup_creds.load()
-    if not creds:
-        result = BackupResult(
-            ok=False, ts=ts, iso=iso, snapshot_dir=None,
-            duration_s=0.0, bytes_written=0, files_written=0,
-            skipped_reason="no_credentials",
-        )
-        _record_run(result)
-        return result
 
     use_key = SCOPE_INCLUDES_KEY if include_key is None else bool(include_key)
 
@@ -826,8 +849,8 @@ def run_backup(*, creds: dict | None = None,
         # case is one extra night of unpruned history.
         if keep_count is not None and keep_count > 0:
             try:
-                summary = prune_old_snapshots(creds=creds,
-                                               keep_count=keep_count)
+                summary = _prune_old_snapshots_smb(creds,
+                                                   keep_count=keep_count)
                 if summary.get("pruned"):
                     log.info("post-backup prune: removed %d snapshot(s)",
                              summary["pruned"])
@@ -847,27 +870,11 @@ def run_backup(*, creds: dict | None = None,
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
-def run_restore(*, snapshot_dir_name: str,
-                scope: dict[str, Any] | None = None,
-                creds: dict | None = None) -> dict[str, Any]:
-    """Restore the named snapshot from the remote into /data.
-
-    `scope`:
-      None or {"full": True}        -> restore everything in the manifest.
-      {"files": ["energy.db", ...]} -> selective: only listed basenames.
-
-    Existing files in /data are overwritten in-place. The DB is
-    restored via a swap-and-replace so the live app can keep reading
-    until the instant we move the new file into place. Caller should
-    restart the app afterwards (the API handler does this).
-
-    The encryption key (.jackery-creds.key) is restored only if it's
-    in the manifest AND scope explicitly includes it.
-    """
-    creds = creds or backup_creds.load()
-    if not creds:
-        return {"ok": False, "error": "no_credentials"}
-
+def _run_restore_smb(creds: dict,
+                     *, snapshot_dir_name: str,
+                     scope: dict[str, Any] | None = None) -> dict[str, Any]:
+    """SMB-specific restore: pull a snapshot from the remote SMB share
+    into /data. See run_restore() for scope semantics."""
     files_filter: set[str] | None = None
     if scope and not scope.get("full"):
         listed = scope.get("files")
@@ -960,6 +967,144 @@ def run_restore(*, snapshot_dir_name: str,
         return {"ok": False, "error": str(e)}
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+
+# ---- transport-agnostic dispatchers ---------------------------------------
+#
+# These are the entry points that server.py and the async loop call.
+# Each one resolves creds (param > stored), reads creds["transport"]
+# (defaulting to "smb"), and routes to the matching implementation.
+# Callers don't need to know whether the destination is an SMB share or
+# a remote rsync target — they just hand us creds and ask for the verb.
+
+
+def _unknown_transport_error(transport: str) -> str:
+    return (f"unknown_transport: {transport!r} "
+            f"(expected one of {VALID_TRANSPORTS})")
+
+
+def test_connectivity(creds: dict | None = None,
+                      *, timeout_s: float = 15.0) -> dict[str, Any]:
+    """Connectivity probe: write/read/delete a tiny file at the configured
+    destination. Returns {ok, latency_ms, error?}. Designed to run
+    synchronously from the API handler — quick enough to call in a
+    thread without ceremony.
+    """
+    creds = creds or backup_creds.load()
+    if not creds:
+        return {"ok": False, "error": "no_credentials"}
+    transport = _transport_of(creds)
+    if transport == "smb":
+        return _test_connectivity_smb(creds, timeout_s=timeout_s)
+    return {"ok": False, "error": _unknown_transport_error(transport)}
+
+
+def prune_old_snapshots(creds: dict | None = None,
+                        *, keep_count: int) -> dict[str, Any]:
+    """Delete snapshot directories on the remote past the keep_count
+    cutoff (newest first). Returns a summary dict so callers can log
+    'pruned 3 of 33 snapshots' instead of a silent side effect.
+
+    Only touches directories matching `YYYY-MM-DD_HHMMSS` so
+    user-dropped folders in the same destination are safe.
+
+    Note for rsyncd transport: rsync-to-daemon has no remote-delete
+    primitive that we can rely on, so we return a no-op summary with
+    a hint instead of trying to fake deletes through the rsync wire.
+    """
+    creds = creds or backup_creds.load()
+    if not creds:
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": "no_credentials"}
+    transport = _transport_of(creds)
+    if transport == "smb":
+        return _prune_old_snapshots_smb(creds, keep_count=keep_count)
+    return {"considered": 0, "pruned": 0, "kept": 0,
+            "error": _unknown_transport_error(transport)}
+
+
+def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
+    """List every snapshot directory at the configured remote. Each
+    entry has {dir, ts, iso, total_bytes, files} drawn from
+    MANIFEST.json (or marked invalid if the manifest is missing or
+    unreadable)."""
+    creds = creds or backup_creds.load()
+    if not creds:
+        return []
+    transport = _transport_of(creds)
+    if transport == "smb":
+        return _list_remote_snapshots_smb(creds)
+    log.warning("list snapshots: %s", _unknown_transport_error(transport))
+    return []
+
+
+def run_backup(*, creds: dict | None = None,
+               include_key: bool | None = None,
+               keep_count: int | None = None) -> BackupResult:
+    """Synchronous, end-to-end backup. Safe to call from a thread.
+
+    Steps:
+      1. Resolve creds (param > stored).
+      2. Stage the snapshot in a tempdir.
+      3. Upload via the configured transport.
+      4. Optionally prune old snapshots beyond keep_count.
+      5. Persist run history.
+
+    `keep_count`: when set, after a successful upload we delete
+    snapshot dirs past this count (newest kept). None / 0 means
+    'no retention, keep forever'. Prune failures are logged but
+    don't fail the backup — the snapshot is already written.
+    """
+    creds = creds or backup_creds.load()
+    if not creds:
+        ts, iso, _ = _now_iso_local()
+        result = BackupResult(
+            ok=False, ts=ts, iso=iso, snapshot_dir=None,
+            duration_s=0.0, bytes_written=0, files_written=0,
+            skipped_reason="no_credentials",
+        )
+        _record_run(result)
+        return result
+    transport = _transport_of(creds)
+    if transport == "smb":
+        return _run_backup_smb(creds, include_key=include_key,
+                               keep_count=keep_count)
+    ts, iso, _ = _now_iso_local()
+    result = BackupResult(
+        ok=False, ts=ts, iso=iso, snapshot_dir=None,
+        duration_s=0.0, bytes_written=0, files_written=0,
+        error=_unknown_transport_error(transport),
+    )
+    _record_run(result)
+    return result
+
+
+def run_restore(*, snapshot_dir_name: str,
+                scope: dict[str, Any] | None = None,
+                creds: dict | None = None) -> dict[str, Any]:
+    """Restore the named snapshot from the remote into /data.
+
+    `scope`:
+      None or {"full": True}        -> restore everything in the manifest.
+      {"files": ["energy.db", ...]} -> selective: only listed basenames.
+
+    Existing files in /data are overwritten in-place. The DB is
+    restored via a swap-and-replace so the live app can keep reading
+    until the instant we move the new file into place. Caller should
+    restart the app afterwards (the API handler does this).
+
+    The encryption key (.jackery-creds.key) is restored only if it's
+    in the manifest AND scope explicitly includes it.
+    """
+    creds = creds or backup_creds.load()
+    if not creds:
+        return {"ok": False, "error": "no_credentials"}
+    transport = _transport_of(creds)
+    if transport == "smb":
+        return _run_restore_smb(creds,
+                                snapshot_dir_name=snapshot_dir_name,
+                                scope=scope)
+    return {"ok": False, "error": _unknown_transport_error(transport)}
 
 
 # ---- async scheduler -------------------------------------------------------

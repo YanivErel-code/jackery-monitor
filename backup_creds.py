@@ -1,15 +1,30 @@
 """
-Remote-NAS backup destination credentials (SMB / CIFS).
+Remote-NAS backup destination credentials.
 
-Holds the host, share path, sub-directory, username, and password used by
-backup.py to mount the remote share. Persisted encrypted at
-/data/backup-creds.json (AES-256-GCM via crypto_util) — same pattern as
-kasa_creds.py and anthropic_creds.py.
+Holds the connection parameters for whatever transport ships /data
+snapshots to the remote — currently SMB/CIFS, rsync over SSH, or rsync
+to a daemon (rsyncd). Persisted encrypted at /data/backup-creds.json
+(AES-256-GCM via crypto_util) — same pattern as kasa_creds.py and
+anthropic_creds.py.
 
 Why a dedicated module instead of cramming the password into
 settings.json: settings.json is plain JSON (no encryption), and shipping
-a SMB password in plain text would be a regression. Mirroring the
-existing creds-module pattern keeps the threat model uniform.
+a SMB password (or, worse, an SSH private key) in plain text would be a
+regression. Mirroring the existing creds-module pattern keeps the
+threat model uniform.
+
+Transport field (added with rsync support):
+  * "smb"        — fields: host, share, subdir, username, password, domain
+  * "rsync_ssh"  — fields: host, ssh_user, ssh_key, target_dir
+  * "rsyncd"     — fields: host, rsync_module, target_subpath,
+                          rsyncd_user, rsyncd_password
+
+Existing creds saved before the rsync work was done don't carry a
+transport field — load() defaults it to "smb" so they keep working
+with no migration. Saved fields for transports the caller doesn't
+populate are stored as empty strings, which makes round-tripping a
+single creds blob through the UI form trivial regardless of which
+transport is in use.
 """
 
 from __future__ import annotations
@@ -24,9 +39,22 @@ log = logging.getLogger("backup_creds")
 
 PATH = os.environ.get("JACKERY_BACKUP_CREDS_FILE", "/data/backup-creds.json")
 
-# Fields stored in the encrypted blob. Keep this list canonical so
-# load() and save() can't drift.
-_FIELDS = ("host", "share", "subdir", "username", "password", "domain")
+VALID_TRANSPORTS = ("smb", "rsync_ssh", "rsyncd")
+
+# Required fields per transport. All must be non-empty for save() to
+# succeed. Other fields are stored as empty strings so the encrypted
+# blob shape stays uniform.
+_REQUIRED = {
+    "smb": ("host", "share", "username", "password"),
+    "rsync_ssh": ("host", "ssh_user", "ssh_key", "target_dir"),
+    "rsyncd": ("host", "rsync_module", "rsyncd_user", "rsyncd_password"),
+}
+
+# Sensitive fields — redacted by public_view() before sending to the UI.
+# ssh_key is a private key (treat as harder-to-reset than a password)
+# but since the UI lets the user paste a new one we surface a
+# "has_ssh_key" flag the same way we do for has_password.
+_SECRET_FIELDS = ("password", "rsyncd_password", "ssh_key")
 
 
 def has_credentials() -> bool:
@@ -37,18 +65,45 @@ def has_credentials() -> bool:
         return False
 
 
+def _normalize(d: dict) -> dict:
+    """Coerce a freshly-decrypted blob (or freshly-built save payload)
+    into the canonical shape: every transport's fields present, with
+    sensible defaults. Strings are stripped where stripping is safe;
+    secrets are kept verbatim (leading/trailing whitespace in a
+    private key would change the key's identity)."""
+    transport = (d.get("transport") or "smb").strip() or "smb"
+    if transport not in VALID_TRANSPORTS:
+        # An unknown transport should NOT crash load() — it might be a
+        # creds blob written by a newer version. Fall back to smb so
+        # the existing UX (mostly) still works; the caller can override.
+        transport = "smb"
+    return {
+        "transport": transport,
+        "host": str(d.get("host") or "").strip(),
+        # SMB
+        "share": str(d.get("share") or "").strip(),
+        "subdir": str(d.get("subdir") or "jackery-monitor").strip(),
+        "username": str(d.get("username") or "").strip(),
+        "password": str(d.get("password") or ""),
+        "domain": str(d.get("domain") or "WORKGROUP").strip(),
+        # rsync over SSH
+        "ssh_user": str(d.get("ssh_user") or "").strip(),
+        "ssh_key": str(d.get("ssh_key") or ""),
+        "target_dir": str(d.get("target_dir") or "").strip(),
+        # rsyncd
+        "rsync_module": str(d.get("rsync_module") or "").strip(),
+        "target_subpath": str(d.get("target_subpath") or "").strip(),
+        "rsyncd_user": str(d.get("rsyncd_user") or "").strip(),
+        "rsyncd_password": str(d.get("rsyncd_password") or ""),
+    }
+
+
 def load() -> dict | None:
     """Return the saved config dict, or None if missing/unreadable.
 
-    Shape:
-        {
-          "host":     "192.168.1.42",
-          "share":    "/volume1/backups",
-          "subdir":   "jackery-monitor",
-          "username": "backupuser",
-          "password": "...",
-          "domain":   "WORKGROUP",   # optional, defaults to WORKGROUP
-        }
+    Always returns the full canonical schema (every transport's fields
+    present), with `transport` defaulting to "smb" for legacy blobs
+    written before the rsync work shipped.
     """
     try:
         with open(PATH) as f:
@@ -70,36 +125,41 @@ def load() -> dict | None:
         return None
     if not isinstance(d, dict):
         return None
-    # Required fields must be present and non-empty.
-    if not all(d.get(k) for k in ("host", "share", "username", "password")):
+    norm = _normalize(d)
+    # Per-transport sanity check: required fields must all be present.
+    # If they aren't, treat the blob as corrupt / unfinished and refuse
+    # to surface partial state.
+    required = _REQUIRED.get(norm["transport"], ())
+    if not all(norm.get(k) for k in required):
         return None
-    return {
-        "host": str(d["host"]),
-        "share": str(d["share"]),
-        "subdir": str(d.get("subdir") or "jackery-monitor"),
-        "username": str(d["username"]),
-        "password": str(d["password"]),
-        "domain": str(d.get("domain") or "WORKGROUP"),
-    }
+    return norm
 
 
-def save(*, host: str, share: str, username: str, password: str,
-         subdir: str = "jackery-monitor",
-         domain: str = "WORKGROUP") -> bool:
-    """Persist SMB credentials. All fields except subdir/domain are
-    required. Returns True on success."""
-    host = (host or "").strip()
-    share = (share or "").strip()
-    subdir = (subdir or "jackery-monitor").strip()
-    username = (username or "").strip()
-    domain = (domain or "WORKGROUP").strip()
-    if not (host and share and username and password):
+def save(**fields) -> bool:
+    """Persist remote-backup credentials. Per-transport required fields:
+
+      smb:        host, share, username, password
+      rsync_ssh:  host, ssh_user, ssh_key, target_dir
+      rsyncd:     host, rsync_module, rsyncd_user, rsyncd_password
+
+    `transport` defaults to "smb" if omitted, which keeps the existing
+    SMB-only callers working unchanged. Returns True on success, False
+    if any required field is missing or the transport is unknown.
+    """
+    transport = (str(fields.get("transport") or "smb")).strip() or "smb"
+    if transport not in VALID_TRANSPORTS:
+        log.warning("save: unknown transport %r", transport)
         return False
-    payload = json.dumps({
-        "host": host, "share": share, "subdir": subdir,
-        "username": username, "password": password, "domain": domain,
-    }).encode()
-    blob = crypto_util.encrypt(payload)
+
+    # We normalise BEFORE checking required fields so that whitespace-
+    # only inputs are correctly rejected as missing.
+    payload = _normalize({**fields, "transport": transport})
+
+    required = _REQUIRED[transport]
+    if not all(payload.get(k) for k in required):
+        return False
+
+    blob = crypto_util.encrypt(json.dumps(payload).encode())
     try:
         os.makedirs(os.path.dirname(PATH) or ".", exist_ok=True)
         tmp = PATH + ".tmp"
@@ -117,14 +177,18 @@ def save(*, host: str, share: str, username: str, password: str,
 
 
 def public_view() -> dict | None:
-    """Same as load() but with the password redacted — for UI display.
+    """Same as load() but with secrets redacted — for UI display.
     Returns None if no creds saved."""
     d = load()
     if not d:
         return None
     out = dict(d)
-    out["password"] = ""
-    out["has_password"] = True
+    out["has_password"] = bool(d.get("password"))
+    out["has_ssh_key"] = bool(d.get("ssh_key"))
+    out["has_rsyncd_password"] = bool(d.get("rsyncd_password"))
+    for k in _SECRET_FIELDS:
+        if k in out:
+            out[k] = ""
     return out
 
 
