@@ -124,11 +124,15 @@ class AppState:
         self.connection_error: str | None = None
         self.low_battery_alerted = False
         self.poll_task: asyncio.Task | None = None
-        # WebSocket -> view_device_id (cookie value at connect time, may be
-        # None for clients that haven't picked a device — they default to
-        # bridge-active). Each broadcast renders status once per unique
-        # view_id and fans out to the matching clients.
-        self.ws_clients: dict[WebSocket, str | None] = {}
+        # WebSocket -> {view_id, auth_token} captured at connect time.
+        # `view_id` may be None for clients that haven't picked a device
+        # (they default to bridge-active). `auth_token` uniquely
+        # identifies a browser session — used by /api/view/select_device
+        # to bump ONLY the requester's WSes when their cookie changes,
+        # without disturbing other browsers that happened to share the
+        # same prior view selection. Each broadcast renders status once
+        # per unique view_id and fans out to the matching clients.
+        self.ws_clients: dict[WebSocket, dict[str, str | None]] = {}
         self.last_source: str | None = None
         self.last_cloud_meta: dict | None = None
         # Per-expansion-battery cache. Refreshed every BATTERY_PACK_REFRESH_S
@@ -429,7 +433,8 @@ async def broadcast_status(message_type: str = "status") -> None:
         return
     rendered: dict[str | None, str] = {}
     dead: list[WebSocket] = []
-    for ws, view_id in state.ws_clients.items():
+    for ws, info in state.ws_clients.items():
+        view_id = info.get("view_id")
         if view_id not in rendered:
             rendered[view_id] = json.dumps({
                 "type": message_type,
@@ -3845,19 +3850,28 @@ async def api_view_select_device(body: dict, request: Request, response: Respons
         raise HTTPException(404, "device not found in current account")
     _set_app_cookie(response, VIEW_DEVICE_COOKIE, str(device_id),
                     VIEW_DEVICE_COOKIE_TTL_S)
-    # Update any of THIS browser's open WS connections so the next
-    # broadcast switches view without waiting for a reconnect. We can't
-    # uniquely identify "this browser's" WS from the HTTP request, so we
-    # match by the previous view_device_id cookie value: any WS that
-    # connected with the same prior selection (including None) gets
-    # bumped. In practice each browser usually has at most one WS open.
-    prior = request.cookies.get(VIEW_DEVICE_COOKIE)
+    # Update only THIS browser's open WS connections so the next
+    # broadcast switches view without waiting for a reconnect. We
+    # identify "this browser" by the auth session cookie — uniquely
+    # per-login — instead of by prior view_device_id, which would
+    # incorrectly bump another browser that happened to share the same
+    # prior selection (e.g. both still on the bridge-active default).
+    # That earlier prior-view match caused a 2s "jump back and forth"
+    # on the other screen: the WS pushed the wrong-bumped view while
+    # the safety-net /api/status poll continued to read its actual
+    # cookie and snapped back.
+    request_auth = request.cookies.get(auth.COOKIE_NAME)
     new_id = str(device_id)
-    # Updating values in-place — no key insert/delete, so iterating the
-    # live dict is safe.
-    for ws, prior_view in state.ws_clients.items():
-        if prior_view == prior:
-            state.ws_clients[ws] = new_id
+    for _ws, info in state.ws_clients.items():
+        # Only bump the requester's own session. If auth isn't enabled
+        # (no users yet), request_auth is None — fall back to the old
+        # prior-view match because there's no per-browser identifier.
+        if request_auth is not None:
+            if info.get("auth_token") == request_auth:
+                info["view_id"] = new_id
+        else:
+            if info.get("view_id") == request.cookies.get(VIEW_DEVICE_COOKIE):
+                info["view_id"] = new_id
     # Push an immediate refresh so the UI doesn't wait for the next
     # poll tick to repaint.
     await broadcast_status("status")
@@ -3892,17 +3906,20 @@ async def force_poll():
 async def websocket_endpoint(ws: WebSocket):
     # Mirror the HTTP-side auth gate. WS doesn't go through the FastAPI
     # http middleware, so we have to check the same session cookie here.
+    auth_token: str | None = None
     if auth.has_user():
-        token = ws.cookies.get(auth.COOKIE_NAME)
-        if not auth.verify_session(token):
+        auth_token = ws.cookies.get(auth.COOKIE_NAME)
+        if not auth.verify_session(auth_token):
             await ws.close(code=1008)  # policy violation
             return
-    # Stash the per-browser view selection from the cookie so later
-    # broadcasts render this client's chosen Jackery. None means "no
-    # explicit pick, follow the bridge-active device."
+    # Stash both the per-browser view selection AND the auth session
+    # token from the cookie. The auth token uniquely identifies a
+    # browser session — used by /api/view/select_device to bump only
+    # this browser's WSes when the cookie changes, instead of
+    # spuriously dragging other browsers along.
     view_id = ws.cookies.get(VIEW_DEVICE_COOKIE) or None
     await ws.accept()
-    state.ws_clients[ws] = view_id
+    state.ws_clients[ws] = {"view_id": view_id, "auth_token": auth_token}
     try:
         await ws.send_text(json.dumps({
             "type": "snapshot",

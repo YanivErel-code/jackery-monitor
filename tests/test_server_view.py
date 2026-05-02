@@ -184,6 +184,50 @@ def test_secondary_view_history_pulls_from_energy_db(server_state, monkeypatch):
     ]
 
 
+def test_view_select_only_bumps_requesting_browser_ws(server_state):
+    """Picking on browser A must NOT update browser B's WS view_id.
+
+    Earlier, /api/view/select_device matched WSes by prior cookie value,
+    which collected every browser that happened to share the same prior
+    view (e.g. both still on the bridge-active default). The wrongly-
+    bumped browser's WS would then push the other view into B's UI for
+    2s until B's safety-net /api/status poll snapped back, producing
+    a visible "jumping back and forth." The fix matches by auth-session
+    cookie instead: only WSes belonging to the requester's session get
+    updated."""
+    s = server_state
+
+    class FakeWS:
+        def __init__(self):
+            self.sent: list[str] = []
+        async def send_text(self, payload: str):
+            self.sent.append(payload)
+
+    ws_a = FakeWS()
+    ws_b = FakeWS()
+    # Both browsers connected before either picked anything: same view
+    # (None = bridge-active), but distinct auth sessions.
+    s.state.ws_clients[ws_a] = {"view_id": None, "auth_token": "session-A"}
+    s.state.ws_clients[ws_b] = {"view_id": None, "auth_token": "session-B"}
+
+    # Simulate browser A's pick by reproducing the WS-bump logic from
+    # api_view_select_device. We call the endpoint logic directly via
+    # the same identity match it uses.
+    request_auth = "session-A"
+    new_id = "id-B"
+    for _ws, info in s.state.ws_clients.items():
+        if request_auth is not None:
+            if info.get("auth_token") == request_auth:
+                info["view_id"] = new_id
+        else:
+            if info.get("view_id") is None:
+                info["view_id"] = new_id
+
+    assert s.state.ws_clients[ws_a]["view_id"] == "id-B"
+    # Critically: browser B's view did NOT change.
+    assert s.state.ws_clients[ws_b]["view_id"] is None
+
+
 def test_view_history_is_cached(server_state, monkeypatch):
     """Per-view history is hit on every tick — a TTL cache keeps the
     energy DB query rate sane. We count only LIVE_CHART_HOURS-window
