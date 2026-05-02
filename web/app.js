@@ -2748,6 +2748,24 @@ $('reconnect')?.addEventListener('click', async () => {
   finally { setTimeout(() => $('reconnect').disabled = false, 800); }
 });
 
+// Brand-as-home: clicking "Jackery Monitor" reloads to / (which lands
+// on the Live tab — that's the default activeTab on boot). Treats it
+// as the "fix it" button: same gesture as cmd+R but always lands on
+// Live regardless of which tab the user was on. Modifier/middle-clicks
+// fall through to the <a href="/"> default so users can open Live in
+// a new tab.
+$('brand-home')?.addEventListener('click', (e) => {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+  e.preventDefault();
+  // location.assign('/') doesn't reload when we're already at /, so
+  // use reload() — also gives the WS a clean reconnect.
+  if (location.pathname === '/' && !location.search && !location.hash) {
+    location.reload();
+  } else {
+    location.assign('/');
+  }
+});
+
 // Output toggles are not supported in cloud-only mode (Jackery cloud API
 // is read-only). The .switch tiles are now plain status indicators.
 
@@ -3175,25 +3193,46 @@ function renderPowerFlow(t) {
   }
 
   // Time-to-full (charging) / time-to-empty (discharging). Pulled
-  // straight from device telemetry, same fields the SOC card uses.
-  // Picking the positive one is enough — Jackery zeroes the inactive
-  // direction. Color-coded green/amber to match the battery node ring.
+  // straight from device telemetry. Compact arrow-prefixed format
+  // ("↑ 0.7h" / "↓ 9.2h") keeps the line inside the battery ring's
+  // chord at this y-position even on mobile where the SVG fonts are
+  // bumped up — the verbose "until full" / "remaining" text is too
+  // wide there. Direction is also encoded by the green/amber color
+  // matching the battery node ring, so the arrow is reinforcement
+  // rather than the only signal.
   const timerEl = $('flow-timer');
   if (timerEl) {
     const ttFull  = Number(t.time_to_full_h    ?? 0);
     const ttEmpty = Number(t.time_remaining_h  ?? 0);
     let txt = '—';
     let cls = '';
+    let title = '';
     if (ttFull > 0) {
-      txt = `${ttFull.toFixed(1)} h until full`;
+      txt = `↑ ${ttFull.toFixed(1)}h`;
       cls = 'charging';
+      title = `${ttFull.toFixed(1)} h until full`;
     } else if (ttEmpty > 0) {
-      txt = `${ttEmpty.toFixed(1)} h remaining`;
+      txt = `↓ ${ttEmpty.toFixed(1)}h`;
       cls = 'discharging';
+      title = `${ttEmpty.toFixed(1)} h remaining`;
     }
     timerEl.textContent = txt;
     timerEl.classList.remove('charging', 'discharging');
     if (cls) timerEl.classList.add(cls);
+    // SVG <title> child = native browser tooltip on hover; keeps the
+    // verbose phrasing accessible without forcing it into the visible
+    // glyph budget. Lazily create on first use; replace text after.
+    let titleNode = timerEl.querySelector('title');
+    if (title) {
+      if (!titleNode) {
+        titleNode = document.createElementNS(
+          'http://www.w3.org/2000/svg', 'title');
+        timerEl.appendChild(titleNode);
+      }
+      titleNode.textContent = title;
+    } else if (titleNode) {
+      titleNode.remove();
+    }
   }
 }
 

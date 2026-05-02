@@ -56,10 +56,15 @@
   </div>
 
   <header class="topbar">
-    <div class="brand">
+    <!-- Click the brand to jump back to the Live tab and force-refresh
+         (full reload, not just route swap) so a stuck WS / stale cache
+         is the easiest "fix it" gesture on the page. Anchored at "/" so
+         middle-click and cmd-click open it in a fresh tab on Live. -->
+    <a href="/" class="brand" id="brand-home"
+       title="Back to Live (refresh)">
       <span class="logo-dot"></span>
       <h1>Jackery Monitor</h1>
-    </div>
+    </a>
 
     <div class="topbar-right">
       <label id="device-picker" class="device-picker" hidden>
