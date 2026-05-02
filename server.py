@@ -2554,6 +2554,83 @@ def api_smart_charge_analytics(device_sn: str | None = None, days: int = 14):
             "summary": summary, "samples": samples}
 
 
+@app.get("/api/smart_charge/backtest")
+def api_smart_charge_backtest(
+    device_sn: str | None = None,
+    days: int = 7,
+    target_override: float | None = None,
+    limit: int = 1000,
+):
+    """Replay recorded smart-charge decisions through the *current*
+    compute_plan, so behavior changes can be validated without waiting
+    for fresh ticks to accumulate. Returns per-decision diff + a
+    summary. `target_override` lets you stress-test discontinuous
+    schedules by pushing target above the natural sunrise trough."""
+    import backtest as bt
+    if not device_sn and state.device:
+        device_sn = state.device.device_sn
+    if not device_sn:
+        raise HTTPException(400, "device_sn required (no active device)")
+
+    days = max(1, min(int(days), 30))
+    since_ts = int(time.time()) - days * 86400
+    decisions = state.energy.list_smart_charge_decisions(
+        device_sn, limit=limit, since_ts=since_ts
+    )
+    if not decisions:
+        return {
+            "device_sn": device_sn, "days": days,
+            "target_override": target_override,
+            "summary": {"n": 0}, "results": [],
+        }
+
+    # History needs ~14d lookback for solar-coefficient + idle-overhead
+    # fits at the OLDEST replay point, plus the days we're replaying.
+    history = state.energy.history(
+        device_sn, hours=(days + 14) * 24, bucket_s=3600,
+    )
+    weather_obs = state.energy.list_weather_observations(
+        since_ts=since_ts - 14 * 86400, limit=24 * (days + 14) + 72,
+    )
+
+    cfg = smart_charge.get_config(device_sn)
+    cfg_max_charge = float(cfg.get("max_charge_w") or 800)
+
+    # Capacity + tz mirror what _smart_charge_evaluate would resolve.
+    active_sn = state.device.device_sn if state.device else None
+    if device_sn == active_sn:
+        model_code = getattr(state.device, "model_code", None)
+    else:
+        cloud = state.last_cloud_meta or {}
+        devs = (cloud.get("devices") or []) if isinstance(cloud, dict) else []
+        meta = next((d for d in devs if str(d.get("device_sn")) == device_sn), {})
+        model_code = meta.get("model_code")
+    capacity = _total_capacity_wh(device_sn, model_code)
+    loc = device_location.get() or {}
+    tz_offset = int(loc.get("utc_offset_seconds") or 0)
+
+    results = bt.replay_decisions(
+        decisions=decisions,
+        full_energy_history=history,
+        weather_observations=weather_obs,
+        capacity_wh=capacity,
+        max_charge_w=cfg_max_charge,
+        cost_plan=cost_module.get_plan(),
+        tz_offset_seconds=tz_offset,
+        target_override=target_override,
+    )
+    return {
+        "device_sn": device_sn,
+        "days": days,
+        "target_override": target_override,
+        "capacity_wh": capacity,
+        "max_charge_w": cfg_max_charge,
+        "tz_offset_seconds": tz_offset,
+        "summary": bt.summarize(results),
+        "results": results,
+    }
+
+
 @app.post("/api/smart_charge/evaluate_now")
 async def api_smart_charge_evaluate_now(device_sn: str | None = None):
     """Compute a decision RIGHT NOW (no execution, no history write).

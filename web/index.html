@@ -566,10 +566,18 @@
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
             <button class="btn btn-primary" type="submit">Save</button>
             <button id="sc-evaluate" class="btn btn-ghost" type="button">Evaluate now</button>
+            <button id="sc-backtest" class="btn btn-ghost" type="button" title="Replay the last N days of recorded decisions through the current compute_plan">Backtest</button>
+            <label style="display:flex; gap:4px; align-items:center; font-size:12px; color:#9aa0a6">
+              days <input id="sc-backtest-days" type="number" min="1" max="30" step="1" value="7" style="width:55px" />
+            </label>
+            <label style="display:flex; gap:4px; align-items:center; font-size:12px; color:#9aa0a6">
+              target override <input id="sc-backtest-target" type="number" min="5" max="95" step="1" placeholder="—" style="width:55px" />
+            </label>
           </div>
         </form>
         <div id="sc-current-plan" class="sc-current-plan" hidden></div>
         <div id="sc-analytics" class="sc-analytics" hidden></div>
+        <div id="sc-backtest-result" style="margin-top:18px" hidden></div>
         <div id="sc-history-block" style="margin-top:18px" hidden>
           <h3 style="margin:0 0 8px; font-size:14px">Recent decisions</h3>
           <div id="sc-history" class="sc-history"></div>

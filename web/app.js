@@ -2553,6 +2553,93 @@ document.getElementById('sc-evaluate')?.addEventListener('click', async () => {
   }
 });
 
+document.getElementById('sc-backtest')?.addEventListener('click', async () => {
+  const status = $('sc-status');
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) {
+    status.hidden = false;
+    status.textContent = 'No active device.';
+    return;
+  }
+  const days = parseInt($('sc-backtest-days').value, 10) || 7;
+  const targetRaw = $('sc-backtest-target').value;
+  const params = new URLSearchParams({ device_sn: deviceSn, days: String(days) });
+  if (targetRaw) params.set('target_override', targetRaw);
+  status.hidden = false;
+  status.textContent = `Replaying ${days}d of decisions…`;
+  try {
+    const r = await fetch(`/api/smart_charge/backtest?${params}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    renderBacktestResult(j);
+    status.textContent = `Replayed ${j.summary?.n || 0} decisions, ${j.summary?.n_flipped || 0} would flip.`;
+    setTimeout(() => { status.hidden = true; }, 4500);
+  } catch (err) {
+    status.textContent = `Backtest failed: ${err.message || err}`;
+  }
+});
+
+function renderBacktestResult(j) {
+  const el = $('sc-backtest-result');
+  if (!el) return;
+  if (!j || !j.summary) { el.hidden = true; return; }
+  const s = j.summary;
+  const safe = (x) => String(x ?? '').replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  const fmtTs = (ts) => new Date(ts * 1000).toLocaleString([], {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+  // Flip pairs as a compact key:value list.
+  const flipPairsStr = Object.entries(s.flip_pairs || {})
+    .map(([k, v]) => `${k}: ${v}`).join(', ') || '—';
+  // Show first 30 flipped rows + first 10 errors so the user can
+  // spot-check; full results are in the JSON response if they want
+  // more.
+  const flipped = (j.results || []).filter(r => r.would_flip).slice(0, 30);
+  const errors = (j.results || []).filter(r => r.error).slice(0, 10);
+  const flipRowsHtml = flipped.map(r => `
+    <tr>
+      <td>${fmtTs(r.ts)}</td>
+      <td>${safe(r.old_action)}</td>
+      <td><b>${safe(r.new_action)}</b></td>
+      <td>${r.soc != null ? Math.round(r.soc) + '%' : '—'}</td>
+      <td>${r.target}%</td>
+      <td>${r.new_baseline_sunrise != null ? Math.round(r.new_baseline_sunrise) + '%' : '—'}</td>
+      <td>${(r.planned_hours || []).length}</td>
+      <td>${r.extension_active ? 'ext' : ''}</td>
+      <td style="font-size:11px; color:#9aa0a6">${safe(r.new_reason)}</td>
+    </tr>
+  `).join('');
+  const errRowsHtml = errors.map(r => `
+    <tr><td>${fmtTs(r.ts)}</td><td colspan="8" style="color:#e57373">${safe(r.error)}</td></tr>
+  `).join('');
+  const targetNote = j.target_override != null
+    ? ` <span style="color:#fbbc04">(target override: ${j.target_override}%)</span>`
+    : '';
+  el.innerHTML = `
+    <h3 style="margin:0 0 8px; font-size:14px">Backtest — last ${j.days}d${targetNote}</h3>
+    <div style="font-size:13px; line-height:1.7">
+      <div><b>${s.n}</b> decisions replayed · <b>${s.n_flipped}</b> would flip · <b>${s.n_extension}</b> in extension · <b>${s.n_error}</b> errors</div>
+      <div>old: ${Object.entries(s.by_action_old || {}).map(([k,v])=>`${k}=${v}`).join(', ')}</div>
+      <div>new: ${Object.entries(s.by_action_new || {}).map(([k,v])=>`${k}=${v}`).join(', ')}</div>
+      <div>flips: ${flipPairsStr}</div>
+      <div style="margin-top:6px; color:#9aa0a6; font-size:12px">capacity ${j.capacity_wh} Wh · max charge ${j.max_charge_w} W · tz ${j.tz_offset_seconds}s</div>
+    </div>
+    ${flipped.length ? `
+      <table style="width:100%; margin-top:10px; font-size:12px; border-collapse:collapse">
+        <thead><tr style="text-align:left; color:#9aa0a6">
+          <th>when</th><th>old</th><th>new</th><th>soc</th><th>target</th>
+          <th>baseline</th><th>plan h</th><th></th><th>reason</th>
+        </tr></thead>
+        <tbody>${flipRowsHtml}</tbody>
+      </table>
+    ` : '<div style="margin-top:8px; color:#81c784">No flips — current code matches recorded decisions.</div>'}
+    ${errors.length ? `<table style="width:100%; margin-top:10px; font-size:12px"><tbody>${errRowsHtml}</tbody></table>` : ''}
+  `;
+  el.hidden = false;
+}
+
 // ============================================================
 // DEVICE PICKER
 // ============================================================
