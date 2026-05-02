@@ -1573,13 +1573,35 @@ $('dbg-forecast-24h')?.addEventListener('click', async () => {
 $('dbg-forecast-buckets')?.addEventListener('click', async () => {
   const j = await _dbgFetch('/api/forecast/accuracy');
   if (!j) return;
-  const buckets = j.summary || {};
-  const rows = Object.entries(buckets).map(([bucket, b]) => ({
-    lead_time: bucket,
-    samples: b.n,
-    mae_pp: b.mae,
-  }));
-  _dbgRender(`Forecast accuracy by lead time (${(j.samples||[]).length} samples total)`, rows);
+  const all = j.summary || {};
+  const postFix = j.summary_post_fix || {};
+  // Render both views side-by-side so it's obvious how much the
+  // pre-fix stale rows are dragging the headline numbers down.
+  // `summary_post_fix` only counts predictions made AT OR AFTER
+  // the most recent forecaster breaking-change deploy.
+  const cutoff = j.cutoff_ts
+    ? new Date(j.cutoff_ts * 1000).toLocaleString()
+    : '—';
+  const buckets = ['≤6h', '≤24h', '≤72h', '>72h'];
+  const rows = buckets.map(bucket => {
+    const a = all[bucket] || { n: 0, mae: null };
+    const p = postFix[bucket] || { n: 0, mae: null };
+    return {
+      lead_time: bucket,
+      all_samples: a.n,
+      all_mae_pp: a.mae,
+      post_fix_samples: p.n,
+      post_fix_mae_pp: p.mae,
+    };
+  });
+  _dbgSummary(
+    `Forecast accuracy by lead time`,
+    [
+      `<strong>All-time samples:</strong> ${(j.samples||[]).length}`,
+      `<strong>Post-fix cutoff:</strong> ${cutoff} (predictions made before this excluded from post-fix bucket)`,
+    ],
+  );
+  _dbgRender('All vs post-fix', rows);
 });
 
 $('dbg-smart-charge')?.addEventListener('click', async () => {

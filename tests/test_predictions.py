@@ -78,3 +78,33 @@ def test_prediction_accuracy_excludes_future_targets(db):
     db.record_forecast(sn, time.time(), [{"ts": target, "predicted_soc": 70.0}])
     out = db.prediction_accuracy(sn)
     assert out == []
+
+
+def test_prediction_accuracy_filters_by_made_at_cutoff(db):
+    """`since_made_at_ts` excludes predictions older than the cutoff so
+    the dashboard's headline summary can ignore stale rows produced by
+    pre-fix forecaster code."""
+    sn = "SN-CUTOFF"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    now = time.time()
+    target = int((now - 3600) // 3600) * 3600  # 1h ago
+
+    # Two forecasts for the same target: one OLD, one NEW.
+    made_old = target - 5 * 3600   # made 5h before target
+    made_new = target - 1 * 3600   # made 1h before target
+    db.record_forecast(sn, made_old, [{"ts": target, "predicted_soc": 50.0}])
+    db.record_forecast(sn, made_new, [{"ts": target, "predicted_soc": 70.0}])
+    db.record(sn, target - 60, input_w=0, output_w=0,
+              battery_pct=65, solar_w=0)
+    db.record(sn, target + 60, input_w=0, output_w=0,
+              battery_pct=65, solar_w=0)
+
+    # Without cutoff: both rows show up.
+    all_rows = db.prediction_accuracy(sn)
+    assert len(all_rows) == 2
+
+    # Cutoff between the two — only the newer row remains.
+    cutoff = made_new - 60
+    filtered = db.prediction_accuracy(sn, since_made_at_ts=cutoff)
+    assert len(filtered) == 1
+    assert filtered[0]["predicted_soc"] == 70.0

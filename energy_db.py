@@ -466,13 +466,23 @@ class EnergyDB:
 
     def prediction_accuracy(self, device_sn: str,
                             max_age_days: int = 14,
-                            limit: int = 500) -> list[dict]:
+                            limit: int = 500,
+                            since_made_at_ts: int | None = None) -> list[dict]:
         """Return predicted-vs-actual pairs for predictions whose target is
         in the past. Each entry has {made_at, target, predicted_soc,
         actual_soc, lead_time_h, error}. Joins each prediction to the
-        average last_battery_pct in the ±30 min window around the target."""
+        average last_battery_pct in the ±30 min window around the target.
+
+        `since_made_at_ts`: when set, only return predictions whose
+        `made_at` is at or after this unix timestamp. Used by the
+        dashboard to slice off forecasts produced by pre-fix code so
+        the headline accuracy summary reflects current behavior.
+        Defaults to the 14-day window when None."""
         now = int(time.time())
+        # Effective lower bound: max(default 14d window, caller's cutoff).
         cutoff_low = now - max_age_days * 86400
+        if since_made_at_ts is not None:
+            cutoff_low = max(cutoff_low, int(since_made_at_ts))
         with self._conn() as c:
             rows = c.execute(
                 """SELECT p.made_at, p.target, p.predicted_soc,

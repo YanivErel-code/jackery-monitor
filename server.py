@@ -77,6 +77,18 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Settings page without a container restart. Env-var fallback
 # (JACKERY_ADVISOR_HOUR) handled automatically by settings.py.
 
+# When the forecaster's behavior changes in a way that invalidates older
+# saved predictions, bump this timestamp to the deploy time of the fix.
+# The /api/forecast/accuracy endpoint exposes a "post-fix" summary using
+# this as a `made_at` floor so the dashboard headline reflects current
+# model behavior instead of being dragged down by stale rows that age
+# out over 14 days. Currently set to the deploy of aa1f086 (robust load
+# profile + unbiased overhead fit). Override via env var when shipping
+# new fixes if updating in code is inconvenient.
+FORECASTER_BREAKING_CHANGE_TS = int(
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777678272")
+)
+
 
 # ---------- app state ----------
 class AppState:
@@ -2310,17 +2322,9 @@ async def api_forecast(device_sn: str | None = None):
     }
 
 
-@app.get("/api/forecast/accuracy")
-def api_forecast_accuracy(device_sn: str | None = None):
-    """Predicted vs actual SOC for past forecasts. Joins each saved
-    prediction to the average actual battery_pct in the ±30 min window
-    around its target. Useful for evaluating how the model improves
-    as more data accumulates."""
-    if not device_sn:
-        device_sn = state.device.device_sn if state.device else None
-    if not device_sn:
-        return {"device_sn": None, "samples": [], "summary": {}}
-    samples = state.energy.prediction_accuracy(device_sn)
+def _bucket_accuracy(samples: list[dict]) -> dict[str, dict[str, float]]:
+    """Aggregate prediction-accuracy rows into MAE-per-lead-bucket. Pure;
+    no I/O. Used for both the legacy 14d summary and the post-fix slice."""
     summary: dict[str, dict[str, float]] = {}
     for s in samples:
         h = s["lead_time_h"]
@@ -2331,7 +2335,45 @@ def api_forecast_accuracy(device_sn: str | None = None):
     for b in summary.values():
         b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
         del b["sum_err"]
-    return {"device_sn": device_sn, "samples": samples, "summary": summary}
+    return summary
+
+
+@app.get("/api/forecast/accuracy")
+def api_forecast_accuracy(device_sn: str | None = None,
+                          since_ts: int | None = None):
+    """Predicted vs actual SOC for past forecasts. Joins each saved
+    prediction to the average actual battery_pct in the ±30 min window
+    around its target. Useful for evaluating how the model improves
+    as more data accumulates.
+
+    Returns two summaries:
+      - `summary`: legacy 14d window over ALL stored predictions
+        (including any made by older code versions)
+      - `summary_post_fix`: same buckets restricted to predictions made
+        AT OR AFTER the forecaster's most recent breaking change
+        (`FORECASTER_BREAKING_CHANGE_TS`). This is the more honest
+        signal of current model behavior.
+
+    `since_ts`: optional override for the post-fix cutoff. Defaults
+    to FORECASTER_BREAKING_CHANGE_TS when not provided."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {
+            "device_sn": None, "samples": [],
+            "summary": {}, "summary_post_fix": {},
+            "cutoff_ts": FORECASTER_BREAKING_CHANGE_TS,
+        }
+    samples = state.energy.prediction_accuracy(device_sn)
+    cutoff = int(since_ts) if since_ts is not None else FORECASTER_BREAKING_CHANGE_TS
+    samples_post_fix = [s for s in samples if (s.get("made_at") or 0) >= cutoff]
+    return {
+        "device_sn": device_sn,
+        "samples": samples,
+        "summary": _bucket_accuracy(samples),
+        "summary_post_fix": _bucket_accuracy(samples_post_fix),
+        "cutoff_ts": cutoff,
+    }
 
 
 @app.get("/api/daily_summary")
