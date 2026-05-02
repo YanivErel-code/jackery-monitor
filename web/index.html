@@ -174,7 +174,10 @@
         <div id="battery-packs-list" class="battery-packs-list"></div>
       </section>
 
-      <!-- Outputs — click to toggle (control via cloud MQTT) -->
+      <!-- Outputs — click to toggle (control via cloud MQTT). The
+           "AC charge" button at the end is the user's smart-charge
+           Kasa plug; only rendered when one is configured for this
+           device. -->
       <section class="card">
         <div class="card-header">
           <h2>Outputs</h2>
@@ -185,20 +188,8 @@
           <button class="switch" data-port="dc" type="button"><span class="sw-label">DC</span><span class="sw-state" id="sw-dc">—</span></button>
           <button class="switch" data-port="usb" type="button"><span class="sw-label">USB</span><span class="sw-state" id="sw-usb">—</span></button>
           <button class="switch" data-port="car" type="button"><span class="sw-label">Car</span><span class="sw-state" id="sw-car">—</span></button>
-        </div>
-      </section>
-
-      <!-- AC charging — manual override of the Kasa plug assigned to
-           smart-charge. Only renders when a plug is configured. -->
-      <section class="card" id="ac-charge-card" hidden>
-        <div class="card-header">
-          <h2>AC charging</h2>
-          <span class="hint" id="ac-charge-hint">—</span>
-        </div>
-        <div id="ac-charge-warning" class="hint" style="margin:0 0 8px; color:#fbbc04" hidden></div>
-        <div class="switches">
-          <button class="switch" id="ac-charge-toggle" type="button">
-            <span class="sw-label">Grid plug</span>
+          <button class="switch" id="ac-charge-toggle" type="button" hidden>
+            <span class="sw-label">AC charge</span>
             <span class="sw-state" id="ac-charge-state">—</span>
           </button>
         </div>

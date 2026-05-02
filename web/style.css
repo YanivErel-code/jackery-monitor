@@ -1027,15 +1027,21 @@ main {
 }
 
 /* ============== Switches ============== */
+/* Flex (not grid) so that hidden buttons (e.g. AC-charge plug when
+   not configured) collapse cleanly and the remaining buttons share
+   the full width evenly. Compact padding keeps 5 buttons on one row
+   without wrapping on typical viewports. */
 .switches {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .switch {
+  flex: 1 1 0;
+  min-width: 90px;
   display: flex; flex-direction: column; align-items: flex-start;
-  gap: 4px;
-  padding: 14px 16px;
+  gap: 2px;
+  padding: 10px 12px;
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1048,6 +1054,11 @@ main {
 .switch:hover { border-color: #2f3744; background: var(--bg-elev-3, rgba(255,255,255,.02)); }
 .switch:disabled { cursor: wait; opacity: .7; }
 .switch.pending { border-color: var(--accent); }
+/* Smart-charge active = the periodic loop will revert manual toggles
+   on the next 5-min tick. Yellow border + the title attribute on the
+   button explains why. */
+.switch.warn { border-color: #fbbc04; }
+.switch.warn:hover { border-color: #fbbc04; }
 
 /* ============== Settings tab ============== */
 .settings-fields {
