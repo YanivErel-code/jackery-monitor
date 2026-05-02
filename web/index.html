@@ -174,13 +174,14 @@
         <div id="battery-packs-list" class="battery-packs-list"></div>
       </section>
 
-      <!-- Outputs — click to toggle (control via cloud MQTT). The
-           "AC charge" button at the end is the user's smart-charge
-           Kasa plug; only rendered when one is configured for this
-           device. -->
+      <!-- Power — output ports (cloud MQTT toggles) plus the
+           AC-charge Kasa plug at the end (only rendered when a plug
+           is configured for this device's smart-charge). Section is
+           "Power" because the AC-charge button is an *input* (grid
+           → battery), not an output, so "Outputs" was misleading. -->
       <section class="card">
         <div class="card-header">
-          <h2>Outputs</h2>
+          <h2>Power</h2>
           <span class="hint">Click to toggle</span>
         </div>
         <div class="switches">
