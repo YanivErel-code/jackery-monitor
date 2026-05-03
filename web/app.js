@@ -5588,9 +5588,11 @@ async function loadBackupAll() {
   loadBackupStatus();
   loadBackupSchedule();
   // After creds load we know whether to auto-discover. loadBackupCreds
-  // sets _backupHasCreds; if false we sweep the LAN once for SMB hosts
-  // (cached for the rest of the session).
-  if (!_backupHasCreds) {
+  // sets _backupHasCreds; if false AND we're on SMB transport we sweep
+  // the LAN once for SMB hosts (cached for the rest of the session).
+  // rsync transports don't get LAN discovery — port-445 SMB scanning is
+  // SMB-specific and would mislead a user who's set Transport to rsync.
+  if (!_backupHasCreds && _backupTransport() === 'smb') {
     runBackupDiscovery({ force: false });
   } else {
     const panel = $('backup-discover-panel');
@@ -5602,6 +5604,55 @@ async function loadBackupAll() {
 // trigger another 5-second LAN sweep. Manual "Rescan" bypasses this.
 let _backupHasCreds = false;
 let _backupDiscoveryRan = false;
+
+// Required fields per transport. Mirrors the same map on the server
+// side. Used to decide when the auto-test has enough input to fire and
+// to validate Save before sending the body.
+const _BACKUP_REQUIRED_FIELDS = {
+  smb: ['host', 'share', 'username', 'password'],
+  rsync_ssh: ['host', 'ssh_user', 'ssh_key', 'target_dir'],
+  rsyncd: ['host', 'rsync_module', 'rsyncd_user', 'rsyncd_password'],
+};
+
+// Every input/textarea/select that contributes to the creds body. Used
+// by the Forget button to wipe state and by the auto-test wiring to
+// listen for input changes regardless of which transport is active.
+const _ALL_BACKUP_INPUT_IDS = [
+  'backup-transport',
+  'backup-host',
+  // SMB
+  'backup-share', 'backup-subdir', 'backup-username',
+  'backup-password', 'backup-domain',
+  // rsync over SSH
+  'backup-ssh-user', 'backup-target-dir', 'backup-ssh-key',
+  // rsyncd
+  'backup-rsync-module', 'backup-target-subpath',
+  'backup-rsyncd-user', 'backup-rsyncd-password',
+];
+
+function _backupTransport() {
+  return ($('backup-transport')?.value || 'smb');
+}
+
+// Show only the rows tagged for the current transport (or the universal
+// rows tagged data-transport-row="all"). Also hides the SMB-only LAN
+// discovery panel for non-SMB transports.
+function _applyBackupTransportVisibility() {
+  const t = _backupTransport();
+  document.querySelectorAll('[data-transport-row]').forEach(row => {
+    const allowed = row.dataset.transportRow.split(',').map(s => s.trim());
+    row.hidden = !(allowed.includes('all') || allowed.includes(t));
+  });
+  const panel = $('backup-discover-panel');
+  if (panel && t !== 'smb') panel.hidden = true;
+}
+
+$('backup-transport')?.addEventListener('change', () => {
+  _applyBackupTransportVisibility();
+  // Changing transport invalidates anything we cached about the form
+  // (share lookup, last-tested signature) — let the auto-test wiring
+  // pick up fresh on the next keystroke.
+});
 
 // Translate machine-readable error tokens from the backup module into
 // something a normal human can act on. Anything not in this map gets
@@ -5686,6 +5737,11 @@ $('backup-discover-rescan')?.addEventListener('click', () => {
 let _backupShareSig = '';
 async function _maybeLoadShares() {
   const f = _readBackupForm();
+  // Share enumeration uses smbclient -L, so it's SMB-specific. Other
+  // transports don't have a "share" concept and the auto-test wiring
+  // skips this for non-SMB anyway, but be defensive in case a caller
+  // invokes _maybeLoadShares() directly.
+  if (f.transport !== 'smb') return;
   if (!f.host || !f.username || !f.password) return;
   const sig = `${f.host}|${f.username}|${f.password}|${f.domain}`;
   if (sig === _backupShareSig) return;
@@ -5753,10 +5809,35 @@ async function loadBackupCreds() {
     _backupHasCreds = !!j.has_credentials;
     if (j.has_credentials && j.remote) {
       const remote = j.remote;
-      status.textContent = `saved · \\\\${remote.host || '?'}\\${remote.share || '?'}`;
-      // Pre-fill non-secret fields from the saved record so users can edit
-      // a single field without re-typing everything. Password stays blank
-      // (we never echo it back from the server).
+      const transport = remote.transport || 'smb';
+
+      // Build a transport-aware "saved · <where>" status line so the
+      // user can tell at a glance which destination is configured.
+      let saved_label;
+      if (transport === 'smb') {
+        saved_label = `saved · \\\\${remote.host || '?'}\\${remote.share || '?'}`;
+      } else if (transport === 'rsync_ssh') {
+        saved_label = `saved · ${remote.ssh_user || '?'}@${remote.host || '?'}:${remote.target_dir || ''}`;
+      } else if (transport === 'rsyncd') {
+        const sub = remote.target_subpath ? `/${remote.target_subpath}` : '';
+        saved_label = `saved · rsync://${remote.rsyncd_user || '?'}@${remote.host || '?'}/${remote.rsync_module || '?'}${sub}`;
+      } else {
+        saved_label = `saved · ${remote.host || '?'}`;
+      }
+      status.textContent = saved_label;
+
+      // Set the transport selector and apply visibility BEFORE
+      // populating fields so hidden rows don't end up with stale data.
+      const sel = $('backup-transport');
+      if (sel) {
+        sel.value = transport;
+        _applyBackupTransportVisibility();
+      }
+
+      // Pre-fill non-secret fields from the saved record so users can
+      // edit a single field without re-typing everything. Secrets
+      // (password / ssh_key / rsyncd_password) are never echoed back
+      // from the server — the user re-pastes them when re-saving.
       const setIfEmpty = (id, value) => {
         const el = $(id);
         if (!el) return;
@@ -5766,14 +5847,24 @@ async function loadBackupCreds() {
         }
       };
       setIfEmpty('backup-host', remote.host);
-      setIfEmpty('backup-share', remote.share);
-      setIfEmpty('backup-subdir', remote.subdir || 'jackery-monitor');
-      setIfEmpty('backup-username', remote.username);
-      setIfEmpty('backup-domain', remote.domain || 'WORKGROUP');
+      if (transport === 'smb') {
+        setIfEmpty('backup-share', remote.share);
+        setIfEmpty('backup-subdir', remote.subdir || 'jackery-monitor');
+        setIfEmpty('backup-username', remote.username);
+        setIfEmpty('backup-domain', remote.domain || 'WORKGROUP');
+      } else if (transport === 'rsync_ssh') {
+        setIfEmpty('backup-ssh-user', remote.ssh_user);
+        setIfEmpty('backup-target-dir', remote.target_dir);
+      } else if (transport === 'rsyncd') {
+        setIfEmpty('backup-rsync-module', remote.rsync_module);
+        setIfEmpty('backup-target-subpath', remote.target_subpath);
+        setIfEmpty('backup-rsyncd-user', remote.rsyncd_user);
+      }
       $('backup-state-line').textContent = 'Destination configured. Daily backup will run automatically.';
     } else {
       status.textContent = 'not configured';
       $('backup-state-line').textContent = 'No destination saved yet — fill in the form below and Test before saving.';
+      _applyBackupTransportVisibility();
     }
   } catch (e) {
     status.textContent = 'failed to load';
@@ -5784,11 +5875,26 @@ document.getElementById('backup-creds-form')?.addEventListener('submit', async (
   e.preventDefault();
   _backupSetMsg('backup-creds-msg', 'Saving…', '');
   const body = _readBackupForm();
-  if (!body.password) {
-    // The server requires a password on every save (the encrypted file
-    // can't be patched in place without re-encrypting). Tell the user
-    // up-front rather than letting the server 400.
-    _backupSetMsg('backup-creds-msg', 'Password is required to save.', 'err');
+  // Validate per-transport required fields up-front so the user gets
+  // a meaningful inline message instead of a 400 from the server.
+  const required = _BACKUP_REQUIRED_FIELDS[body.transport] || [];
+  const missing = required.filter(k => !body[k]);
+  if (missing.length) {
+    const labelMap = {
+      password: 'Password',
+      ssh_key: 'SSH private key',
+      rsyncd_password: 'rsyncd password',
+      ssh_user: 'SSH user',
+      target_dir: 'Target directory',
+      rsync_module: 'rsync module',
+      rsyncd_user: 'rsyncd user',
+      host: 'Host',
+      share: 'Share',
+      username: 'Username',
+    };
+    const human = missing.map(k => labelMap[k] || k).join(', ');
+    _backupSetMsg('backup-creds-msg',
+      `Missing required field${missing.length === 1 ? '' : 's'}: ${human}.`, 'err');
     return;
   }
   try {
@@ -5801,7 +5907,11 @@ document.getElementById('backup-creds-form')?.addEventListener('submit', async (
     try { j = await r.json(); } catch (_) {}
     if (!r.ok) throw new Error(j.detail || j.error || ('HTTP ' + r.status));
     _backupSetMsg('backup-creds-msg', 'Saved.', 'ok');
-    $('backup-password').value = '';
+    // Clear secret fields so they're not left in the DOM after save.
+    // Non-secrets are repopulated from the server response, so leaving
+    // those alone is fine.
+    ['backup-password', 'backup-ssh-key', 'backup-rsyncd-password']
+      .forEach(id => { const el = $(id); if (el) el.value = ''; });
     setTimeout(() => _backupSetMsg('backup-creds-msg', '', ''), 2000);
     loadBackupCreds();
     loadBackupStatus();
@@ -5816,7 +5926,8 @@ document.getElementById('backup-creds-form')?.addEventListener('submit', async (
 // in to avoid noisy errors mid-typing.
 async function _runBackupTest(mode = 'manual') {
   const formBody = _readBackupForm();
-  const completeForm = formBody.host && formBody.share && formBody.username && formBody.password;
+  const required = _BACKUP_REQUIRED_FIELDS[formBody.transport] || [];
+  const completeForm = required.every(k => !!formBody[k]);
   if (mode === 'auto' && !completeForm) {
     // Quietly do nothing while the user is still typing.
     return;
@@ -5835,7 +5946,7 @@ async function _runBackupTest(mode = 'manual') {
     try { j = await r.json(); } catch (_) { /* non-JSON body */ }
     if (r.ok && j.ok) {
       const ms = (j.latency_ms != null) ? ` (${j.latency_ms} ms)` : '';
-      _backupSetMsg('backup-creds-msg', `OK — mount + write probe succeeded${ms}.`, 'ok');
+      _backupSetMsg('backup-creds-msg', `OK — write/read probe succeeded${ms}.`, 'ok');
     } else {
       // FastAPI HTTPException returns {detail: "..."} on 4xx/5xx; our own
       // ok:false body uses {error: "..."}. Try both, then HTTP status, so
@@ -5850,62 +5961,102 @@ async function _runBackupTest(mode = 'manual') {
 
 $('backup-test')?.addEventListener('click', () => _runBackupTest('manual'));
 
-// Live auto-test: as soon as host + share + username + password are all
-// non-empty, fire a connectivity check 700ms after the last keystroke. The
-// debounce keeps us from hammering the NAS while the user is still typing
-// and keeps the message line stable.
+// Live auto-test: as soon as the per-transport required fields are all
+// non-empty, fire a connectivity check 700ms after the last keystroke.
+// The debounce keeps us from hammering the NAS while the user is still
+// typing and keeps the message line stable.
 (function _wireBackupAutoTest() {
-  const ids = ['backup-host', 'backup-share', 'backup-subdir',
-               'backup-username', 'backup-password', 'backup-domain'];
   let testTimer = null;
   let shareTimer = null;
   let lastSig = '';
   function schedule() {
     const f = _readBackupForm();
-    // Share lookup needs only host/username/password — schedule that
-    // independently from the connectivity test (which needs all four).
-    if (f.host && f.username && f.password) {
+    // SMB share lookup is SMB-only; schedule it independently of the
+    // connectivity test (which uses the full per-transport field set).
+    if (f.transport === 'smb' && f.host && f.username && f.password) {
       if (shareTimer) clearTimeout(shareTimer);
       shareTimer = setTimeout(() => _maybeLoadShares(), 700);
     }
-    const complete = f.host && f.share && f.username && f.password;
-    if (!complete) return;
-    // Skip if nothing actually changed since the last successful trigger
-    // (e.g. focus blur events on the same value).
-    const sig = `${f.host}|${f.share}|${f.subdir}|${f.username}|${f.password}|${f.domain}`;
+    const required = _BACKUP_REQUIRED_FIELDS[f.transport] || [];
+    if (!required.every(k => !!f[k])) return;
+    // JSON-stringify the body for the change-detection signature so
+    // adding new transports doesn't require a custom join() format.
+    const sig = JSON.stringify(f);
     if (sig === lastSig) return;
     lastSig = sig;
     if (testTimer) clearTimeout(testTimer);
     testTimer = setTimeout(() => _runBackupTest('auto'), 700);
   }
-  ids.forEach(id => {
+  // Listen on every transport's inputs + the transport selector
+  // itself, so switching transports + filling the new fields fires
+  // the auto-test on the next idle window.
+  _ALL_BACKUP_INPUT_IDS.forEach(id => {
     const el = $(id);
-    if (el) el.addEventListener('input', schedule);
+    if (!el) return;
+    const evt = (el.tagName === 'SELECT') ? 'change' : 'input';
+    el.addEventListener(evt, schedule);
   });
 })();
 
 $('backup-clear')?.addEventListener('click', async () => {
   if (!confirm('Forget saved backup destination? Daily backups will stop until new credentials are saved.')) return;
   await fetch('/api/backup/credentials', { method: 'DELETE' });
-  ['backup-host','backup-share','backup-username','backup-password','backup-domain'].forEach(id => {
+  // Wipe every transport's input so a re-save starts from a clean form.
+  _ALL_BACKUP_INPUT_IDS.forEach(id => {
     const el = $(id);
-    if (el) { el.value = ''; el.dataset.fromSaved = ''; }
+    if (!el) return;
+    el.value = '';
+    delete el.dataset.fromSaved;
   });
-  $('backup-subdir').value = 'jackery-monitor';
-  $('backup-domain').value = 'WORKGROUP';
+  // Restore defaults for fields with non-empty placeholders.
+  if ($('backup-subdir')) $('backup-subdir').value = 'jackery-monitor';
+  if ($('backup-domain')) $('backup-domain').value = 'WORKGROUP';
+  if ($('backup-transport')) $('backup-transport').value = 'smb';
+  _applyBackupTransportVisibility();
   loadBackupCreds();
   loadBackupStatus();
 });
 
+// Read the form into a creds body shaped for the API. Returns only the
+// fields relevant to the currently-selected transport so unused fields
+// from a previous transport don't sneak into the JSON body. `transport`
+// is always present and used by the server to dispatch.
 function _readBackupForm() {
-  return {
-    host: ($('backup-host').value || '').trim(),
-    share: ($('backup-share').value || '').trim(),
-    subdir: ($('backup-subdir').value || '').trim() || 'jackery-monitor',
-    username: ($('backup-username').value || '').trim(),
-    password: $('backup-password').value || '',
-    domain: ($('backup-domain').value || '').trim() || 'WORKGROUP',
+  const transport = _backupTransport();
+  const base = {
+    transport,
+    host: ($('backup-host')?.value || '').trim(),
   };
+  if (transport === 'smb') {
+    return {
+      ...base,
+      share: ($('backup-share')?.value || '').trim(),
+      subdir: ($('backup-subdir')?.value || '').trim() || 'jackery-monitor',
+      username: ($('backup-username')?.value || '').trim(),
+      password: $('backup-password')?.value || '',
+      domain: ($('backup-domain')?.value || '').trim() || 'WORKGROUP',
+    };
+  }
+  if (transport === 'rsync_ssh') {
+    return {
+      ...base,
+      ssh_user: ($('backup-ssh-user')?.value || '').trim(),
+      target_dir: ($('backup-target-dir')?.value || '').trim(),
+      // Don't .trim() ssh_key — leading/trailing whitespace in a key
+      // can change its identity and break the saved value.
+      ssh_key: $('backup-ssh-key')?.value || '',
+    };
+  }
+  if (transport === 'rsyncd') {
+    return {
+      ...base,
+      rsync_module: ($('backup-rsync-module')?.value || '').trim(),
+      target_subpath: ($('backup-target-subpath')?.value || '').trim(),
+      rsyncd_user: ($('backup-rsyncd-user')?.value || '').trim(),
+      rsyncd_password: $('backup-rsyncd-password')?.value || '',
+    };
+  }
+  return base;
 }
 
 async function loadBackupStatus() {
@@ -6050,6 +6201,13 @@ _wireBackupNumericSetting('backup-keep-count', 'backup-keep-msg',
     outOfRangeMsg: 'Must be between 1 and 3650.',
     okMsg: (n) => `Saved — keeping ${n} snapshot${n === 1 ? '' : 's'}.`,
   });
+
+// One-time: apply the initial transport visibility now so the hidden
+// rsync rows are correctly hidden on first paint, before loadBackupCreds
+// fires and possibly re-applies. Subsequent transport changes go
+// through _applyBackupTransportVisibility() via the change handler
+// registered above.
+_applyBackupTransportVisibility();
 
 async function loadBackupSchedule() {
   const hourEl = $('backup-schedule-hour');

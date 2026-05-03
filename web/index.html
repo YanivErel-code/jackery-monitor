@@ -1093,7 +1093,7 @@
           <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
-          Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS over SMB. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic, etc.) get re-prompted. Backups are kept forever; prune manually on the NAS if needed.
+          Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS, over either SMB or rsync. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic, etc.) get re-prompted. rsync over SSH adds delta transfer + hardlinked snapshots, so year-long retention costs near-zero extra disk on the NAS.
         </p>
         <p id="backup-state-line" class="hint" style="margin:6px 0 12px"></p>
 
@@ -1113,16 +1113,38 @@
 
         <form id="backup-creds-form">
           <div class="settings-fields">
+            <!-- Transport selector. Drives which other rows are visible
+                 (via [data-transport-row=...] attributes below). The
+                 server stores the chosen transport in the encrypted
+                 creds blob; defaults to "smb" so existing users keep
+                 working without a migration. -->
             <div class="settings-row">
+              <label class="settings-label" for="backup-transport">
+                <span class="settings-label-text">Transport</span>
+                <span class="settings-hint">How to ship snapshots to the NAS. SMB is the simplest if your NAS already exposes a Samba share. <em>rsync over SSH</em> adds delta transfer and hardlinked snapshots — the same DB resent nightly costs almost no extra disk on the NAS.</span>
+              </label>
+              <div class="settings-control">
+                <select id="backup-transport" class="device-select" style="min-width:220px">
+                  <option value="smb">SMB / CIFS</option>
+                  <option value="rsync_ssh">rsync over SSH</option>
+                  <option value="rsyncd">rsync (rsyncd, no SSH)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Host: shared by every transport. -->
+            <div class="settings-row" data-transport-row="all">
               <label class="settings-label" for="backup-host">
                 <span class="settings-label-text">NAS host / IP</span>
-                <span class="settings-hint">Hostname or IP of the remote SMB server (e.g. <code>nas.local</code> or <code>192.168.1.50</code>).</span>
+                <span class="settings-hint">Hostname or IP of the remote NAS (e.g. <code>nas.local</code> or <code>192.168.1.50</code>).</span>
               </label>
               <div class="settings-control">
                 <input id="backup-host" type="text" class="device-select" autocomplete="off" placeholder="nas.local" style="min-width:220px" />
               </div>
             </div>
-            <div class="settings-row">
+
+            <!-- ===== SMB-specific fields ===== -->
+            <div class="settings-row" data-transport-row="smb">
               <label class="settings-label" for="backup-share">
                 <span class="settings-label-text">Share name</span>
                 <span class="settings-hint">The SMB share to mount (no leading slash, e.g. <code>backups</code>).</span>
@@ -1133,7 +1155,7 @@
                 <span id="backup-share-hint" class="hint" style="margin-left:8px"></span>
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row" data-transport-row="smb">
               <label class="settings-label" for="backup-subdir">
                 <span class="settings-label-text">Subdirectory</span>
                 <span class="settings-hint">Folder inside the share where snapshots get written. Created automatically on first run.</span>
@@ -1142,7 +1164,7 @@
                 <input id="backup-subdir" type="text" class="device-select" autocomplete="off" placeholder="jackery-monitor" value="jackery-monitor" style="min-width:220px" />
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row" data-transport-row="smb">
               <label class="settings-label" for="backup-username">
                 <span class="settings-label-text">Username</span>
                 <span class="settings-hint">SMB account that can write to the share above.</span>
@@ -1151,7 +1173,7 @@
                 <input id="backup-username" type="text" class="device-select" autocomplete="username" style="min-width:220px" />
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row" data-transport-row="smb">
               <label class="settings-label" for="backup-password">
                 <span class="settings-label-text">Password</span>
                 <span class="settings-hint">Encrypted at rest. Leave blank to keep the saved value when re-saving other fields.</span>
@@ -1160,7 +1182,7 @@
                 <input id="backup-password" type="password" class="device-select" autocomplete="new-password" placeholder="••••••••" style="min-width:220px" />
               </div>
             </div>
-            <div class="settings-row">
+            <div class="settings-row" data-transport-row="smb">
               <label class="settings-label" for="backup-domain">
                 <span class="settings-label-text">Domain (optional)</span>
                 <span class="settings-hint">Most home NAS setups can leave this as <code>WORKGROUP</code>.</span>
@@ -1169,14 +1191,90 @@
                 <input id="backup-domain" type="text" class="device-select" autocomplete="off" value="WORKGROUP" style="min-width:220px" />
               </div>
             </div>
+
+            <!-- ===== rsync over SSH fields ===== -->
+            <div class="settings-row" data-transport-row="rsync_ssh" hidden>
+              <label class="settings-label" for="backup-ssh-user">
+                <span class="settings-label-text">SSH user</span>
+                <span class="settings-hint">Account on the NAS that can write to the target directory. Make sure SSH is enabled in Synology Control Panel → Terminal &amp; SNMP.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-ssh-user" type="text" class="device-select" autocomplete="off" placeholder="backupuser" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsync_ssh" hidden>
+              <label class="settings-label" for="backup-target-dir">
+                <span class="settings-label-text">Target directory</span>
+                <span class="settings-hint">Absolute path on the NAS where snapshot dirs land (e.g. <code>/volume1/backups/jackery-monitor</code>). Must already exist and be writable by the SSH user.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-target-dir" type="text" class="device-select" autocomplete="off" placeholder="/volume1/backups/jackery-monitor" style="min-width:340px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsync_ssh" hidden>
+              <label class="settings-label" for="backup-ssh-key">
+                <span class="settings-label-text">SSH private key</span>
+                <span class="settings-hint">Paste the OpenSSH-format private key. Encrypted at rest, materialised as a 0600 tempfile only during each rsync run. Generate a key on your NAS or desktop, then add the matching public key to <code>~/.ssh/authorized_keys</code> on the NAS for the user above. Leave blank to keep the saved key when re-saving other fields.</span>
+              </label>
+              <div class="settings-control">
+                <textarea id="backup-ssh-key" class="device-select" rows="6" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." style="min-width:480px; font-family:monospace; font-size:12px"></textarea>
+              </div>
+            </div>
+
+            <!-- ===== rsyncd fields ===== -->
+            <div class="settings-row" data-transport-row="rsyncd" hidden>
+              <label class="settings-label" for="backup-rsync-module">
+                <span class="settings-label-text">rsync module</span>
+                <span class="settings-hint">Module name as configured in the NAS's rsyncd.conf (e.g. <code>backups</code>).</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-rsync-module" type="text" class="device-select" autocomplete="off" placeholder="backups" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsyncd" hidden>
+              <label class="settings-label" for="backup-target-subpath">
+                <span class="settings-label-text">Target subpath</span>
+                <span class="settings-hint">Optional path inside the module where snapshots land. Leave blank to use the module root.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-target-subpath" type="text" class="device-select" autocomplete="off" placeholder="jackery-monitor" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsyncd" hidden>
+              <label class="settings-label" for="backup-rsyncd-user">
+                <span class="settings-label-text">rsyncd user</span>
+                <span class="settings-hint">Username from the NAS's rsyncd secrets file.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-rsyncd-user" type="text" class="device-select" autocomplete="username" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsyncd" hidden>
+              <label class="settings-label" for="backup-rsyncd-password">
+                <span class="settings-label-text">rsyncd password</span>
+                <span class="settings-hint">From the rsyncd secrets file. Encrypted at rest. Leave blank to keep the saved value when re-saving other fields.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-rsyncd-password" type="password" class="device-select" autocomplete="new-password" placeholder="••••••••" style="min-width:220px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsyncd" hidden>
+              <div class="settings-label"></div>
+              <div class="settings-control">
+                <p class="hint" style="margin:0">
+                  <strong>Note:</strong> rsyncd has no remote-delete primitive, so retention is a no-op for this transport. Old snapshots accumulate unless you prune manually on the NAS, or switch to <em>rsync over SSH</em>.
+                </p>
+              </div>
+            </div>
+
             <!-- Schedule input. Auto-saves on change via /api/settings —
                  the same key (backup_schedule_hour) the daily loop reads
                  every iteration, so a change here applies on the next
                  tick without a container restart. -->
-            <div class="settings-row">
+            <div class="settings-row" data-transport-row="all">
               <label class="settings-label" for="backup-schedule-hour">
                 <span class="settings-label-text">Daily backup hour</span>
-                <span class="settings-hint">Local hour (0-23) when the daily SMB backup fires. <code>3</code> = 3 AM. Saves automatically on change.</span>
+                <span class="settings-hint">Local hour (0-23) when the daily backup fires. <code>3</code> = 3 AM. Saves automatically on change.</span>
               </label>
               <div class="settings-control">
                 <input id="backup-schedule-hour" type="number" min="0" max="23" step="1" class="device-select" style="width:80px" />
@@ -1187,11 +1285,11 @@
             <!-- Retention. Bound to backup_keep_count; checked after
                  every successful upload (manual or scheduled). Older
                  snapshots beyond the count get pruned. Manual files /
-                 non-snapshot dirs in the share are left alone. -->
-            <div class="settings-row">
+                 non-snapshot dirs at the destination are left alone. -->
+            <div class="settings-row" data-transport-row="all">
               <label class="settings-label" for="backup-keep-count">
                 <span class="settings-label-text">Snapshots to keep</span>
-                <span class="settings-hint">After each successful upload, snapshots beyond this count are deleted (newest kept). <code>30</code> ≈ 1 month of dailies. <code>365</code> ≈ a year. Saves automatically.</span>
+                <span class="settings-hint">After each successful upload, snapshots beyond this count are deleted (newest kept). <code>30</code> ≈ 1 month of dailies. <code>365</code> ≈ a year. Saves automatically. Note: <em>rsyncd</em> can't delete remote dirs — see warning above.</span>
               </label>
               <div class="settings-control">
                 <input id="backup-keep-count" type="number" min="1" max="3650" step="1" class="device-select" style="width:90px" />

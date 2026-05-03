@@ -4044,26 +4044,55 @@ def api_backup_creds_status():
     }
 
 
+# Required fields per transport. Kept here (rather than imported from
+# backup_creds) so the API can return a clean 400 with a "missing fields"
+# message before we even try to save / test. backup_creds.save() also
+# validates, but this layer gives nicer error feedback for the UI.
+_BACKUP_REQUIRED_PER_TRANSPORT: dict[str, tuple[str, ...]] = {
+    "smb": ("host", "share", "username", "password"),
+    "rsync_ssh": ("host", "ssh_user", "ssh_key", "target_dir"),
+    "rsyncd": ("host", "rsync_module", "rsyncd_user", "rsyncd_password"),
+}
+
+
+def _build_backup_creds_from_body(body: dict) -> dict:
+    """Normalise an incoming /api/backup/* body into a creds dict.
+    Defaults `transport` to "smb" so callers (login.html's setup
+    restore wizard, the legacy SMB UI before transport-aware JS lands)
+    that don't pass it keep working unchanged.
+
+    Raises HTTPException(400) on unknown transport or missing fields.
+    """
+    transport = (body.get("transport") or "smb").strip() or "smb"
+    if transport not in _BACKUP_REQUIRED_PER_TRANSPORT:
+        raise HTTPException(400, f"unknown transport: {transport!r}")
+    required = _BACKUP_REQUIRED_PER_TRANSPORT[transport]
+    missing = [k for k in required if not body.get(k)]
+    if missing:
+        raise HTTPException(
+            400,
+            f"required fields missing for {transport}: {', '.join(missing)}",
+        )
+    return {**body, "transport": transport}
+
+
 @app.post("/api/backup/credentials")
 def api_backup_creds_save(body: dict):
-    """Persist remote-NAS SMB credentials. Required fields: host, share,
-    username, password. Optional: subdir (default 'jackery-monitor'),
-    domain (default 'WORKGROUP'). Saving overwrites any prior config.
-    The save itself doesn't validate connectivity — the UI is expected
-    to call /api/backup/test immediately after to surface errors before
-    the user leaves the form."""
-    body = body or {}
-    host = (body.get("host") or "").strip()
-    share = (body.get("share") or "").strip()
-    username = (body.get("username") or "").strip()
-    password = body.get("password") or ""
-    subdir = (body.get("subdir") or "jackery-monitor").strip()
-    domain = (body.get("domain") or "WORKGROUP").strip()
-    if not host or not share or not username or not password:
-        raise HTTPException(400, "host, share, username, password are required")
-    if not backup_creds.save(host=host, share=share, subdir=subdir,
-                              username=username, password=password,
-                              domain=domain):
+    """Persist remote-backup credentials. Body shape varies by transport:
+
+      smb:       {transport:"smb",       host, share, subdir?, username,
+                  password, domain?}
+      rsync_ssh: {transport:"rsync_ssh", host, ssh_user, ssh_key,
+                  target_dir}
+      rsyncd:    {transport:"rsyncd",    host, rsync_module,
+                  target_subpath?, rsyncd_user, rsyncd_password}
+
+    `transport` defaults to "smb" if omitted. Saving overwrites any
+    prior config. The save itself doesn't validate connectivity — the
+    UI is expected to call /api/backup/test immediately after to
+    surface errors before the user leaves the form."""
+    creds = _build_backup_creds_from_body(body or {})
+    if not backup_creds.save(**creds):
         raise HTTPException(500, "failed to save backup credentials")
     return {"ok": True}
 
@@ -4076,27 +4105,18 @@ def api_backup_creds_clear():
 
 @app.post("/api/backup/test")
 async def api_backup_test(body: dict | None = None):
-    """Connectivity test: mount, write a probe file, read it back, delete,
-    unmount. Doesn't run a real backup. Returns {ok, latency_ms} on
-    success or {ok: False, error: ...} on failure. Run in a thread
-    because mount.cifs blocks.
+    """Connectivity test: write a probe file, read it back, delete it.
+    Doesn't run a real backup. Returns {ok, latency_ms} on success or
+    {ok: False, error: ...} on failure. Runs in a thread since the
+    underlying smbclient/rsync calls block.
 
-    If `body` provides override creds (host/share/username/password/
-    subdir/domain), test those instead of the saved ones — lets the UI
-    validate creds *before* persisting them.
+    If `body` includes a `host` field, the supplied creds are tested
+    instead of the saved ones — lets the UI validate before persisting.
+    Otherwise the saved creds are loaded and tested.
     """
     creds = None
-    if body and any(body.get(k) for k in ("host", "share", "username", "password")):
-        creds = {
-            "host": (body.get("host") or "").strip(),
-            "share": (body.get("share") or "").strip(),
-            "subdir": (body.get("subdir") or "jackery-monitor").strip(),
-            "username": (body.get("username") or "").strip(),
-            "password": body.get("password") or "",
-            "domain": (body.get("domain") or "WORKGROUP").strip(),
-        }
-        if not all(creds[k] for k in ("host", "share", "username", "password")):
-            raise HTTPException(400, "host, share, username, password are required")
+    if body and body.get("host"):
+        creds = _build_backup_creds_from_body(body)
     return await asyncio.to_thread(backup.test_connectivity, creds)
 
 
@@ -4210,18 +4230,10 @@ def _require_no_user():
 @app.post("/api/backup/setup_restore/test")
 async def api_backup_setup_restore_test(body: dict):
     """Pre-auth connectivity test. Same logic as /api/backup/test but
-    only works on a fresh install."""
+    only works on a fresh install. Accepts the same per-transport body
+    shape as /api/backup/credentials."""
     _require_no_user()
-    if not body or not all(body.get(k) for k in ("host", "share", "username", "password")):
-        raise HTTPException(400, "host, share, username, password are required")
-    creds = {
-        "host": (body.get("host") or "").strip(),
-        "share": (body.get("share") or "").strip(),
-        "subdir": (body.get("subdir") or "jackery-monitor").strip(),
-        "username": (body.get("username") or "").strip(),
-        "password": body.get("password") or "",
-        "domain": (body.get("domain") or "WORKGROUP").strip(),
-    }
+    creds = _build_backup_creds_from_body(body or {})
     return await asyncio.to_thread(backup.test_connectivity, creds)
 
 
@@ -4229,16 +4241,7 @@ async def api_backup_setup_restore_test(body: dict):
 async def api_backup_setup_restore_snapshots(body: dict):
     """Pre-auth snapshot listing."""
     _require_no_user()
-    if not body or not all(body.get(k) for k in ("host", "share", "username", "password")):
-        raise HTTPException(400, "host, share, username, password are required")
-    creds = {
-        "host": (body.get("host") or "").strip(),
-        "share": (body.get("share") or "").strip(),
-        "subdir": (body.get("subdir") or "jackery-monitor").strip(),
-        "username": (body.get("username") or "").strip(),
-        "password": body.get("password") or "",
-        "domain": (body.get("domain") or "WORKGROUP").strip(),
-    }
+    creds = _build_backup_creds_from_body(body or {})
     snaps = await asyncio.to_thread(backup.list_remote_snapshots, creds)
     return {"snapshots": snaps}
 
@@ -4246,36 +4249,23 @@ async def api_backup_setup_restore_snapshots(body: dict):
 @app.post("/api/backup/setup_restore/restore")
 async def api_backup_setup_restore_run(body: dict):
     """Pre-auth restore. Drops the snapshot into /data and persists the
-    SMB creds for the daily backup loop. After this returns ok=True the
+    creds for the daily backup loop. After this returns ok=True the
     UI redirects to /login (the restored auth.json has the old user)."""
     _require_no_user()
     body = body or {}
-    if not all(body.get(k) for k in ("host", "share", "username", "password")):
-        raise HTTPException(400, "host, share, username, password are required")
     snapshot = (body.get("snapshot") or "").strip()
     if not snapshot:
         raise HTTPException(400, "snapshot is required")
-    creds = {
-        "host": (body.get("host") or "").strip(),
-        "share": (body.get("share") or "").strip(),
-        "subdir": (body.get("subdir") or "jackery-monitor").strip(),
-        "username": (body.get("username") or "").strip(),
-        "password": body.get("password") or "",
-        "domain": (body.get("domain") or "WORKGROUP").strip(),
-    }
+    creds = _build_backup_creds_from_body(body)
     scope = body.get("scope") or {"full": True}
     result = await asyncio.to_thread(
         backup.run_restore,
         snapshot_dir_name=snapshot, scope=scope, creds=creds,
     )
     if result.get("ok"):
-        # Persist the same SMB creds so the daily loop can keep
+        # Persist the same creds so the daily loop can keep
         # backing up to the same destination after the user signs in.
-        backup_creds.save(
-            host=creds["host"], share=creds["share"], subdir=creds["subdir"],
-            username=creds["username"], password=creds["password"],
-            domain=creds["domain"],
-        )
+        backup_creds.save(**creds)
     return result
 
 
