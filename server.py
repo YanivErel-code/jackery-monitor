@@ -3358,6 +3358,21 @@ def api_location_get():
     return device_location.get() or {"latitude": None, "longitude": None}
 
 
+@app.get("/api/location/geocode")
+async def api_location_geocode(q: str = "", count: int = 5):
+    """Free-text city/place lookup for the manual-location override UI.
+    Proxies Open-Meteo's free geocoding API (no key required) so the
+    browser doesn't have to know the upstream URL or hold a CORS
+    relationship with it.
+
+    Returns {results: [{name, admin1, country, latitude, longitude,
+    timezone}, ...]}. Empty list on miss or transient network failure
+    — callers should treat "no results" as a search miss, not a hard
+    error.
+    """
+    return await weather_client.geocode(q, count=count)
+
+
 @app.post("/api/location")
 async def api_location_set(req: Request):
     """Persist the device's latitude + longitude. Called by the browser

@@ -4193,6 +4193,171 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// ---- Manual location override --------------------------------------------
+// Browser geolocation can give bad coords (IP fallback to ISP POP, stale
+// Wi-Fi BSSID database entries, VPN, etc). The manual card lets the user
+// either type a city name (server geocodes via Open-Meteo) or paste raw
+// lat/lon. Both paths POST to /api/location which validates, persists,
+// and busts the weather cache so the next forecast pulls fresh.
+
+function _showManualLoc(open) {
+  const card = $('forecast-manual-loc');
+  if (!card) return;
+  card.hidden = !open;
+  if (open) {
+    // Refresh the "currently using" line each time the card opens.
+    fetch('/api/location').then(r => r.json()).then(j => {
+      const cur = $('forecast-manual-current');
+      if (!cur) return;
+      if (j && j.latitude != null && j.longitude != null) {
+        cur.textContent = `Currently using ${j.latitude.toFixed(4)}, ${j.longitude.toFixed(4)}` +
+                          (j.timezone ? ` (${j.timezone})` : '');
+      } else {
+        cur.textContent = 'No location saved yet.';
+      }
+    }).catch(() => {});
+    // Focus the city search box for quick typing (only if search mode
+    // is the active pane).
+    const q = $('manual-loc-q');
+    const searchPane = $('manual-loc-search');
+    if (q && searchPane && !searchPane.hidden) q.focus();
+  }
+}
+
+// "Set manually" / "Change location" buttons — open the override card.
+document.addEventListener('click', (e) => {
+  const id = e.target?.id;
+  if (id === 'forecast-manual-btn' || id === 'forecast-change-loc') {
+    _showManualLoc(true);
+  } else if (id === 'forecast-manual-close') {
+    _showManualLoc(false);
+  }
+});
+
+// Mode radio (search vs coords).
+document.addEventListener('change', (e) => {
+  if (e.target?.name !== 'manual-loc-mode') return;
+  const mode = e.target.value;
+  const search = $('manual-loc-search');
+  const coords = $('manual-loc-coords');
+  if (search) search.hidden = mode !== 'search';
+  if (coords) coords.hidden = mode !== 'coords';
+});
+
+// Debounced city search. Open-Meteo's geocoding is fast (<200ms), but
+// we still want to coalesce keystrokes so we don't fire on every letter.
+let _manualLocSearchTimer = null;
+let _manualLocLastQ = '';
+document.addEventListener('input', (e) => {
+  if (e.target?.id !== 'manual-loc-q') return;
+  const q = e.target.value.trim();
+  if (_manualLocSearchTimer) clearTimeout(_manualLocSearchTimer);
+  if (q.length < 2) {
+    // Clear results and the hint when the field is effectively empty —
+    // a stale 1-char result list is worse than nothing.
+    const ul = $('manual-loc-results');
+    if (ul) ul.innerHTML = '';
+    const hint = $('manual-loc-search-hint');
+    if (hint) { hint.textContent = ''; hint.dataset.kind = ''; }
+    _manualLocLastQ = '';
+    return;
+  }
+  _manualLocSearchTimer = setTimeout(() => _runManualLocSearch(q), 350);
+});
+
+async function _runManualLocSearch(q) {
+  if (q === _manualLocLastQ) return;
+  _manualLocLastQ = q;
+  const ul = $('manual-loc-results');
+  const hint = $('manual-loc-search-hint');
+  if (!ul) return;
+  if (hint) { hint.textContent = 'Searching…'; hint.dataset.kind = ''; }
+  try {
+    const r = await fetch('/api/location/geocode?q=' + encodeURIComponent(q) + '&count=8');
+    const j = await r.json();
+    // Race-guard: if the user kept typing while this request was in
+    // flight, drop the stale response.
+    if (q !== _manualLocLastQ) return;
+    ul.innerHTML = '';
+    const results = (j && j.results) || [];
+    if (!results.length) {
+      if (hint) { hint.textContent = 'No matches. Try a different spelling, or switch to coordinates.'; hint.dataset.kind = ''; }
+      return;
+    }
+    if (hint) { hint.textContent = `${results.length} match${results.length === 1 ? '' : 'es'} — click to use.`; hint.dataset.kind = ''; }
+    for (const item of results) {
+      const li = document.createElement('li');
+      const meta = [item.admin1, item.country].filter(Boolean).join(', ');
+      li.innerHTML = `<span class="loc-name"></span><span class="loc-meta"></span>`;
+      li.querySelector('.loc-name').textContent = item.name || '(unnamed)';
+      li.querySelector('.loc-meta').textContent =
+        (meta ? meta + ' — ' : '') +
+        `${item.latitude.toFixed(4)}, ${item.longitude.toFixed(4)}` +
+        (item.timezone ? ` · ${item.timezone}` : '');
+      li.addEventListener('click', () => _saveManualLocation(item.latitude, item.longitude, item.name));
+      ul.appendChild(li);
+    }
+  } catch (err) {
+    if (hint) { hint.textContent = 'Search failed: ' + (err.message || err); hint.dataset.kind = 'err'; }
+  }
+}
+
+// Coords-mode save button.
+document.addEventListener('click', async (e) => {
+  if (e.target?.id !== 'manual-loc-save-coords') return;
+  const lat = parseFloat($('manual-loc-lat')?.value);
+  const lon = parseFloat($('manual-loc-lon')?.value);
+  const hint = $('manual-loc-coords-hint');
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    if (hint) { hint.textContent = 'Enter both latitude and longitude.'; hint.dataset.kind = 'err'; }
+    return;
+  }
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    if (hint) { hint.textContent = 'Coordinates out of range.'; hint.dataset.kind = 'err'; }
+    return;
+  }
+  await _saveManualLocation(lat, lon, null, { hintEl: hint });
+});
+
+// Common save path used by both modes. POSTs to /api/location, refreshes
+// the forecast on success, hides the card.
+async function _saveManualLocation(lat, lon, label, opts) {
+  opts = opts || {};
+  const hintEl = opts.hintEl || $('manual-loc-search-hint');
+  if (hintEl) { hintEl.textContent = 'Saving…'; hintEl.dataset.kind = ''; }
+  // Forget any earlier "denied geolocation" stickiness — user has
+  // explicitly chosen a location now, the boot prompt should stay quiet.
+  localStorage.setItem('jackery-location-denied', '1');
+  try {
+    const r = await fetch('/api/location', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ latitude: lat, longitude: lon }),
+    });
+    let j = {};
+    try { j = await r.json(); } catch (_) {}
+    if (!r.ok) {
+      const msg = j.error || j.detail || `HTTP ${r.status}`;
+      if (hintEl) { hintEl.textContent = 'Failed: ' + msg; hintEl.dataset.kind = 'err'; }
+      return;
+    }
+    if (hintEl) {
+      hintEl.textContent = label
+        ? `Saved: ${label} (${lat.toFixed(4)}, ${lon.toFixed(4)})`
+        : `Saved: ${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+      hintEl.dataset.kind = 'ok';
+    }
+    // Hide the manual card and refresh dependent UI — the server has
+    // already busted the weather cache, so the next forecast call will
+    // pull fresh GHI for the new coords.
+    setTimeout(() => _showManualLoc(false), 800);
+    fetchForecast();
+    fetchEodForecast();
+  } catch (err) {
+    if (hintEl) { hintEl.textContent = 'Save failed: ' + (err.message || err); hintEl.dataset.kind = 'err'; }
+  }
+}
+
 // EOD-pill: predicted SOC at the next sun phase boundary.
 //   • During daytime (solar > 0 right now)  → "At sunset" — the SOC at
 //     the last daylight hour today (just before solar drops to 0).

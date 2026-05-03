@@ -384,6 +384,55 @@
         <p class="hint">The forecaster pulls solar irradiance + cloud cover from Open-Meteo (free, no API key) and combines it with your historical solar production to predict the next ~5 days of battery state of charge. It needs your approximate location to know which weather to fetch.</p>
         <div class="forecast-geo-actions">
           <button id="forecast-geo-btn" type="button" class="btn btn-primary">Use my location</button>
+          <button id="forecast-manual-btn" type="button" class="btn btn-ghost">Set manually</button>
+        </div>
+      </section>
+
+      <!-- Manual location override. Always rendered (hidden by default,
+           opened by the "Set manually" button or via a small "Change
+           location" link rendered after a forecast is shown). Lets the
+           user search by city name (geocoded server-side via Open-Meteo)
+           or paste raw lat/lon — fixes the case where the browser
+           geolocation API returned wrong coords (e.g. IP-based fallback
+           pointing to the user's ISP POP, not their actual location). -->
+      <section id="forecast-manual-loc" class="card" hidden>
+        <div class="card-header">
+          <h2>Set location manually</h2>
+          <button id="forecast-manual-close" type="button" class="btn btn-ghost btn-tiny" aria-label="Close">Close</button>
+        </div>
+        <p id="forecast-manual-current" class="hint" style="margin:6px 0 12px"></p>
+
+        <div class="manual-loc-mode">
+          <label><input type="radio" name="manual-loc-mode" value="search" checked> Search by city</label>
+          <label><input type="radio" name="manual-loc-mode" value="coords"> Enter coordinates</label>
+        </div>
+
+        <div id="manual-loc-search" class="manual-loc-pane">
+          <input id="manual-loc-q" type="text" class="device-select"
+                 autocomplete="off" placeholder="e.g. San Jose, CA"
+                 style="width:100%; max-width:360px" />
+          <ul id="manual-loc-results" class="manual-loc-results"></ul>
+          <p id="manual-loc-search-hint" class="hint"></p>
+        </div>
+
+        <div id="manual-loc-coords" class="manual-loc-pane" hidden>
+          <div class="manual-loc-coord-row">
+            <label>
+              <span class="settings-label-text">Latitude</span>
+              <input id="manual-loc-lat" type="number" step="0.0001"
+                     min="-90" max="90" class="device-select"
+                     placeholder="37.3382" style="width:140px" />
+            </label>
+            <label>
+              <span class="settings-label-text">Longitude</span>
+              <input id="manual-loc-lon" type="number" step="0.0001"
+                     min="-180" max="180" class="device-select"
+                     placeholder="-121.8863" style="width:140px" />
+            </label>
+            <button id="manual-loc-save-coords" type="button" class="btn btn-primary">Save</button>
+          </div>
+          <p class="hint">Decimal degrees. Tip: right-click a spot on Google Maps to copy lat/lon.</p>
+          <p id="manual-loc-coords-hint" class="hint"></p>
         </div>
       </section>
 
@@ -392,6 +441,7 @@
           <h2 id="forecast-title">State of charge — next 5 days</h2>
           <div class="forecast-meta">
             <span class="hint" id="forecast-fit">—</span>
+            <button id="forecast-change-loc" type="button" class="btn btn-ghost btn-tiny" title="Change the location used to fetch weather">Change location</button>
           </div>
         </div>
         <canvas id="chart-forecast" class="chart chart-tall"></canvas>

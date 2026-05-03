@@ -2157,3 +2157,60 @@ footer {
   height: auto;
   line-height: 1.6;
 }
+
+/* Manual location override card on the Forecast tab. Mode toggle
+   (search vs raw coords), search results list with hover, and the
+   side-by-side lat/lon entry row. */
+.manual-loc-mode {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.manual-loc-mode label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.manual-loc-pane { margin-top: 4px; }
+.manual-loc-results {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.manual-loc-results:empty { display: none; }
+.manual-loc-results li {
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  transition: background 80ms ease;
+}
+.manual-loc-results li:last-child { border-bottom: none; }
+.manual-loc-results li:hover { background: var(--surface-3, rgba(255,255,255,.04)); }
+.manual-loc-results .loc-name { font-weight: 500; color: var(--text); }
+.manual-loc-results .loc-meta { font-size: 12px; color: var(--text-dim); }
+.manual-loc-coord-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.manual-loc-coord-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+

@@ -22,6 +22,11 @@ import httpx
 log = logging.getLogger("weather_client")
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
+# Open-Meteo's geocoding API — also free, also no key. Used by the
+# manual-location override UI on the Forecast tab so users who got
+# bad GPS coords (or whose IP geolocation lied) can pick their city
+# by name.
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 CACHE_TTL_S = 3600  # 1 hour
 DEFAULT_PAST_DAYS = 14
 DEFAULT_FORECAST_DAYS = 5
@@ -127,3 +132,58 @@ def clear_cache() -> None:
     """Drop cached forecasts. Mostly for tests."""
     with _cache_lock:
         _cache.clear()
+
+
+async def geocode(query: str, *, count: int = 5) -> dict[str, Any]:
+    """Free-text city / place name → list of candidate locations.
+
+    Returns:
+      {"results": [
+         {"name":..., "admin1":..., "country":..., "latitude":..., "longitude":...},
+         ...
+      ]}
+
+    On error returns {"results": [], "error": "..."}. We deliberately
+    keep the shape stable so the UI can render an empty list rather
+    than crashing on transient network failures.
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"results": []}
+    # Cap count: Open-Meteo allows 1-100; UI shows ~5 typeahead rows.
+    # Use an explicit None check so callers can pass 0 (which we clamp
+    # up to 1) without falling back to the default of 5.
+    if count is None:
+        count = 5
+    count = max(1, min(int(count), 10))
+    params = {
+        "name": q,
+        "count": count,
+        "language": "en",
+        "format": "json",
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(GEOCODE_URL, params=params)
+            r.raise_for_status()
+            j = r.json()
+        except Exception as e:
+            log.warning("Open-Meteo geocode failed for %r: %s", q, e)
+            return {"results": [], "error": str(e)}
+
+    raw = j.get("results") or []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        try:
+            out.append({
+                "name": str(item.get("name") or ""),
+                "admin1": str(item.get("admin1") or ""),  # state/province
+                "country": str(item.get("country") or ""),
+                "latitude": float(item["latitude"]),
+                "longitude": float(item["longitude"]),
+                "timezone": str(item.get("timezone") or ""),
+            })
+        except (KeyError, TypeError, ValueError):
+            # Skip malformed rows rather than failing the whole call.
+            continue
+    return {"results": out}
