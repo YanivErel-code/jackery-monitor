@@ -969,6 +969,681 @@ def _run_restore_smb(creds: dict,
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
+# ---- rsync transport (over SSH or rsyncd) ---------------------------------
+#
+# Why rsync alongside SMB:
+#   * Delta transfer — `energy.db` grows by appending and re-shipping
+#     8 MB nightly over a slow link is wasteful when most pages are
+#     unchanged.
+#   * `--link-dest=../<previous_snapshot>/` — each new snapshot dir on
+#     the NAS is a complete directory tree, but unchanged files are
+#     hardlinks to the previous night's copy. So 365 daily snapshots
+#     of an 8 MB DB that mostly appends ≈ 50 MB on disk instead of 3 GB.
+#
+# We support two flavours:
+#   * "rsync_ssh" — rsync over SSH using a private key. The user
+#     pastes the key contents into the form; we save it encrypted at
+#     rest in /data/backup-creds.json and write it to a 0600 tempfile
+#     (deleted immediately afterwards) for each rsync invocation. SSH
+#     gives us `rm -rf` on the remote side too, so retention works.
+#   * "rsyncd" — rsync to a daemon (port 873) using a username +
+#     password (RSYNC_PASSWORD env). No SSH means no remote `rm`, so
+#     retention is a no-op — the dispatcher returns a hint asking the
+#     user to either switch to rsync_ssh or prune manually on the NAS.
+
+
+class RsyncError(RuntimeError):
+    """rsync (or accompanying ssh) invocation failed."""
+
+
+def _rsync_keyfile(creds: dict) -> str:
+    """Materialise the saved SSH private key into a freshly-created
+    0600 tempfile. Caller is responsible for unlinking it (and should
+    do so promptly: leaving keys in /tmp defeats the at-rest threat
+    model). Used by both _rsync_run (for `rsync -e ssh`) and _ssh_run
+    (for plain `ssh user@host <cmd>` retention deletes).
+    """
+    key = creds.get("ssh_key") or ""
+    # ssh and rsync both reject keys without a trailing newline.
+    if not key.endswith("\n"):
+        key = key + "\n"
+    fd, path = tempfile.mkstemp(prefix="jackery-rsync-key-")
+    try:
+        os.write(fd, key.encode())
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return path
+
+
+def _rsync_remote(creds: dict, subpath: str = "") -> str:
+    """Build the rsync target string for the given creds + subpath.
+
+      rsync_ssh:  user@host:/abs/target_dir/<subpath>
+      rsyncd:     rsync://user@host/<module>/<target_subpath>/<subpath>
+
+    `subpath` is appended raw (with a leading-slash strip) so callers
+    can use it for both whole-snapshot dirs ("2026-05-02_030000") and
+    individual files inside one ("2026-05-02_030000/MANIFEST.json").
+    """
+    transport = _transport_of(creds)
+    sub = (subpath or "").lstrip("/")
+    if transport == "rsync_ssh":
+        base = (creds.get("target_dir") or "").rstrip("/")
+        full = f"{base}/{sub}" if sub else base
+        return f"{creds.get('ssh_user')}@{creds.get('host')}:{full}"
+    if transport == "rsyncd":
+        ts = (creds.get("target_subpath") or "").strip("/")
+        path_parts = [p for p in (ts, sub) if p]
+        path = "/".join(path_parts)
+        user = creds.get("rsyncd_user") or ""
+        module = (creds.get("rsync_module") or "").strip("/")
+        url = f"rsync://{user}@{creds.get('host')}/{module}"
+        if path:
+            url = f"{url}/{path}"
+        return url
+    raise RsyncError(f"not an rsync transport: {transport}")
+
+
+def _rsync_run(creds: dict, args: list[str], *,
+               timeout_s: float = 600.0) -> subprocess.CompletedProcess:
+    """Invoke rsync with transport-appropriate auth set up.
+
+    For rsync_ssh, writes the SSH key to a 0600 tempfile and passes it
+    via -e "ssh -i <keyfile> ...". For rsyncd, sets RSYNC_PASSWORD in
+    the child env. Either way, cleans up the tempfile in the finally
+    block so a transient failure doesn't leak the key.
+
+    StrictHostKeyChecking=accept-new (not no): TOFU — accept on first
+    connect, but reject if the host key changes later. A reasonable
+    default for a NAS that won't move.
+
+    BatchMode=yes prevents ssh from prompting interactively for
+    anything (passphrases, host-key confirmations) — backup runs are
+    fully automated so a prompt would just hang the loop.
+    """
+    transport = _transport_of(creds)
+    cmd = ["rsync"]
+    env = os.environ.copy()
+    keyfile: str | None = None
+    try:
+        if transport == "rsync_ssh":
+            keyfile = _rsync_keyfile(creds)
+            ssh_cmd = (f"ssh -i {keyfile} "
+                       "-o StrictHostKeyChecking=accept-new "
+                       "-o BatchMode=yes")
+            cmd += ["-e", ssh_cmd]
+        elif transport == "rsyncd":
+            env["RSYNC_PASSWORD"] = creds.get("rsyncd_password") or ""
+        cmd += list(args)
+        try:
+            return subprocess.run(cmd, env=env,
+                                  capture_output=True, text=True,
+                                  timeout=timeout_s, check=False)
+        except subprocess.TimeoutExpired as e:
+            raise RsyncError(f"rsync timed out: {e}") from e
+        except FileNotFoundError as e:
+            raise RsyncError("rsync not installed in container") from e
+    finally:
+        if keyfile:
+            try:
+                os.unlink(keyfile)
+            except FileNotFoundError:
+                pass
+
+
+def _rsync_check(r: subprocess.CompletedProcess) -> None:
+    """Raise RsyncError if rsync exited non-zero, surfacing the most
+    actionable line from stderr/stdout. rsync prints multiple lines
+    (per-file errors then a summary) — we keep the last non-empty line
+    since rsync's summary line is usually the most useful."""
+    if r.returncode == 0:
+        return
+    merged = ((r.stderr or "") + (r.stdout or "")).strip()
+    if not merged:
+        raise RsyncError(f"rsync exit {r.returncode}")
+    lines = [ln.strip() for ln in merged.splitlines() if ln.strip()]
+    raise RsyncError(lines[-1] if lines else f"rsync exit {r.returncode}")
+
+
+def _rsync_missing(e: RsyncError) -> bool:
+    """Heuristic: did this RsyncError come from a missing file/dir
+    (vs. a transient or auth error)? Used to translate 'directory
+    doesn't exist yet' into 'empty list of snapshots'."""
+    msg = str(e).lower()
+    return ("no such file or directory" in msg
+            or "non-existent" in msg
+            or "failed: no such" in msg
+            or "code 23" in msg)
+
+
+def _ssh_run(creds: dict, remote_argv: list[str], *,
+             timeout_s: float = 30.0) -> subprocess.CompletedProcess:
+    """Run an arbitrary command on the remote via ssh, using the saved
+    private key. Only valid for rsync_ssh creds — used by retention
+    pruning to `rm -rf` old snapshot dirs (rsync itself has no
+    safe primitive for deleting a dir on the remote)."""
+    if _transport_of(creds) != "rsync_ssh":
+        raise RsyncError("ssh_run only available with rsync_ssh transport")
+    keyfile = _rsync_keyfile(creds)
+    try:
+        cmd = ["ssh",
+               "-i", keyfile,
+               "-o", "StrictHostKeyChecking=accept-new",
+               "-o", "BatchMode=yes",
+               f"{creds.get('ssh_user')}@{creds.get('host')}",
+               *remote_argv]
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=timeout_s, check=False)
+        except subprocess.TimeoutExpired as e:
+            raise RsyncError(f"ssh timed out: {e}") from e
+        except FileNotFoundError as e:
+            raise RsyncError("ssh not installed in container") from e
+    finally:
+        try:
+            os.unlink(keyfile)
+        except FileNotFoundError:
+            pass
+
+
+# `rsync --list-only` output format (default verbosity):
+#   <type+perms> <size> <date> <time> <name>
+#
+# Where the first character is the type ('d' for dir, '-' for regular
+# file, 'l' for symlink, etc.). Sizes can have thousands separators
+# in some locales — we strip commas before int().
+_RSYNC_LS_LINE = re.compile(
+    r"^(?P<type>[-dlcbpsf])\S{9}\s+(?P<size>[\d,]+)\s+\S+\s+\S+\s+"
+    r"(?P<name>.+?)\s*$"
+)
+
+
+def _rsync_list(creds: dict, subpath: str = "") -> list[dict[str, Any]]:
+    """List entries at `subpath` via `rsync --list-only`. Returns a list
+    of {name, is_dir, size}, with '.' and '..' filtered out so the
+    output mirrors what _smb_ls returns. Trailing slash on the target
+    is required so rsync lists CONTENTS rather than the dir itself.
+    """
+    target = _rsync_remote(creds, subpath)
+    if not target.endswith("/"):
+        target = target + "/"
+    r = _rsync_run(creds, ["--list-only", target])
+    _rsync_check(r)
+    out: list[dict[str, Any]] = []
+    for line in (r.stdout or "").splitlines():
+        m = _RSYNC_LS_LINE.match(line)
+        if not m:
+            continue
+        name = m.group("name").strip()
+        if name in ("", ".", ".."):
+            continue
+        is_dir = (m.group("type") == "d")
+        size_str = m.group("size").replace(",", "")
+        try:
+            size = int(size_str)
+        except ValueError:
+            size = 0
+        out.append({"name": name, "is_dir": is_dir, "size": size})
+    return out
+
+
+def _rsync_pull(creds: dict, subpath: str, local: Path,
+                *, timeout_s: float = 300.0) -> None:
+    """Pull a single file from `subpath` on the remote to `local`."""
+    target = _rsync_remote(creds, subpath)
+    Path(local).parent.mkdir(parents=True, exist_ok=True)
+    r = _rsync_run(creds, ["-a", target, str(local)], timeout_s=timeout_s)
+    _rsync_check(r)
+
+
+def _rsync_pull_text(creds: dict, subpath: str) -> str:
+    """Pull a small remote file and return its text. Used to fetch
+    MANIFEST.json without touching disk visibly."""
+    fd, name = tempfile.mkstemp(prefix="jackery-rsync-pull-")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        _rsync_pull(creds, subpath, tmp)
+        return tmp.read_text()
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _rsync_push_file(creds: dict, local: Path, subpath: str,
+                     *, timeout_s: float = 300.0) -> None:
+    """Push a single local file to `subpath` on the remote."""
+    target = _rsync_remote(creds, subpath)
+    r = _rsync_run(creds, ["-a", str(local), target], timeout_s=timeout_s)
+    _rsync_check(r)
+
+
+def _rsync_push_dir(creds: dict, local_dir: Path, subpath: str,
+                    *, link_dest: str | None = None,
+                    timeout_s: float = 600.0) -> None:
+    """Push every file in `local_dir` to `subpath` on the remote.
+
+    When `link_dest` is given (the directory name of a previous
+    snapshot, expressed as a sibling of the new snapshot dir), pass
+    --link-dest=../<link_dest>/ so unchanged files become hardlinks
+    instead of full copies. The path is RELATIVE to the destination,
+    so it works whether the target is at filesystem root, a
+    subdirectory, or under an rsyncd module mount.
+
+    Trailing slash on local_dir / target is intentional — rsync
+    treats `src/` as "contents of src" and `dst/` as "into dst".
+    """
+    target = _rsync_remote(creds, subpath)
+    if not target.endswith("/"):
+        target = target + "/"
+    args = ["-a"]
+    if link_dest:
+        args.append(f"--link-dest=../{link_dest}/")
+    args.append(f"{local_dir}/")
+    args.append(target)
+    r = _rsync_run(creds, args, timeout_s=timeout_s)
+    _rsync_check(r)
+
+
+def _rsync_remote_rmtree(creds: dict, subpath: str) -> None:
+    """Recursively delete a directory (or file) on the remote. Only
+    usable with rsync_ssh — for rsyncd we have no remote-delete
+    primitive (raises).
+
+    The `rm -rf` runs over SSH, so the remote shell is responsible for
+    expanding the path. We pass `--` and normalize the path locally
+    first to refuse anything that would escape the configured
+    target_dir — if a sub like '../../etc/passwd' tried to land outside
+    base, we'd rather fail loud than `rm -rf /etc/passwd`.
+    """
+    if _transport_of(creds) != "rsync_ssh":
+        raise RsyncError("remote rmtree not supported for rsyncd")
+    base = (creds.get("target_dir") or "").rstrip("/")
+    if not base:
+        raise RsyncError("refusing to rm: empty target_dir")
+    sub = (subpath or "").lstrip("/")
+    full = f"{base}/{sub}" if sub else base
+    norm = os.path.normpath(full)
+    # normpath collapses '..' segments — if the result doesn't stay
+    # strictly inside base (or equal it) we know the original sub
+    # tried to escape and we refuse.
+    if norm in ("", "/", base) and sub:
+        raise RsyncError(f"refusing to rm suspicious path: {full!r}")
+    if not (norm == base or norm.startswith(base + "/")):
+        raise RsyncError(f"refusing to rm outside target_dir: {full!r}")
+    r = _ssh_run(creds, ["rm", "-rf", "--", norm])
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "").strip() or f"ssh exit {r.returncode}"
+        raise RsyncError(f"ssh rm -rf failed: {msg}")
+
+
+def _verify_rsync_sizes(entries: list[dict[str, Any]],
+                        manifest: dict) -> str | None:
+    """Same role as _verify_remote_sizes but operating on a pre-fetched
+    rsync listing. Returns None on match or an error string on mismatch.
+    """
+    expected = {f.get("name"): int(f.get("size") or 0)
+                for f in (manifest.get("files") or [])
+                if f.get("name")}
+    expected["MANIFEST.json"] = -1  # presence-only check
+    by_name = {e["name"]: e for e in entries if not e["is_dir"]}
+    for name, exp_size in expected.items():
+        e = by_name.get(name)
+        if e is None:
+            return f"file missing on remote: {name}"
+        if exp_size >= 0 and e["size"] != exp_size:
+            return (f"size mismatch on {name}: "
+                    f"expected {exp_size}, got {e['size']}")
+    return None
+
+
+def _test_connectivity_rsync(creds: dict,
+                             *, timeout_s: float = 15.0) -> dict[str, Any]:
+    """rsync probe: push a small file, pull it back, delete it (rsync_ssh
+    only — for rsyncd the probe stays put since we have no delete
+    primitive; the user can clean up manually if they care)."""
+    started = time.time()
+    probe_name = f".jackery-probe-{int(started)}"
+    fd, name = tempfile.mkstemp(prefix="jackery-rsync-probe-")
+    os.close(fd)
+    local_in = Path(name)
+    try:
+        local_in.write_text("ok")
+        try:
+            _rsync_push_file(creds, local_in, probe_name, timeout_s=timeout_s)
+        except RsyncError as e:
+            return {"ok": False, "error": f"rsync_failed: {e}"}
+
+        fd, name = tempfile.mkstemp(prefix="jackery-rsync-probe-back-")
+        os.close(fd)
+        local_out = Path(name)
+        try:
+            try:
+                _rsync_pull(creds, probe_name, local_out, timeout_s=timeout_s)
+                content = local_out.read_text()
+            except RsyncError as e:
+                return {"ok": False, "error": f"rsync_failed: {e}"}
+        finally:
+            local_out.unlink(missing_ok=True)
+
+        # Best-effort cleanup of the probe — only possible over SSH.
+        if _transport_of(creds) == "rsync_ssh":
+            try:
+                _rsync_remote_rmtree(creds, probe_name)
+            except Exception:
+                pass
+
+        if content != "ok":
+            return {"ok": False, "error": "probe_roundtrip_failed"}
+        return {"ok": True, "latency_ms": int((time.time() - started) * 1000)}
+    except Exception as e:
+        log.exception("rsync connectivity test failed")
+        return {"ok": False, "error": str(e)}
+    finally:
+        local_in.unlink(missing_ok=True)
+
+
+def _list_remote_snapshots_rsync(creds: dict) -> list[dict[str, Any]]:
+    """Rsync-flavour snapshot listing. Same shape as
+    _list_remote_snapshots_smb. One rsync --list-only call to find the
+    snapshot dirs, then one pull-text per dir for its MANIFEST.json.
+    """
+    out: list[dict[str, Any]] = []
+    try:
+        try:
+            entries = _rsync_list(creds, "")
+        except RsyncError as e:
+            if _rsync_missing(e):
+                return []
+            raise
+        dir_entries = sorted(
+            (e for e in entries
+             if e["is_dir"] and not e["name"].startswith(".")),
+            key=lambda e: e["name"], reverse=True,
+        )
+        for entry in dir_entries:
+            name = entry["name"]
+            try:
+                manifest_text = _rsync_pull_text(
+                    creds, f"{name}/MANIFEST.json")
+            except RsyncError as e:
+                if _rsync_missing(e):
+                    out.append({"dir": name, "valid": False,
+                                "error": "manifest_missing"})
+                else:
+                    out.append({"dir": name, "valid": False,
+                                "error": f"manifest_unreadable: {e}"})
+                continue
+            try:
+                m = json.loads(manifest_text)
+                out.append({
+                    "dir": name,
+                    "valid": True,
+                    "ts": m.get("ts"),
+                    "iso": m.get("iso"),
+                    "total_bytes": m.get("total_bytes"),
+                    "files": [f.get("name") for f in (m.get("files") or [])],
+                    "include_key": bool(m.get("include_key")),
+                })
+            except Exception as e:
+                out.append({"dir": name, "valid": False,
+                            "error": f"manifest_unreadable: {e}"})
+    except RsyncError as e:
+        log.warning("list snapshots: rsync failed: %s", e)
+    except Exception:
+        log.exception("list snapshots failed")
+    return out
+
+
+def _prune_old_snapshots_rsync(creds: dict,
+                               *, keep_count: int) -> dict[str, Any]:
+    """Rsync-flavour prune. For rsync_ssh, ssh-deletes old snapshot
+    dirs. For rsyncd, returns a 'no remote-delete primitive' marker
+    so the dispatcher can surface a hint.
+    """
+    if keep_count < 1:
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": "keep_count must be >= 1"}
+    if _transport_of(creds) == "rsyncd":
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": "rsyncd_no_remote_delete",
+                "hint": ("rsyncd has no delete primitive — switch to "
+                         "rsync_ssh for automatic retention, or prune "
+                         "manually on the NAS.")}
+    try:
+        entries = _rsync_list(creds, "")
+    except RsyncError as e:
+        if _rsync_missing(e):
+            return {"considered": 0, "pruned": 0, "kept": 0}
+        return {"considered": 0, "pruned": 0, "kept": 0,
+                "error": f"ls_failed: {e}"}
+    snapshot_dirs = sorted(
+        (e["name"] for e in entries
+         if e["is_dir"] and _SNAPSHOT_DIR_RE.match(e["name"])),
+        reverse=True,
+    )
+    keep = snapshot_dirs[:keep_count]
+    drop = snapshot_dirs[keep_count:]
+    pruned = 0
+    for name in drop:
+        try:
+            _rsync_remote_rmtree(creds, name)
+            pruned += 1
+        except RsyncError as e:
+            log.warning("prune: rmtree of %s failed: %s", name, e)
+    if pruned:
+        log.info("prune: removed %d old snapshot(s); kept %d most recent",
+                 pruned, len(keep))
+    return {"considered": len(snapshot_dirs), "pruned": pruned,
+            "kept": len(keep)}
+
+
+def _run_backup_rsync(creds: dict,
+                      *, include_key: bool | None = None,
+                      keep_count: int | None = None) -> BackupResult:
+    """Rsync-flavour run_backup. Stages locally, lists existing snapshots
+    on the remote to find a previous one for --link-dest, pushes,
+    size-checks, prunes."""
+    started = time.time()
+    ts, iso, dir_stamp = _now_iso_local()
+    use_key = SCOPE_INCLUDES_KEY if include_key is None else bool(include_key)
+
+    staging_root = Path(tempfile.mkdtemp(prefix="jackery-bak-stage-"))
+    try:
+        staging_dir = staging_root / dir_stamp
+        try:
+            manifest = collect_snapshot(staging_dir, include_key=use_key)
+        except Exception as e:
+            log.exception("snapshot staging failed")
+            result = BackupResult(
+                ok=False, ts=ts, iso=iso, snapshot_dir=None,
+                duration_s=time.time() - started,
+                bytes_written=0, files_written=0,
+                error=f"snapshot_failed: {e}",
+            )
+            _record_run(result)
+            return result
+
+        ok, err = verify_manifest(staging_dir)
+        if not ok:
+            log.error("staged snapshot failed self-verify: %s", err)
+            result = BackupResult(
+                ok=False, ts=ts, iso=iso, snapshot_dir=None,
+                duration_s=time.time() - started,
+                bytes_written=0, files_written=0,
+                error=f"self_verify_failed: {err}",
+            )
+            _record_run(result)
+            return result
+
+        # Find the most recent valid snapshot for --link-dest. Listing
+        # failures (network, first-run) just mean "no link-dest" —
+        # rsync still works, we just don't get the hardlink savings on
+        # the first night.
+        prev_snap: str | None = None
+        try:
+            existing = _list_remote_snapshots_rsync(creds)
+            valid_dirs = sorted(
+                (s["dir"] for s in existing
+                 if s.get("valid") and _SNAPSHOT_DIR_RE.match(s["dir"])),
+                reverse=True,
+            )
+            if valid_dirs:
+                prev_snap = valid_dirs[0]
+        except Exception as e:
+            log.warning("rsync: list previous snapshots failed (continuing "
+                        "without --link-dest): %s", e)
+
+        try:
+            _rsync_push_dir(creds, staging_dir, dir_stamp,
+                            link_dest=prev_snap)
+        except RsyncError as e:
+            result = BackupResult(
+                ok=False, ts=ts, iso=iso, snapshot_dir=None,
+                duration_s=time.time() - started,
+                bytes_written=0, files_written=0,
+                error=f"rsync_failed: {e}",
+            )
+            _record_run(result)
+            return result
+        except Exception as e:
+            log.exception("rsync upload failed")
+            result = BackupResult(
+                ok=False, ts=ts, iso=iso, snapshot_dir=None,
+                duration_s=time.time() - started,
+                bytes_written=0, files_written=0,
+                error=f"upload_failed: {e}",
+            )
+            _record_run(result)
+            return result
+
+        # Post-upload size verify. For SSH we can clean up a partial
+        # upload via ssh rm -rf; for rsyncd we can't — log and proceed.
+        try:
+            entries = _rsync_list(creds, dir_stamp)
+            verify_err = _verify_rsync_sizes(entries, manifest)
+            if verify_err:
+                if _transport_of(creds) == "rsync_ssh":
+                    try:
+                        _rsync_remote_rmtree(creds, dir_stamp)
+                    except Exception:
+                        log.exception("post-verify cleanup failed")
+                result = BackupResult(
+                    ok=False, ts=ts, iso=iso, snapshot_dir=None,
+                    duration_s=time.time() - started,
+                    bytes_written=0, files_written=0,
+                    error=f"remote_verify_failed: {verify_err}",
+                )
+                _record_run(result)
+                return result
+        except RsyncError as e:
+            log.warning("post-upload size check failed (non-fatal): %s", e)
+
+        # Retention pass. Best-effort — never fails the run.
+        if keep_count is not None and keep_count > 0:
+            try:
+                summary = _prune_old_snapshots_rsync(
+                    creds, keep_count=keep_count)
+                if summary.get("pruned"):
+                    log.info("post-backup prune: removed %d snapshot(s)",
+                             summary["pruned"])
+            except Exception as e:
+                log.warning("post-backup prune failed: %s", e)
+
+        result = BackupResult(
+            ok=True, ts=ts, iso=iso,
+            snapshot_dir=dir_stamp,
+            duration_s=time.time() - started,
+            bytes_written=int(manifest.get("total_bytes") or 0),
+            files_written=len(manifest.get("files") or []),
+        )
+        _record_run(result)
+        return result
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _run_restore_rsync(creds: dict,
+                       *, snapshot_dir_name: str,
+                       scope: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Rsync-flavour run_restore. Pull manifest, decide which files to
+    fetch given scope, pull them, verify checksums, swap into /data."""
+    files_filter: set[str] | None = None
+    if scope and not scope.get("full"):
+        listed = scope.get("files")
+        if listed:
+            files_filter = {str(x) for x in listed}
+
+    staging_root = Path(tempfile.mkdtemp(prefix="jackery-bak-restore-"))
+    try:
+        try:
+            try:
+                manifest_text = _rsync_pull_text(
+                    creds, f"{snapshot_dir_name}/MANIFEST.json")
+            except RsyncError as e:
+                if _rsync_missing(e):
+                    return {"ok": False,
+                            "error": f"snapshot_not_found: {snapshot_dir_name}"}
+                raise
+            manifest = json.loads(manifest_text)
+            (staging_root / "MANIFEST.json").write_text(manifest_text)
+
+            files_to_fetch: list[str] = []
+            for entry in (manifest.get("files") or []):
+                name = entry.get("name")
+                if not name:
+                    continue
+                if files_filter is not None and name not in files_filter:
+                    continue
+                if name == KEY_FILE and not (scope and scope.get("include_key")):
+                    continue
+                files_to_fetch.append(name)
+
+            for name in files_to_fetch:
+                _rsync_pull(creds, f"{snapshot_dir_name}/{name}",
+                            staging_root / name)
+
+            staged_manifest = dict(manifest)
+            staged_manifest["files"] = [
+                f for f in (manifest.get("files") or [])
+                if f.get("name") in set(files_to_fetch)
+            ]
+            (staging_root / "MANIFEST.json").write_text(
+                json.dumps(staged_manifest, indent=2, sort_keys=True))
+            ok, err = verify_manifest(staging_root)
+            if not ok:
+                return {"ok": False, "error": f"verify_failed: {err}"}
+        except RsyncError as e:
+            return {"ok": False, "error": f"rsync_failed: {e}"}
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        restored: list[str] = []
+        for name in files_to_fetch:
+            src = staging_root / name
+            dst = DATA_DIR / name
+            tmp = dst.with_suffix(dst.suffix + ".restoring")
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            if name.endswith(".json") or name == KEY_FILE:
+                try:
+                    os.chmod(dst, 0o600)
+                except Exception:
+                    pass
+            restored.append(name)
+
+        return {
+            "ok": True,
+            "restored_files": restored,
+            "snapshot": snapshot_dir_name,
+            "manifest_iso": manifest.get("iso"),
+        }
+    except Exception as e:
+        log.exception("restore failed")
+        return {"ok": False, "error": str(e)}
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
 # ---- transport-agnostic dispatchers ---------------------------------------
 #
 # These are the entry points that server.py and the async loop call.
@@ -996,6 +1671,8 @@ def test_connectivity(creds: dict | None = None,
     transport = _transport_of(creds)
     if transport == "smb":
         return _test_connectivity_smb(creds, timeout_s=timeout_s)
+    if transport in ("rsync_ssh", "rsyncd"):
+        return _test_connectivity_rsync(creds, timeout_s=timeout_s)
     return {"ok": False, "error": _unknown_transport_error(transport)}
 
 
@@ -1019,6 +1696,8 @@ def prune_old_snapshots(creds: dict | None = None,
     transport = _transport_of(creds)
     if transport == "smb":
         return _prune_old_snapshots_smb(creds, keep_count=keep_count)
+    if transport in ("rsync_ssh", "rsyncd"):
+        return _prune_old_snapshots_rsync(creds, keep_count=keep_count)
     return {"considered": 0, "pruned": 0, "kept": 0,
             "error": _unknown_transport_error(transport)}
 
@@ -1034,6 +1713,8 @@ def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
     transport = _transport_of(creds)
     if transport == "smb":
         return _list_remote_snapshots_smb(creds)
+    if transport in ("rsync_ssh", "rsyncd"):
+        return _list_remote_snapshots_rsync(creds)
     log.warning("list snapshots: %s", _unknown_transport_error(transport))
     return []
 
@@ -1069,6 +1750,9 @@ def run_backup(*, creds: dict | None = None,
     if transport == "smb":
         return _run_backup_smb(creds, include_key=include_key,
                                keep_count=keep_count)
+    if transport in ("rsync_ssh", "rsyncd"):
+        return _run_backup_rsync(creds, include_key=include_key,
+                                 keep_count=keep_count)
     ts, iso, _ = _now_iso_local()
     result = BackupResult(
         ok=False, ts=ts, iso=iso, snapshot_dir=None,
@@ -1104,6 +1788,10 @@ def run_restore(*, snapshot_dir_name: str,
         return _run_restore_smb(creds,
                                 snapshot_dir_name=snapshot_dir_name,
                                 scope=scope)
+    if transport in ("rsync_ssh", "rsyncd"):
+        return _run_restore_rsync(creds,
+                                  snapshot_dir_name=snapshot_dir_name,
+                                  scope=scope)
     return {"ok": False, "error": _unknown_transport_error(transport)}
 
 

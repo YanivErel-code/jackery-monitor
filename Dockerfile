@@ -21,17 +21,22 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# smbclient is the only Samba binary we need now: backup.py uses it to
-# upload snapshots over SMB (no kernel mount → no CAP_SYS_ADMIN needed),
-# and backup_discover.py uses it to enumerate share names for the
-# Settings UI's share-name dropdown.
-#
-# We deliberately do NOT install cifs-utils / mount.cifs anymore. That
-# path required CAP_SYS_ADMIN + capset() seccomp permission inside the
-# container and tended to fail on Synology with "Unable to apply new
-# capability set." smbclient avoids the kernel mount entirely.
+# Backup transport binaries:
+#   * smbclient (Samba) — userspace SMB client used by backup.py +
+#     backup_discover.py. We deliberately do NOT install cifs-utils /
+#     mount.cifs: it requires CAP_SYS_ADMIN + capset() seccomp
+#     permission and tends to fail on Synology with "Unable to apply
+#     new capability set." smbclient avoids the kernel mount entirely.
+#   * rsync, openssh-client — for the rsync transport (over SSH or
+#     rsyncd). The user generates an SSH key on the NAS / desktop and
+#     pastes the private key into the form; the server saves it
+#     encrypted at rest, materialises it as a 0600 tempfile during
+#     each rsync invocation, and unlinks it afterwards.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends smbclient \
+    && apt-get install -y --no-install-recommends \
+         smbclient \
+         rsync \
+         openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
