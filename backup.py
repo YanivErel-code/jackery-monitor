@@ -321,7 +321,7 @@ def _verify_remote_sizes(creds: dict, target_dir: str,
 # ---- transport dispatch ---------------------------------------------------
 
 
-VALID_TRANSPORTS = ("smb", "rsync_ssh", "rsyncd")
+VALID_TRANSPORTS = ("smb", "rsync_ssh", "rsyncd", "rsyncd_ssh")
 
 
 def _transport_of(creds: dict) -> str:
@@ -1019,8 +1019,13 @@ def _rsync_keyfile(creds: dict) -> str:
 def _rsync_remote(creds: dict, subpath: str = "") -> str:
     """Build the rsync target string for the given creds + subpath.
 
-      rsync_ssh:  user@host:/abs/target_dir/<subpath>
-      rsyncd:     rsync://user@host/<module>/<target_subpath>/<subpath>
+      rsync_ssh:    user@host:/abs/target_dir/<subpath>
+      rsyncd:       rsync://user@host/<module>/<target_subpath>/<subpath>
+      rsyncd_ssh:   user@host::<module>/<target_subpath>/<subpath>
+                    (Note: double colon, no rsync:// scheme. The SSH
+                    wrapper is handled in _rsync_run; addressing here
+                    matches what stock rsync expects when invoking
+                    daemon-mode-over-SSH.)
 
     `subpath` is appended raw (with a leading-slash strip) so callers
     can use it for both whole-snapshot dirs ("2026-05-02_030000") and
@@ -1042,6 +1047,16 @@ def _rsync_remote(creds: dict, subpath: str = "") -> str:
         if path:
             url = f"{url}/{path}"
         return url
+    if transport == "rsyncd_ssh":
+        ts = (creds.get("target_subpath") or "").strip("/")
+        path_parts = [p for p in (ts, sub) if p]
+        path = "/".join(path_parts)
+        user = creds.get("ssh_user") or ""
+        module = (creds.get("rsync_module") or "").strip("/")
+        target = f"{user}@{creds.get('host')}::{module}"
+        if path:
+            target = f"{target}/{path}"
+        return target
     raise RsyncError(f"not an rsync transport: {transport}")
 
 
@@ -1049,10 +1064,17 @@ def _rsync_run(creds: dict, args: list[str], *,
                timeout_s: float = 600.0) -> subprocess.CompletedProcess:
     """Invoke rsync with transport-appropriate auth set up.
 
-    For rsync_ssh, writes the SSH key to a 0600 tempfile and passes it
-    via -e "ssh -i <keyfile> ...". For rsyncd, sets RSYNC_PASSWORD in
-    the child env. Either way, cleans up the tempfile in the finally
-    block so a transient failure doesn't leak the key.
+      rsync_ssh:    writes the SSH key to a 0600 tempfile and passes
+                    it via -e "ssh -i <keyfile> ...".
+      rsyncd:       sets RSYNC_PASSWORD in the child env.
+      rsyncd_ssh:   uses sshpass to feed the SSH password
+                    non-interactively, with a custom port via
+                    -e "sshpass -e ssh -p <port> ...". The password
+                    is read from the SSHPASS env var (set on the
+                    child only) so it never appears in argv.
+
+    Either way, cleans up the tempfile / env in the finally block so
+    a transient failure doesn't leak secrets.
 
     StrictHostKeyChecking=accept-new (not no): TOFU — accept on first
     connect, but reject if the host key changes later. A reasonable
@@ -1060,7 +1082,8 @@ def _rsync_run(creds: dict, args: list[str], *,
 
     BatchMode=yes prevents ssh from prompting interactively for
     anything (passphrases, host-key confirmations) — backup runs are
-    fully automated so a prompt would just hang the loop.
+    fully automated so a prompt would just hang the loop. Note: with
+    sshpass we DON'T set BatchMode (sshpass needs to feed the prompt).
     """
     transport = _transport_of(creds)
     cmd = ["rsync"]
@@ -1075,6 +1098,19 @@ def _rsync_run(creds: dict, args: list[str], *,
             cmd += ["-e", ssh_cmd]
         elif transport == "rsyncd":
             env["RSYNC_PASSWORD"] = creds.get("rsyncd_password") or ""
+        elif transport == "rsyncd_ssh":
+            # sshpass -e reads the password from $SSHPASS rather than
+            # taking it on argv (so it doesn't appear in `ps`). The
+            # SSH command tunnels rsyncd inside SSH on the configured
+            # port; the daemon-protocol handshake then runs on the
+            # tunnel's stdin/stdout.
+            port = int(creds.get("ssh_port") or 22)
+            env["SSHPASS"] = creds.get("ssh_password") or ""
+            ssh_cmd = (f"sshpass -e ssh -p {port} "
+                       "-o StrictHostKeyChecking=accept-new "
+                       "-o PubkeyAuthentication=no "
+                       "-o PreferredAuthentications=password")
+            cmd += ["-e", ssh_cmd]
         cmd += list(args)
         try:
             return subprocess.run(cmd, env=env,
@@ -1083,7 +1119,7 @@ def _rsync_run(creds: dict, args: list[str], *,
         except subprocess.TimeoutExpired as e:
             raise RsyncError(f"rsync timed out: {e}") from e
         except FileNotFoundError as e:
-            raise RsyncError("rsync not installed in container") from e
+            raise RsyncError("rsync (or sshpass) not installed in container") from e
     finally:
         if keyfile:
             try:
@@ -1297,6 +1333,54 @@ def _verify_rsync_sizes(entries: list[dict[str, Any]],
     return None
 
 
+def list_rsync_modules(creds: dict, *, timeout_s: float = 15.0) -> dict[str, Any]:
+    """Enumerate available rsyncd modules on a server. Works for both
+    "rsyncd" (port 873, plaintext) and "rsyncd_ssh" (tunnelled in
+    SSH). Mirrors what Synology Hyper Backup does to populate the
+    "Backup module" dropdown after the user enters host + creds.
+
+    Implementation: rsync with target `user@host::` (double colon, no
+    module name) returns one line per available module on stdout:
+        modulename<whitespace>comment
+
+    Returns {ok: bool, modules: list[str], error: str | None}.
+    Designed to be called from the API handler in a thread.
+    """
+    transport = _transport_of(creds)
+    if transport not in ("rsyncd", "rsyncd_ssh"):
+        return {"ok": False, "modules": [],
+                "error": f"transport {transport!r} doesn't use modules"}
+    host = (creds.get("host") or "").strip()
+    user = (creds.get("ssh_user") if transport == "rsyncd_ssh"
+            else creds.get("rsyncd_user")) or ""
+    if not host or not user:
+        return {"ok": False, "modules": [],
+                "error": "host and user required for module discovery"}
+    target = f"{user}@{host}::"
+    try:
+        r = _rsync_run(creds, [target], timeout_s=timeout_s)
+    except RsyncError as e:
+        return {"ok": False, "modules": [], "error": str(e)}
+    if r.returncode != 0:
+        merged = ((r.stderr or "") + (r.stdout or "")).strip()
+        line = merged.splitlines()[-1] if merged else f"rsync exit {r.returncode}"
+        return {"ok": False, "modules": [], "error": line}
+    modules: list[str] = []
+    for raw in (r.stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Skip MOTD / banner lines that some rsyncd configs prepend.
+        if line.startswith("@") or line.startswith("MOTD:"):
+            continue
+        # Module line is "name<whitespace>comment". Take the first
+        # whitespace-separated token.
+        parts = line.split(None, 1)
+        if parts:
+            modules.append(parts[0])
+    return {"ok": True, "modules": modules}
+
+
 def _test_connectivity_rsync(creds: dict,
                              *, timeout_s: float = 15.0) -> dict[str, Any]:
     """rsync probe: push a small file, pull it back, delete it (rsync_ssh
@@ -1404,12 +1488,13 @@ def _prune_old_snapshots_rsync(creds: dict,
     if keep_count < 1:
         return {"considered": 0, "pruned": 0, "kept": 0,
                 "error": "keep_count must be >= 1"}
-    if _transport_of(creds) == "rsyncd":
+    transport = _transport_of(creds)
+    if transport in ("rsyncd", "rsyncd_ssh"):
         return {"considered": 0, "pruned": 0, "kept": 0,
                 "error": "rsyncd_no_remote_delete",
-                "hint": ("rsyncd has no delete primitive — switch to "
-                         "rsync_ssh for automatic retention, or prune "
-                         "manually on the NAS.")}
+                "hint": ("rsyncd protocol has no delete primitive — "
+                         "switch to rsync_ssh for automatic retention, "
+                         "or prune snapshots manually on the NAS.")}
     try:
         entries = _rsync_list(creds, "")
     except RsyncError as e:
@@ -1671,7 +1756,7 @@ def test_connectivity(creds: dict | None = None,
     transport = _transport_of(creds)
     if transport == "smb":
         return _test_connectivity_smb(creds, timeout_s=timeout_s)
-    if transport in ("rsync_ssh", "rsyncd"):
+    if transport in ("rsync_ssh", "rsyncd", "rsyncd_ssh"):
         return _test_connectivity_rsync(creds, timeout_s=timeout_s)
     return {"ok": False, "error": _unknown_transport_error(transport)}
 
@@ -1696,7 +1781,7 @@ def prune_old_snapshots(creds: dict | None = None,
     transport = _transport_of(creds)
     if transport == "smb":
         return _prune_old_snapshots_smb(creds, keep_count=keep_count)
-    if transport in ("rsync_ssh", "rsyncd"):
+    if transport in ("rsync_ssh", "rsyncd", "rsyncd_ssh"):
         return _prune_old_snapshots_rsync(creds, keep_count=keep_count)
     return {"considered": 0, "pruned": 0, "kept": 0,
             "error": _unknown_transport_error(transport)}
@@ -1713,7 +1798,7 @@ def list_remote_snapshots(creds: dict | None = None) -> list[dict[str, Any]]:
     transport = _transport_of(creds)
     if transport == "smb":
         return _list_remote_snapshots_smb(creds)
-    if transport in ("rsync_ssh", "rsyncd"):
+    if transport in ("rsync_ssh", "rsyncd", "rsyncd_ssh"):
         return _list_remote_snapshots_rsync(creds)
     log.warning("list snapshots: %s", _unknown_transport_error(transport))
     return []
@@ -1750,7 +1835,7 @@ def run_backup(*, creds: dict | None = None,
     if transport == "smb":
         return _run_backup_smb(creds, include_key=include_key,
                                keep_count=keep_count)
-    if transport in ("rsync_ssh", "rsyncd"):
+    if transport in ("rsync_ssh", "rsyncd", "rsyncd_ssh"):
         return _run_backup_rsync(creds, include_key=include_key,
                                  keep_count=keep_count)
     ts, iso, _ = _now_iso_local()
@@ -1788,7 +1873,7 @@ def run_restore(*, snapshot_dir_name: str,
         return _run_restore_smb(creds,
                                 snapshot_dir_name=snapshot_dir_name,
                                 scope=scope)
-    if transport in ("rsync_ssh", "rsyncd"):
+    if transport in ("rsync_ssh", "rsyncd", "rsyncd_ssh"):
         return _run_restore_rsync(creds,
                                   snapshot_dir_name=snapshot_dir_name,
                                   scope=scope)

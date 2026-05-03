@@ -4052,6 +4052,7 @@ _BACKUP_REQUIRED_PER_TRANSPORT: dict[str, tuple[str, ...]] = {
     "smb": ("host", "share", "username", "password"),
     "rsync_ssh": ("host", "ssh_user", "ssh_key", "target_dir"),
     "rsyncd": ("host", "rsync_module", "rsyncd_user", "rsyncd_password"),
+    "rsyncd_ssh": ("host", "ssh_user", "ssh_password", "rsync_module"),
 }
 
 
@@ -4153,6 +4154,46 @@ async def api_backup_list_shares(body: dict):
         backup_discover.list_shares,
         host, username, password, domain=domain,
     )
+
+
+@app.post("/api/backup/list-rsync-modules")
+async def api_backup_list_rsync_modules(body: dict):
+    """Enumerate rsyncd modules on a server. Used by the UI to populate
+    the module dropdown after the user has filled in host + creds for
+    the rsyncd or rsyncd_ssh transports — same UX as Synology Hyper
+    Backup's "Backup module" auto-fill. Returns {ok, modules} or
+    {ok: False, error}.
+
+    For rsyncd_ssh: needs host + ssh_port + ssh_user + ssh_password.
+    For rsyncd:     needs host + rsyncd_user + rsyncd_password.
+    """
+    body = body or {}
+    transport = (body.get("transport") or "").strip()
+    if transport not in ("rsyncd", "rsyncd_ssh"):
+        raise HTTPException(400, "transport must be 'rsyncd' or 'rsyncd_ssh'")
+    host = (body.get("host") or "").strip()
+    if not host:
+        raise HTTPException(400, "host is required")
+    if transport == "rsyncd_ssh":
+        creds = {
+            "transport": "rsyncd_ssh",
+            "host": host,
+            "ssh_port": int(body.get("ssh_port") or 22),
+            "ssh_user": (body.get("ssh_user") or "").strip(),
+            "ssh_password": body.get("ssh_password") or "",
+        }
+        if not creds["ssh_user"] or not creds["ssh_password"]:
+            raise HTTPException(400, "ssh_user and ssh_password are required")
+    else:
+        creds = {
+            "transport": "rsyncd",
+            "host": host,
+            "rsyncd_user": (body.get("rsyncd_user") or "").strip(),
+            "rsyncd_password": body.get("rsyncd_password") or "",
+        }
+        if not creds["rsyncd_user"] or not creds["rsyncd_password"]:
+            raise HTTPException(400, "rsyncd_user and rsyncd_password are required")
+    return await asyncio.to_thread(backup.list_rsync_modules, creds)
 
 
 @app.get("/api/backup/status")

@@ -1126,8 +1126,9 @@
               <div class="settings-control">
                 <select id="backup-transport" class="device-select" style="min-width:220px">
                   <option value="smb">SMB / CIFS</option>
-                  <option value="rsync_ssh">rsync over SSH</option>
-                  <option value="rsyncd">rsync (rsyncd, no SSH)</option>
+                  <option value="rsync_ssh">rsync over SSH (path, key auth)</option>
+                  <option value="rsyncd_ssh">rsync over SSH (rsyncd protocol — UniFi UNAS, Synology)</option>
+                  <option value="rsyncd">rsync (rsyncd, plaintext port 873)</option>
                 </select>
               </div>
             </div>
@@ -1193,13 +1194,34 @@
             </div>
 
             <!-- ===== rsync over SSH fields ===== -->
-            <div class="settings-row" data-transport-row="rsync_ssh" hidden>
+            <div class="settings-row" data-transport-row="rsync_ssh,rsyncd_ssh" hidden>
               <label class="settings-label" for="backup-ssh-user">
                 <span class="settings-label-text">SSH user</span>
-                <span class="settings-hint">Account on the NAS that can write to the target directory. Make sure SSH is enabled in Synology Control Panel → Terminal &amp; SNMP.</span>
+                <span class="settings-hint">Account on the NAS that has rsync access. For UniFi UNAS this is the username from the "Rsync Account" settings panel; for Synology / TrueNAS / Linux it's an SSH user authorised to write to the target.</span>
               </label>
               <div class="settings-control">
-                <input id="backup-ssh-user" type="text" class="device-select" autocomplete="off" placeholder="backupuser" style="min-width:220px" />
+                <input id="backup-ssh-user" type="text" class="device-select" autocomplete="off" placeholder="yanivbackup" style="min-width:220px" />
+              </div>
+            </div>
+            <!-- ssh_port / ssh_password are unique to the rsyncd-over-SSH
+                 transport. The other rsync_ssh transport uses the default
+                 SSH port (22) and key auth. -->
+            <div class="settings-row" data-transport-row="rsyncd_ssh" hidden>
+              <label class="settings-label" for="backup-ssh-port">
+                <span class="settings-label-text">SSH port</span>
+                <span class="settings-hint">Usually <code>22</code>. Change only if your NAS exposes SSH on a non-standard port.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-ssh-port" type="number" min="1" max="65535" step="1" class="device-select" value="22" style="width:100px" />
+              </div>
+            </div>
+            <div class="settings-row" data-transport-row="rsyncd_ssh" hidden>
+              <label class="settings-label" for="backup-ssh-password">
+                <span class="settings-label-text">SSH password</span>
+                <span class="settings-hint">Password for the SSH user above. Encrypted at rest, fed to <code>ssh</code> via <code>sshpass</code> non-interactively at backup time. Leave blank to keep the saved value when re-saving other fields.</span>
+              </label>
+              <div class="settings-control">
+                <input id="backup-ssh-password" type="password" class="device-select" autocomplete="new-password" placeholder="••••••••" style="min-width:220px" />
               </div>
             </div>
             <div class="settings-row" data-transport-row="rsync_ssh" hidden>
@@ -1221,17 +1243,20 @@
               </div>
             </div>
 
-            <!-- ===== rsyncd fields ===== -->
-            <div class="settings-row" data-transport-row="rsyncd" hidden>
+            <!-- ===== rsyncd + rsyncd_ssh shared fields ===== -->
+            <div class="settings-row" data-transport-row="rsyncd,rsyncd_ssh" hidden>
               <label class="settings-label" for="backup-rsync-module">
                 <span class="settings-label-text">rsync module</span>
-                <span class="settings-hint">Module name as configured in the NAS's rsyncd.conf (e.g. <code>backups</code>).</span>
+                <span class="settings-hint">Module name as exposed by the NAS. UniFi UNAS auto-creates a module per shared folder (often the same name as the SMB share). Click <strong>Discover modules</strong> below to fetch the list once you've filled in host + creds.</span>
               </label>
               <div class="settings-control">
-                <input id="backup-rsync-module" type="text" class="device-select" autocomplete="off" placeholder="backups" style="min-width:220px" />
+                <input id="backup-rsync-module" type="text" class="device-select" autocomplete="off" placeholder="unas" list="backup-rsync-module-options" style="min-width:220px" />
+                <datalist id="backup-rsync-module-options"></datalist>
+                <button id="backup-rsync-module-discover" type="button" class="btn btn-ghost btn-tiny" style="margin-left:6px">Discover modules</button>
+                <span id="backup-rsync-module-hint" class="hint" style="margin-left:8px"></span>
               </div>
             </div>
-            <div class="settings-row" data-transport-row="rsyncd" hidden>
+            <div class="settings-row" data-transport-row="rsyncd,rsyncd_ssh" hidden>
               <label class="settings-label" for="backup-target-subpath">
                 <span class="settings-label-text">Target subpath</span>
                 <span class="settings-hint">Optional path inside the module where snapshots land. Leave blank to use the module root.</span>
@@ -1258,11 +1283,11 @@
                 <input id="backup-rsyncd-password" type="password" class="device-select" autocomplete="new-password" placeholder="••••••••" style="min-width:220px" />
               </div>
             </div>
-            <div class="settings-row" data-transport-row="rsyncd" hidden>
+            <div class="settings-row" data-transport-row="rsyncd,rsyncd_ssh" hidden>
               <div class="settings-label"></div>
               <div class="settings-control">
                 <p class="hint" style="margin:0">
-                  <strong>Note:</strong> rsyncd has no remote-delete primitive, so retention is a no-op for this transport. Old snapshots accumulate unless you prune manually on the NAS, or switch to <em>rsync over SSH</em>.
+                  <strong>Note:</strong> The rsyncd protocol has no remote-delete primitive, so automatic retention is a no-op for this transport. Old snapshots accumulate unless you prune them manually on the NAS, or switch to <em>rsync over SSH (path, key auth)</em> against a server that supports it (TrueNAS, Linux, older Synology DSM).
                 </p>
               </div>
             </div>

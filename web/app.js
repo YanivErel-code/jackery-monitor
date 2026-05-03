@@ -5612,6 +5612,7 @@ const _BACKUP_REQUIRED_FIELDS = {
   smb: ['host', 'share', 'username', 'password'],
   rsync_ssh: ['host', 'ssh_user', 'ssh_key', 'target_dir'],
   rsyncd: ['host', 'rsync_module', 'rsyncd_user', 'rsyncd_password'],
+  rsyncd_ssh: ['host', 'ssh_user', 'ssh_password', 'rsync_module'],
 };
 
 // Every input/textarea/select that contributes to the creds body. Used
@@ -5623,11 +5624,14 @@ const _ALL_BACKUP_INPUT_IDS = [
   // SMB
   'backup-share', 'backup-subdir', 'backup-username',
   'backup-password', 'backup-domain',
-  // rsync over SSH
+  // rsync over SSH (key auth, filesystem path)
   'backup-ssh-user', 'backup-target-dir', 'backup-ssh-key',
-  // rsyncd
+  // rsyncd (port 873) + rsyncd over SSH (port 22) share these
   'backup-rsync-module', 'backup-target-subpath',
+  // rsyncd-only
   'backup-rsyncd-user', 'backup-rsyncd-password',
+  // rsyncd-over-SSH-only
+  'backup-ssh-port', 'backup-ssh-password',
 ];
 
 function _backupTransport() {
@@ -5646,6 +5650,98 @@ function _applyBackupTransportVisibility() {
   const panel = $('backup-discover-panel');
   if (panel && t !== 'smb') panel.hidden = true;
 }
+
+// Module discovery for rsyncd / rsyncd_ssh transports. Hits the
+// /api/backup/list-rsync-modules endpoint with the current form state
+// and populates the datalist + writes a hint line. Mirrors what
+// Synology Hyper Backup does — the user enters host + creds, hits
+// "Discover modules", and gets the available module names.
+$('backup-rsync-module-discover')?.addEventListener('click', async () => {
+  const btn = $('backup-rsync-module-discover');
+  const hint = $('backup-rsync-module-hint');
+  const dl = $('backup-rsync-module-options');
+  const moduleInput = $('backup-rsync-module');
+  if (!btn) return;
+  const t = _backupTransport();
+  if (t !== 'rsyncd' && t !== 'rsyncd_ssh') return;
+  const f = _readBackupForm();
+  if (!f.host) {
+    if (hint) { hint.textContent = 'Enter host first.'; hint.dataset.kind = ''; }
+    return;
+  }
+  const body = { transport: t, host: f.host };
+  if (t === 'rsyncd_ssh') {
+    if (!f.ssh_user || !f.ssh_password) {
+      if (hint) { hint.textContent = 'Enter SSH user + password first.'; hint.dataset.kind = ''; }
+      return;
+    }
+    Object.assign(body, {
+      ssh_port: f.ssh_port || 22,
+      ssh_user: f.ssh_user,
+      ssh_password: f.ssh_password,
+    });
+  } else {
+    if (!f.rsyncd_user || !f.rsyncd_password) {
+      if (hint) { hint.textContent = 'Enter rsyncd user + password first.'; hint.dataset.kind = ''; }
+      return;
+    }
+    Object.assign(body, {
+      rsyncd_user: f.rsyncd_user,
+      rsyncd_password: f.rsyncd_password,
+    });
+  }
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Discovering…';
+  if (hint) { hint.textContent = ''; hint.dataset.kind = ''; }
+  try {
+    const r = await fetch('/api/backup/list-rsync-modules', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let j = {};
+    try { j = await r.json(); } catch (_) {}
+    if (!r.ok || !j.ok) {
+      if (hint) {
+        hint.textContent = 'Failed: ' + (j.error || j.detail || ('HTTP ' + r.status));
+        hint.dataset.kind = 'err';
+      }
+      return;
+    }
+    const modules = j.modules || [];
+    if (dl) {
+      dl.innerHTML = '';
+      for (const m of modules) {
+        const o = document.createElement('option');
+        o.value = m;
+        dl.appendChild(o);
+      }
+    }
+    if (hint) {
+      if (modules.length === 0) {
+        hint.textContent = 'No modules exposed for this account.';
+        hint.dataset.kind = '';
+      } else if (modules.length === 1 && moduleInput && !moduleInput.value) {
+        // Only one module + the field is empty → auto-fill it.
+        moduleInput.value = modules[0];
+        hint.textContent = `Found 1 module — auto-filled.`;
+        hint.dataset.kind = 'ok';
+      } else {
+        hint.textContent = `${modules.length} module${modules.length === 1 ? '' : 's'} available — click the field to pick.`;
+        hint.dataset.kind = 'ok';
+      }
+    }
+  } catch (err) {
+    if (hint) {
+      hint.textContent = 'Failed: ' + (err.message || err);
+      hint.dataset.kind = 'err';
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
 
 $('backup-transport')?.addEventListener('change', () => {
   _applyBackupTransportVisibility();
@@ -5859,6 +5955,11 @@ async function loadBackupCreds() {
         setIfEmpty('backup-rsync-module', remote.rsync_module);
         setIfEmpty('backup-target-subpath', remote.target_subpath);
         setIfEmpty('backup-rsyncd-user', remote.rsyncd_user);
+      } else if (transport === 'rsyncd_ssh') {
+        setIfEmpty('backup-ssh-user', remote.ssh_user);
+        setIfEmpty('backup-ssh-port', String(remote.ssh_port || 22));
+        setIfEmpty('backup-rsync-module', remote.rsync_module);
+        setIfEmpty('backup-target-subpath', remote.target_subpath);
       }
       $('backup-state-line').textContent = 'Destination configured. Daily backup will run automatically.';
     } else {
@@ -5883,6 +5984,7 @@ document.getElementById('backup-creds-form')?.addEventListener('submit', async (
     const labelMap = {
       password: 'Password',
       ssh_key: 'SSH private key',
+      ssh_password: 'SSH password',
       rsyncd_password: 'rsyncd password',
       ssh_user: 'SSH user',
       target_dir: 'Target directory',
@@ -6054,6 +6156,16 @@ function _readBackupForm() {
       target_subpath: ($('backup-target-subpath')?.value || '').trim(),
       rsyncd_user: ($('backup-rsyncd-user')?.value || '').trim(),
       rsyncd_password: $('backup-rsyncd-password')?.value || '',
+    };
+  }
+  if (transport === 'rsyncd_ssh') {
+    return {
+      ...base,
+      ssh_port: parseInt($('backup-ssh-port')?.value, 10) || 22,
+      ssh_user: ($('backup-ssh-user')?.value || '').trim(),
+      ssh_password: $('backup-ssh-password')?.value || '',
+      rsync_module: ($('backup-rsync-module')?.value || '').trim(),
+      target_subpath: ($('backup-target-subpath')?.value || '').trim(),
     };
   }
   return base;

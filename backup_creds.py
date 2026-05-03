@@ -14,10 +14,16 @@ regression. Mirroring the existing creds-module pattern keeps the
 threat model uniform.
 
 Transport field (added with rsync support):
-  * "smb"        — fields: host, share, subdir, username, password, domain
-  * "rsync_ssh"  — fields: host, ssh_user, ssh_key, target_dir
-  * "rsyncd"     — fields: host, rsync_module, target_subpath,
-                          rsyncd_user, rsyncd_password
+  * "smb"         — fields: host, share, subdir, username, password, domain
+  * "rsync_ssh"   — fields: host, ssh_user, ssh_key, target_dir
+  * "rsyncd"      — fields: host, rsync_module, target_subpath,
+                           rsyncd_user, rsyncd_password
+  * "rsyncd_ssh"  — fields: host, ssh_port, ssh_user, ssh_password,
+                           rsync_module, target_subpath
+                   (rsyncd protocol tunnelled inside SSH — what
+                   Synology Hyper Backup speaks to UniFi UNAS and
+                   any other "rsync-compatible server" appliance
+                   that rejects unencrypted port-873 traffic.)
 
 Existing creds saved before the rsync work was done don't carry a
 transport field — load() defaults it to "smb" so they keep working
@@ -39,7 +45,7 @@ log = logging.getLogger("backup_creds")
 
 PATH = os.environ.get("JACKERY_BACKUP_CREDS_FILE", "/data/backup-creds.json")
 
-VALID_TRANSPORTS = ("smb", "rsync_ssh", "rsyncd")
+VALID_TRANSPORTS = ("smb", "rsync_ssh", "rsyncd", "rsyncd_ssh")
 
 # Required fields per transport. All must be non-empty for save() to
 # succeed. Other fields are stored as empty strings so the encrypted
@@ -48,13 +54,15 @@ _REQUIRED = {
     "smb": ("host", "share", "username", "password"),
     "rsync_ssh": ("host", "ssh_user", "ssh_key", "target_dir"),
     "rsyncd": ("host", "rsync_module", "rsyncd_user", "rsyncd_password"),
+    "rsyncd_ssh": ("host", "ssh_user", "ssh_password", "rsync_module"),
 }
 
 # Sensitive fields — redacted by public_view() before sending to the UI.
 # ssh_key is a private key (treat as harder-to-reset than a password)
 # but since the UI lets the user paste a new one we surface a
-# "has_ssh_key" flag the same way we do for has_password.
-_SECRET_FIELDS = ("password", "rsyncd_password", "ssh_key")
+# "has_ssh_key" flag the same way we do for has_password. ssh_password
+# is the SSH-tunnelled rsyncd transport's password.
+_SECRET_FIELDS = ("password", "rsyncd_password", "ssh_key", "ssh_password")
 
 
 def has_credentials() -> bool:
@@ -86,15 +94,20 @@ def _normalize(d: dict) -> dict:
         "username": str(d.get("username") or "").strip(),
         "password": str(d.get("password") or ""),
         "domain": str(d.get("domain") or "WORKGROUP").strip(),
-        # rsync over SSH
+        # rsync over SSH (filesystem-path style, key auth)
         "ssh_user": str(d.get("ssh_user") or "").strip(),
         "ssh_key": str(d.get("ssh_key") or ""),
         "target_dir": str(d.get("target_dir") or "").strip(),
-        # rsyncd
+        # rsyncd (port 873, plaintext)
         "rsync_module": str(d.get("rsync_module") or "").strip(),
         "target_subpath": str(d.get("target_subpath") or "").strip(),
         "rsyncd_user": str(d.get("rsyncd_user") or "").strip(),
         "rsyncd_password": str(d.get("rsyncd_password") or ""),
+        # rsyncd-over-SSH (UniFi UNAS, etc.) — module-style addressing
+        # but tunnelled through SSH. Reuses ssh_user + rsync_module from
+        # above; ssh_port + ssh_password are unique to this transport.
+        "ssh_port": int(d.get("ssh_port") or 22),
+        "ssh_password": str(d.get("ssh_password") or ""),
     }
 
 
@@ -186,6 +199,7 @@ def public_view() -> dict | None:
     out["has_password"] = bool(d.get("password"))
     out["has_ssh_key"] = bool(d.get("ssh_key"))
     out["has_rsyncd_password"] = bool(d.get("rsyncd_password"))
+    out["has_ssh_password"] = bool(d.get("ssh_password"))
     for k in _SECRET_FIELDS:
         if k in out:
             out[k] = ""
