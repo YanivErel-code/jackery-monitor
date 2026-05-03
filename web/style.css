@@ -241,6 +241,114 @@ main {
   .settings-subtabs { padding: 3px; gap: 3px; }
   .settings-subtab { font-size: 12px; padding: 7px 12px; }
 }
+
+/* Settings global search.
+   Input is full-width. The results dropdown floats over the cards
+   below — `position: absolute` so it doesn't push the page down
+   while open. Each result row is breadcrumb + label + hint snippet,
+   with the matched query highlighted via <mark>. The selected
+   result (kbd nav) gets a soft accent background; clicking jumps
+   to the corresponding card. */
+.settings-search-wrap {
+  position: relative;
+  margin-bottom: 14px;
+}
+#settings-search {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-elev-2, rgba(255,255,255,.03));
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .15s, background .15s;
+}
+#settings-search:focus {
+  border-color: var(--accent);
+  background: var(--bg-elev-3, rgba(255,255,255,.05));
+}
+#settings-search::placeholder { color: var(--text-mute); }
+
+.settings-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0; right: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--bg-elev-2, rgba(20,22,26,.98));
+  border: 1px solid var(--border, rgba(255,255,255,.10));
+  border-radius: 10px;
+  max-height: 360px;
+  overflow-y: auto;
+  z-index: 50;
+  box-shadow: 0 12px 32px rgba(0,0,0,.45);
+}
+.settings-search-result {
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-soft, rgba(255,255,255,.06));
+  transition: background .12s;
+}
+.settings-search-result:last-child { border-bottom: none; }
+.settings-search-result:hover,
+.settings-search-result.on {
+  background: rgba(74, 222, 128, .10);
+}
+.settings-search-crumb {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-mute);
+  margin-bottom: 2px;
+}
+.settings-search-label {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 500;
+}
+.settings-search-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  /* Truncate long hints to one line so the dropdown stays compact. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.settings-search-empty {
+  padding: 14px;
+  color: var(--text-mute);
+  font-style: italic;
+  text-align: center;
+}
+.settings-search-hl {
+  background: rgba(234, 240, 68, .35);
+  color: var(--text);
+  padding: 0 2px;
+  border-radius: 2px;
+  font-weight: 600;
+}
+
+/* Pulse highlight on the row search jumped to — a brief accent flash
+   so the user's eye finds it after the smooth-scroll lands. Animation
+   restarts each jump (via reflow trick in JS). */
+@keyframes settings-search-pulse {
+  0%   { background: rgba(74, 222, 128, .25); box-shadow: 0 0 0 2px rgba(74, 222, 128, .35); }
+  100% { background: transparent; box-shadow: 0 0 0 2px transparent; }
+}
+.settings-search-jumped {
+  animation: settings-search-pulse 1.6s ease-out;
+  border-radius: 6px;
+}
+
+@media (max-width: 600px) {
+  #settings-search { font-size: 13px; padding: 9px 12px; }
+  .settings-search-result { padding: 9px 12px; }
+}
 .tab {
   background: transparent;
   border: none;

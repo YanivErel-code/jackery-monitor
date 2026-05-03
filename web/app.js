@@ -440,6 +440,192 @@ document.querySelectorAll('[data-settings-collapse-key] .collapsible-header')
     });
   });
 
+// ---- Settings global search ---------------------------------------------
+// Flat index built lazily from the DOM the first time the user types.
+// Every .settings-row inside every collapsible card becomes a search
+// target — labels + hints are already on the page in human-readable
+// form, no parallel schema needed. Card titles themselves are also
+// indexed so "backup" jumps to that group's first card.
+let _settingsSearchIndex = null;
+const _SETTINGS_GROUP_LABELS = {
+  general: 'General',
+  intelligence: 'Intelligence',
+  rates: 'Rates',
+  backup: 'Backup',
+};
+
+function _buildSettingsSearchIndex() {
+  const idx = [];
+  document.querySelectorAll('[data-settings-group]').forEach((group) => {
+    const groupKey = group.dataset.settingsGroup;
+    group.querySelectorAll('[data-settings-collapse-key]').forEach((card) => {
+      const cardKey = card.dataset.settingsCollapseKey;
+      const cardTitle = card.querySelector('h2')?.textContent.trim() || cardKey;
+      // Card itself: lets a query like "anthropic" or "backup" match
+      // even if the user doesn't remember a specific row label.
+      idx.push({
+        group: groupKey, cardKey, cardTitle,
+        label: cardTitle, hint: '',
+        el: card,
+      });
+      // Each labelled row.
+      card.querySelectorAll('.settings-row').forEach((row) => {
+        const labelEl = row.querySelector('.settings-label-text');
+        const hintEl = row.querySelector('.settings-hint, .hint');
+        const label = (labelEl?.textContent || '').trim();
+        if (!label) return;  // skip rows with no label
+        idx.push({
+          group: groupKey, cardKey, cardTitle, label,
+          hint: (hintEl?.textContent || '').trim(),
+          el: row,
+        });
+      });
+    });
+  });
+  return idx;
+}
+
+function _searchSettingsIndex(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  if (!_settingsSearchIndex) _settingsSearchIndex = _buildSettingsSearchIndex();
+  const out = [];
+  for (const entry of _settingsSearchIndex) {
+    const labelHit = entry.label.toLowerCase().includes(q);
+    const hintHit = entry.hint.toLowerCase().includes(q);
+    if (!labelHit && !hintHit) continue;
+    // Score: label hits beat hint-only hits; earlier matches beat later.
+    const labelPos = labelHit ? entry.label.toLowerCase().indexOf(q) : 999;
+    out.push({ ...entry, _score: (labelHit ? 0 : 1000) + labelPos });
+    if (out.length >= 64) break;
+  }
+  out.sort((a, b) => a._score - b._score);
+  return out.slice(0, 8);
+}
+
+function _highlightQuery(text, query) {
+  const escaped = escapeHtml(text);
+  if (!query) return escaped;
+  const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+  return escaped.replace(re, '<mark class="settings-search-hl">$1</mark>');
+}
+
+function _renderSettingsSearchResults(results, query) {
+  const ul = $('settings-search-results');
+  if (!ul) return;
+  if (!results.length) {
+    ul.innerHTML = `<li class="settings-search-empty">No matches for “${escapeHtml(query)}”</li>`;
+    ul.hidden = false;
+    return;
+  }
+  ul.innerHTML = results.map((r, i) => `
+    <li class="settings-search-result${i === 0 ? ' on' : ''}" data-idx="${i}" role="option">
+      <div class="settings-search-crumb">${escapeHtml(_SETTINGS_GROUP_LABELS[r.group] || r.group)} → ${escapeHtml(r.cardTitle)}</div>
+      <div class="settings-search-label">${_highlightQuery(r.label, query)}</div>
+      ${r.hint ? `<div class="settings-search-hint">${_highlightQuery(r.hint, query)}</div>` : ''}
+    </li>
+  `).join('');
+  ul.hidden = false;
+  ul.querySelectorAll('.settings-search-result').forEach((li) => {
+    li.addEventListener('click', () => {
+      const idx = Number(li.dataset.idx);
+      if (results[idx]) _settingsSearchJumpTo(results[idx]);
+    });
+  });
+}
+
+function _settingsSearchJumpTo(entry) {
+  // Switch to the matching sub-tab.
+  selectSettingsSubtab(entry.group);
+  // Expand the card if currently collapsed.
+  const card = document.querySelector(
+    `[data-settings-collapse-key="${entry.cardKey}"]`);
+  if (card && card.classList.contains('collapsed')) {
+    card.classList.remove('collapsed');
+    _persistCollapseState(entry.cardKey, false);
+  }
+  // Scroll the matching element into view + pulse-highlight.
+  if (entry.el) {
+    entry.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    entry.el.classList.remove('settings-search-jumped');
+    // eslint-disable-next-line no-unused-expressions
+    void entry.el.offsetWidth;  // force reflow so the animation restarts
+    entry.el.classList.add('settings-search-jumped');
+  }
+  // Reset the search UI.
+  const ul = $('settings-search-results');
+  if (ul) ul.hidden = true;
+  const input = $('settings-search');
+  if (input) input.value = '';
+}
+
+(function _wireSettingsSearch() {
+  const input = $('settings-search');
+  if (!input) return;
+  let timer = null;
+  let lastResults = [];
+  input.addEventListener('input', () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      const q = input.value;
+      if (!q.trim()) {
+        $('settings-search-results').hidden = true;
+        lastResults = [];
+        return;
+      }
+      lastResults = _searchSettingsIndex(q);
+      _renderSettingsSearchResults(lastResults, q);
+    }, 100);
+  });
+  input.addEventListener('keydown', (e) => {
+    const ul = $('settings-search-results');
+    if (!ul) return;
+    if (e.key === 'Escape') {
+      input.value = '';
+      ul.hidden = true;
+      input.blur();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const onEl = ul.querySelector('.settings-search-result.on');
+      if (onEl) onEl.click();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const items = [...ul.querySelectorAll('.settings-search-result')];
+      if (!items.length) return;
+      e.preventDefault();
+      const cur = items.findIndex(li => li.classList.contains('on'));
+      let next = e.key === 'ArrowDown' ? cur + 1 : cur - 1;
+      if (next < 0) next = items.length - 1;
+      if (next >= items.length) next = 0;
+      items.forEach((li, i) => li.classList.toggle('on', i === next));
+      items[next].scrollIntoView({ block: 'nearest' });
+    }
+  });
+  // Click outside the search wrap closes the dropdown.
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.settings-search-wrap')) {
+      const ul = $('settings-search-results');
+      if (ul) ul.hidden = true;
+    }
+  });
+  // Re-build the index on next search if the DOM changed (e.g. cost
+  // plan rendered new TOU rows). Cheap to invalidate; ~30 entries.
+  document.addEventListener('jackery-settings-dom-changed', () => {
+    _settingsSearchIndex = null;
+  });
+})();
+
+// "/" focuses the search input when Settings is the active tab.
+// Skip when the user is already typing somewhere else, otherwise it'd
+// hijack literal "/" keystrokes in number inputs / Anthropic API key
+// fields / etc.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== '/' || activeTab !== 'settings') return;
+  const ae = document.activeElement;
+  if (ae && ae.matches('input, select, textarea, button')) return;
+  e.preventDefault();
+  $('settings-search')?.focus();
+});
+
 // Populate the Display card's collapsed-header chip so the user can see
 // the current temp unit + keep-awake state at a glance without expanding.
 function _refreshSettingsDisplayChip() {

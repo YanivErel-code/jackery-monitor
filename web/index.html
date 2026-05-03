@@ -879,6 +879,23 @@
 
     <!-- ============== SETTINGS TAB ============== -->
     <section id="tab-settings" class="tab-panel" hidden>
+      <!-- Global search across every label + hint in every Settings
+           card. Index is built from the DOM the first time the user
+           types — so any setting that has a .settings-row label is
+           searchable for free, no manual schema. Press `/` anywhere
+           on the Settings tab to focus the input; Enter jumps to the
+           top match; ↑/↓ navigate; Esc clears. Clicking a result
+           switches to its sub-tab, expands its card, scrolls the
+           matching row into view, and pulse-highlights it. -->
+      <div class="settings-search-wrap">
+        <input id="settings-search" type="search"
+               placeholder="Search settings — try “advisor”, “backup hour”, “TOU”…  (press /)"
+               autocomplete="off" spellcheck="false"
+               aria-label="Search settings"
+               aria-controls="settings-search-results" />
+        <ul id="settings-search-results" class="settings-search-results"
+            role="listbox" hidden></ul>
+      </div>
       <!-- Sub-tabs inside Settings. Splits the seven cards into four
            thematic groups so the user doesn't have to scroll past
            ~3500 px of unrelated config to find one input. Cards
