@@ -899,10 +899,11 @@
       </nav>
 
       <div data-settings-group="general">
-      <section class="card device-card">
-        <div class="card-header">
+      <section class="card device-card collapsible" id="settings-card-runtime" data-settings-collapse-key="runtime">
+        <div class="card-header collapsible-header">
           <h2>Runtime settings</h2>
           <span id="settings-status" class="hint" hidden></span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 16px">
           Changes persist to <code>/data/settings.json</code> and apply on the next poll cycle (no restart needed). Env vars in your <code>.env</code> are used as defaults until you save a value here.
@@ -916,9 +917,11 @@
         </form>
       </section>
 
-      <section class="card device-card">
-        <div class="card-header">
+      <section class="card device-card collapsible collapsed" id="settings-card-display" data-settings-collapse-key="display">
+        <div class="card-header collapsible-header">
           <h2>Display</h2>
+          <span id="settings-display-status" class="hint">—</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
           Per-browser preferences. Don't roundtrip to the server; remembered locally so each browser/tablet can have its own.
@@ -942,10 +945,11 @@
       </div><!-- /data-settings-group=general -->
 
       <div data-settings-group="intelligence" hidden>
-      <section class="card device-card">
-        <div class="card-header">
+      <section class="card device-card collapsible" id="settings-card-anthropic" data-settings-collapse-key="anthropic">
+        <div class="card-header collapsible-header">
           <h2>Anthropic API key</h2>
           <span id="ak-status" class="hint" hidden></span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
           Optional. Powers the smart-charge "Claude narration" toggle — a 1-2 sentence plain-English explanation of each automation decision, attached to the persisted history. Get a key at <code>console.anthropic.com</code>. Stored encrypted in the data volume; never sent anywhere except api.anthropic.com.
@@ -1014,10 +1018,11 @@
       </div><!-- /data-settings-group=intelligence -->
 
       <div data-settings-group="rates" hidden>
-      <section class="card device-card">
-        <div class="card-header">
+      <section class="card device-card collapsible" id="settings-card-cost" data-settings-collapse-key="cost">
+        <div class="card-header collapsible-header">
           <h2>Electricity rates</h2>
-          <span id="cost-status" class="hint" hidden></span>
+          <span id="cost-status" class="hint">—</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 16px">
           Used to convert kWh into dollar savings on the dashboard. Pick a preset or enter a flat rate.
@@ -1064,10 +1069,11 @@
            (3) restore from a chosen snapshot. The backend keeps the SMB
            password encrypted at rest, and the daily loop fires at the
            hour configured in Runtime settings (backup_schedule_hour). -->
-      <section class="card device-card" id="backup-card-creds">
-        <div class="card-header">
+      <section class="card device-card collapsible" id="backup-card-creds" data-settings-collapse-key="backup-creds">
+        <div class="card-header collapsible-header">
           <h2>Backup &amp; restore</h2>
           <span id="backup-creds-status" class="hint">—</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
           Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS over SMB. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic, etc.) get re-prompted. Backups are kept forever; prune manually on the NAS if needed.
@@ -1191,10 +1197,11 @@
         </form>
       </section>
 
-      <section class="card device-card" id="backup-card-status">
-        <div class="card-header">
+      <section class="card device-card collapsible collapsed" id="backup-card-status" data-settings-collapse-key="backup-status">
+        <div class="card-header collapsible-header">
           <h2>Status &amp; history</h2>
           <span id="backup-last-line" class="hint">—</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
           Daily run results. Click <strong>Run now</strong> to validate end-to-end immediately — useful right after saving credentials.
@@ -1207,9 +1214,11 @@
         <div id="backup-runs" class="backup-runs"><div class="hint">Loading…</div></div>
       </section>
 
-      <section class="card device-card" id="backup-card-restore">
-        <div class="card-header">
+      <section class="card device-card collapsible collapsed" id="backup-card-restore" data-settings-collapse-key="backup-restore">
+        <div class="card-header collapsible-header">
           <h2>Restore from backup</h2>
+          <span id="backup-restore-summary" class="hint">click to expand</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
           Pick a snapshot and replace the local <code>/data</code> contents. <strong>Full</strong> restore overwrites the database and every settings/credential file. <strong>Selective</strong> restore lets you pick only certain files (useful for recovering a single deleted device or settings file). The encryption key stays local — telemetry comes back, but encrypted creds will need to be re-entered after a restore on a fresh device.

@@ -385,11 +385,76 @@ function restoreSettingsSubtab() {
   let saved = null;
   try { saved = localStorage.getItem(SETTINGS_SUBTAB_KEY); } catch (_) {}
   selectSettingsSubtab(saved || 'general');
+  // Refresh status chips that don't auto-update via existing loaders —
+  // most chips (#ak-status, #backup-creds-status, #backup-last-line,
+  // #cost-status) get populated by their own loaders that already run
+  // when Settings opens. Display is the odd one out — it's pure
+  // localStorage.
+  _refreshSettingsDisplayChip();
 }
 
 document.querySelectorAll('.settings-subtab').forEach((btn) => {
   btn.addEventListener('click', () => selectSettingsSubtab(btn.dataset.settingsTab));
 });
+
+// ---- Settings cards: collapsible with persisted state ---------------------
+// Each card under [data-settings-group] carries a stable
+// data-settings-collapse-key. Click the header to toggle, and we
+// remember the state per-key in localStorage so a refresh doesn't
+// re-collapse what the user just expanded. The status chip in each
+// header (e.g. backup-creds-status, backup-last-line, ak-status,
+// cost-status) stays visible when collapsed — that's the whole
+// point: zero-click reads of "did last night's backup succeed?",
+// "is Anthropic connected?", "what TOU plan am I on?".
+const SETTINGS_COLLAPSE_KEY = (cardKey) => `jackery-settings-collapse:${cardKey}`;
+
+function _persistCollapseState(cardKey, collapsed) {
+  try { localStorage.setItem(SETTINGS_COLLAPSE_KEY(cardKey), collapsed ? '1' : '0'); }
+  catch (_) {}
+}
+
+function _restoreCollapseStates() {
+  document.querySelectorAll('[data-settings-collapse-key]').forEach((card) => {
+    const key = card.dataset.settingsCollapseKey;
+    let saved = null;
+    try { saved = localStorage.getItem(SETTINGS_COLLAPSE_KEY(key)); }
+    catch (_) {}
+    if (saved === '1') card.classList.add('collapsed');
+    else if (saved === '0') card.classList.remove('collapsed');
+    // else: leave whatever the HTML set (default state per card).
+  });
+}
+_restoreCollapseStates();
+
+document.querySelectorAll('[data-settings-collapse-key] .collapsible-header')
+  .forEach((header) => {
+    header.addEventListener('click', (e) => {
+      // Don't hijack clicks on form controls inside the header (none today,
+      // but defensive — keeps space + tab keypresses from doing weird stuff).
+      if (e.target.closest('input, select, button, a, textarea')) return;
+      const card = header.closest('[data-settings-collapse-key]');
+      if (!card) return;
+      const nowCollapsed = !card.classList.contains('collapsed');
+      card.classList.toggle('collapsed', nowCollapsed);
+      _persistCollapseState(card.dataset.settingsCollapseKey, nowCollapsed);
+    });
+  });
+
+// Populate the Display card's collapsed-header chip so the user can see
+// the current temp unit + keep-awake state at a glance without expanding.
+function _refreshSettingsDisplayChip() {
+  const el = $('settings-display-status');
+  if (!el) return;
+  let unit = 'C';
+  try { unit = (typeof getTempUnit === 'function') ? getTempUnit() : 'C'; }
+  catch (_) {}
+  let keepAwake = false;
+  try { keepAwake = localStorage.getItem(KEEP_AWAKE_KEY) === '1'; }
+  catch (_) {}
+  const parts = [`°${unit}`];
+  if (keepAwake) parts.push('keep awake');
+  el.textContent = parts.join(' · ');
+}
 
 // Tab-level "new insights pending" badge. Lights up when the daily
 // advisor (or a manual run) leaves pending items behind and the user
@@ -1911,6 +1976,26 @@ async function loadCostPlan() {
     const j = await r.json();
     _costPresets = j.presets || [];
     renderCostFields(j.plan);
+    // Populate the collapsed-card chip so users can see what plan is
+    // active without expanding the form. e.g. "TOU · 4 slots · USD" /
+    // "Flat · $0.25/kWh" / "—".
+    const chip = $('cost-status');
+    if (chip) {
+      const p = j.plan || {};
+      const cur = p.currency || 'USD';
+      if (p.type === 'flat') {
+        const rate = p.rate_per_kwh != null
+          ? `${cur === 'USD' ? '$' : ''}${Number(p.rate_per_kwh).toFixed(2)}/kWh`
+          : '';
+        chip.textContent = ['Flat', rate, cur === 'USD' ? null : cur]
+          .filter(Boolean).join(' · ');
+      } else if (p.type === 'tou') {
+        const n = (p.slots || []).length;
+        chip.textContent = `TOU · ${n} slot${n === 1 ? '' : 's'} · ${cur}`;
+      } else {
+        chip.textContent = '—';
+      }
+    }
   } catch (e) {
     console.warn('cost plan load failed', e);
   }
@@ -4955,7 +5040,14 @@ async function loadAnthropicKeyStatus() {
     } else {
       line.innerHTML = 'No key saved. Enter one below to unlock the Claude narration toggle on the Automation tab.';
     }
-    if (status) status.hidden = true;
+    // Populate the collapsed-card chip so the user can see at a glance
+    // whether they're configured. The advisor model name (when known)
+    // makes this richer — see _refreshAnthropicChip below, called
+    // again by loadAnthropicModelPickers once the model list resolves.
+    if (status) {
+      status.hidden = false;
+      status.textContent = j.has_key ? 'connected' : 'not configured';
+    }
   } catch (e) {
     console.warn('anthropic key status fetch failed', e);
   }
@@ -5020,7 +5112,9 @@ document.getElementById('ak-form')?.addEventListener('submit', async (e) => {
     if (!r.ok) throw new Error(j.detail || j.error || `HTTP ${r.status}`);
     status.textContent = 'Saved. Test call succeeded.';
     input.value = '';
-    setTimeout(() => { status.hidden = true; }, 3000);
+    // loadAnthropicKeyStatus() resets the chip to 'connected' / 'not
+    // configured'; no timeout-hide needed any more — the chip is
+    // always-on now (it's the collapsed-card status indicator).
     loadAnthropicKeyStatus();
     // Newly-saved key → re-fetch the model list so the dropdown
     // switches from fallback to the live Anthropic list.
@@ -5039,8 +5133,7 @@ document.getElementById('ak-clear')?.addEventListener('click', async () => {
     const r = await fetch('/api/anthropic/key', { method: 'DELETE' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     status.textContent = 'Forgotten.';
-    setTimeout(() => { status.hidden = true; }, 2500);
-    loadAnthropicKeyStatus();
+    loadAnthropicKeyStatus();  // resets chip to 'not configured'
   } catch (err) {
     status.textContent = String(err.message || err);
   }
