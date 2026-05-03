@@ -1311,10 +1311,18 @@
                  every successful upload (manual or scheduled). Older
                  snapshots beyond the count get pruned. Manual files /
                  non-snapshot dirs at the destination are left alone. -->
-            <div class="settings-row" data-transport-row="all">
+            <!-- Retention only makes sense for transports that can
+                 actually delete remote dirs. SMB has rmtree; rsync_ssh
+                 has shell access via SSH so it can `rm -rf`. The two
+                 daemon-protocol transports (rsyncd / rsyncd_ssh) have
+                 no remote-delete primitive, so this input would be a
+                 silent no-op there — we hide it on those transports
+                 so the user isn't misled into thinking pruning is on.
+                 The retention warning row above explains the gap. -->
+            <div class="settings-row" data-transport-row="smb,rsync_ssh">
               <label class="settings-label" for="backup-keep-count">
                 <span class="settings-label-text">Snapshots to keep</span>
-                <span class="settings-hint">After each successful upload, snapshots beyond this count are deleted (newest kept). <code>30</code> ≈ 1 month of dailies. <code>365</code> ≈ a year. Saves automatically. Note: <em>rsyncd</em> can't delete remote dirs — see warning above.</span>
+                <span class="settings-hint">After each successful upload, snapshots beyond this count are deleted (newest kept). <code>30</code> ≈ 1 month of dailies. <code>365</code> ≈ a year. Saves automatically.</span>
               </label>
               <div class="settings-control">
                 <input id="backup-keep-count" type="number" min="1" max="3650" step="1" class="device-select" style="width:90px" />
