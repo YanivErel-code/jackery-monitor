@@ -20,9 +20,16 @@ docker compose -f docker-compose.dev.yml --profile mock up
 
 ```bash
 pip install -r requirements.txt
-pip install pytest pytest-asyncio
+pip install -r requirements-dev.txt   # pytest + pytest-asyncio + lint tools
 pytest
 ```
+
+`requirements-dev.txt` is the source of truth for the test toolchain —
+don't `pip install pytest` ad-hoc. The async test suite needs
+`pytest-asyncio` (the project sets `asyncio_mode = "auto"` in
+`pyproject.toml`); without it, every `async def` test fails with
+*"async def functions are not natively supported"* even though the
+code under test is fine.
 
 ## Code style
 
