@@ -6,7 +6,13 @@ when the user first opens the Forecast tab; read by the forecast endpoint
 to call Open-Meteo. Not a "setting" — it's per-physical-install state and
 the user shouldn't have to type their lat/lon by hand.
 
-Schema: {"latitude": float, "longitude": float, "updated_at": float}
+Schema: {"latitude": float, "longitude": float, "updated_at": float,
+         "label"?: str, "utc_offset_seconds"?: int, "timezone"?: str}
+
+`label` is a human-readable place name (e.g. "San Jose, California, US"),
+persisted when the user picks a city from the manual-override search
+results so the Forecast tab can show "Forecasting for: San Jose" instead
+of bare coordinates. Older records (and coords-only saves) won't have it.
 """
 from __future__ import annotations
 
@@ -74,23 +80,38 @@ def get() -> dict | None:
             pass
     if data.get("timezone"):
         out["timezone"] = str(data["timezone"])
+    if data.get("label"):
+        out["label"] = str(data["label"])
     return out
 
 
-def set(lat: Any, lon: Any) -> dict[str, float] | None:
-    """Persist (lat, lon) atomically. Returns the saved record on success."""
+def set(lat: Any, lon: Any, label: Any = None) -> dict | None:
+    """Persist (lat, lon) atomically. Returns the saved record on success.
+
+    `label` is an optional human-readable place name persisted alongside
+    the coords (e.g. from the manual-override search results). Empty
+    strings and non-string values are dropped so the on-disk schema
+    stays clean.
+    """
     pair = _validate(lat, lon)
     if pair is None:
         return None
-    record = {"latitude": pair[0], "longitude": pair[1],
-              "updated_at": time.time()}
+    record: dict = {"latitude": pair[0], "longitude": pair[1],
+                    "updated_at": time.time()}
+    if isinstance(label, str):
+        clean = label.strip()
+        if clean:
+            # Cap at 200 chars — defends against pathological inputs
+            # without truncating any reasonable city/admin/country combo.
+            record["label"] = clean[:200]
     with _lock:
         os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
         tmp = LOCATION_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump(record, f, indent=2)
         os.replace(tmp, LOCATION_PATH)
-    log.info("location saved: lat=%.4f lon=%.4f", pair[0], pair[1])
+    log.info("location saved: lat=%.4f lon=%.4f label=%r",
+             pair[0], pair[1], record.get("label"))
     return record
 
 

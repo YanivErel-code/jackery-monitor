@@ -2214,3 +2214,14 @@ footer {
   gap: 4px;
 }
 
+
+/* "Forecasting for: <city> (lat, lon)" line under the chart title.
+   Tight margin so it visually belongs to the header rather than
+   floating above the chart. */
+.forecast-current-loc {
+  margin: -4px 0 10px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.forecast-current-loc .loc-name { color: var(--text); font-weight: 500; }
+.forecast-current-loc .loc-coords { font-variant-numeric: tabular-nums; }

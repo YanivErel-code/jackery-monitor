@@ -3381,7 +3381,11 @@ async def api_location_set(req: Request):
         body = await req.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
-    record = device_location.set(body.get("latitude"), body.get("longitude"))
+    record = device_location.set(
+        body.get("latitude"),
+        body.get("longitude"),
+        label=body.get("label"),
+    )
     if record is None:
         raise HTTPException(status_code=400,
                             detail="latitude/longitude out of range")

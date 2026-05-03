@@ -4071,6 +4071,9 @@ async function fetchForecast() {
     content.hidden = false;
     stats.hidden = false;
     forecastCache = j;
+    // Show the location these forecasts are based on. Async, fires its
+    // own /api/location request — doesn't block the chart render.
+    refreshForecastCurrentLoc();
     const setText = (id, v, d = 0) => { const el = $(id); if (el) el.textContent = fmt(v, d); };
     const dev = activeJackeryDevice();
     const title = $('forecast-title');
@@ -4193,6 +4196,50 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// Render the "Forecasting for: <city> (lat, lon)" line that sits under
+// the Forecast tab title. Reads from /api/location each time so it
+// reflects whatever was last persisted (manual override or geolocation).
+// Older saves won't have a `label` — we degrade gracefully to coords +
+// timezone in that case.
+async function refreshForecastCurrentLoc() {
+  const el = $('forecast-current-loc');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/location');
+    if (!r.ok) { el.textContent = ''; return; }
+    const j = await r.json();
+    if (j == null || j.latitude == null || j.longitude == null) {
+      el.textContent = 'No location set — forecasts unavailable.';
+      return;
+    }
+    const lat = Number(j.latitude).toFixed(4);
+    const lon = Number(j.longitude).toFixed(4);
+    // Build the inner HTML safely — textContent on each span avoids any
+    // injection risk from a maliciously-saved label, while still letting
+    // us style "name" vs "coords" differently.
+    el.innerHTML = '';
+    const prefix = document.createTextNode('Forecasting for: ');
+    el.appendChild(prefix);
+    if (j.label) {
+      const name = document.createElement('span');
+      name.className = 'loc-name';
+      name.textContent = j.label;
+      el.appendChild(name);
+      el.appendChild(document.createTextNode(' — '));
+    }
+    const coords = document.createElement('span');
+    coords.className = 'loc-coords';
+    coords.textContent = `${lat}, ${lon}`;
+    el.appendChild(coords);
+    if (j.timezone) {
+      el.appendChild(document.createTextNode(` (${j.timezone})`));
+    }
+  } catch {
+    // Silent fail — the line is informational, not blocking.
+    el.textContent = '';
+  }
+}
+
 // ---- Manual location override --------------------------------------------
 // Browser geolocation can give bad coords (IP fallback to ISP POP, stale
 // Wi-Fi BSSID database entries, VPN, etc). The manual card lets the user
@@ -4294,7 +4341,11 @@ async function _runManualLocSearch(q) {
         (meta ? meta + ' — ' : '') +
         `${item.latitude.toFixed(4)}, ${item.longitude.toFixed(4)}` +
         (item.timezone ? ` · ${item.timezone}` : '');
-      li.addEventListener('click', () => _saveManualLocation(item.latitude, item.longitude, item.name));
+      // Build a richer label from the geocoder fields so the Forecast
+      // tab shows "San Jose, California, US" instead of bare "San Jose".
+      const richLabel = [item.name, item.admin1, item.country]
+        .filter(Boolean).join(', ');
+      li.addEventListener('click', () => _saveManualLocation(item.latitude, item.longitude, richLabel));
       ul.appendChild(li);
     }
   } catch (err) {
@@ -4332,7 +4383,10 @@ async function _saveManualLocation(lat, lon, label, opts) {
     const r = await fetch('/api/location', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ latitude: lat, longitude: lon }),
+      // Forward the optional label so the server can persist it for
+      // the "Forecasting for: <city>" line. Coords-only saves leave
+      // it null and the UI falls back to displaying just coords.
+      body: JSON.stringify({ latitude: lat, longitude: lon, label: label || null }),
     });
     let j = {};
     try { j = await r.json(); } catch (_) {}
@@ -4353,6 +4407,9 @@ async function _saveManualLocation(lat, lon, label, opts) {
     setTimeout(() => _showManualLoc(false), 800);
     fetchForecast();
     fetchEodForecast();
+    // Update the "Forecasting for: …" line immediately so the user sees
+    // the new place name before fetchForecast() finishes its round-trip.
+    refreshForecastCurrentLoc();
   } catch (err) {
     if (hintEl) { hintEl.textContent = 'Save failed: ' + (err.message || err); hintEl.dataset.kind = 'err'; }
   }
