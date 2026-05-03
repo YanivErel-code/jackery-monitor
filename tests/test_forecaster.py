@@ -263,6 +263,124 @@ def test_inverter_overhead_pct_unbiased_under_quantization():
     )
 
 
+def test_solar_cap_uses_14d_window_not_recent_48h():
+    """Regression test for the cap-window bug the daily advisor flagged
+    on 2026-05-03: predictions made 5/1 for 5/3 saturated at the
+    ac_charge floor (35%) because the recent-48h window only contained
+    cloudy days, even though the array had done 3kW within the prior
+    fortnight and Open-Meteo correctly forecast bright sun for 5/3.
+
+    Setup: a history where 8 days ago had a clear-sky 3000W peak, but
+    the last 48h has only 200W cloudy peaks. Forecast targets a future
+    hour with high GHI. The cap should be derived from the 8-day-ago
+    peak (x SOLAR_RECENT_CAP_MULT), not the 48h-ago low - so a high
+    k*GHI prediction lands without being clamped to a fraction of the
+    array's real capability.
+    """
+    now = int(time.time())
+    history = []
+    # 16 clean discharge windows so build_forecast doesn't bail with
+    # ready=False. Spread between 14 and 5 days ago so they're inside
+    # the new 14-day cap window.
+    for i in range(16):
+        ts = now - (5 * 86400) - i * 3 * 3600
+        history.append({
+            "ts": ts, "battery_pct": 90,
+            "output_w": 600, "output_wh": 600,
+            "solar_w": 0, "solar_wh": 0,
+            "ac_input_w": 0, "ac_input_wh": 0,
+            "input_w": 0, "input_wh": 0,
+        })
+        history.append({
+            "ts": ts + 3600, "battery_pct": 87,
+            "output_w": 600, "output_wh": 600,
+            "solar_w": 0, "solar_wh": 0,
+            "ac_input_w": 0, "ac_input_wh": 0,
+            "input_w": 0, "input_wh": 0,
+        })
+
+    # The clear-sky day: 8 days ago, peak 3000W with high GHI to fit a
+    # solid k coefficient.
+    sunny_day_anchor = now - 8 * 86400
+    for h in range(8, 17):  # 09:00-16:00 local, 8 hourly buckets
+        ghi = 800.0 if 11 <= h <= 14 else 400.0  # noon-ish peak
+        solar = 3000.0 if 11 <= h <= 14 else 1500.0
+        ts = sunny_day_anchor + h * 3600
+        history.append({
+            "ts": ts, "battery_pct": 80,
+            "output_w": 0, "output_wh": 0,
+            "solar_w": solar, "solar_wh": solar,
+            "ac_input_w": 0, "ac_input_wh": 0,
+            "input_w": solar, "input_wh": solar,
+        })
+
+    # Recent 48h: only cloudy / low-solar samples, peak ~200W.
+    for h in range(48):
+        ts = now - (48 - h) * 3600
+        history.append({
+            "ts": ts, "battery_pct": 60,
+            "output_w": 200, "output_wh": 200,
+            "solar_w": 200 if 12 <= h % 24 <= 14 else 50,
+            "solar_wh": 200 if 12 <= h % 24 <= 14 else 50,
+            "ac_input_w": 0, "ac_input_wh": 0,
+            "input_w": 0, "input_wh": 0,
+        })
+
+    # Weather: also include the past samples so fit_solar_coefficient has
+    # GHI-paired samples for the sunny day, then a future window with
+    # high GHI for the prediction.
+    weather = []
+    # Past weather, hour-aligned to match history timestamps.
+    for h in range(8, 17):
+        weather.append({
+            "ts": sunny_day_anchor + h * 3600,
+            "ghi_w_m2": 800.0 if 11 <= h <= 14 else 400.0,
+            "cloud_cover_pct": 0,
+        })
+    # Future weather: high GHI predicted for tomorrow.
+    for h in range(24):
+        ghi = 900.0 if 11 <= h <= 14 else (400.0 if 8 <= h <= 17 else 0)
+        weather.append({
+            "ts": now + h * 3600,
+            "ghi_w_m2": ghi,
+            "cloud_cover_pct": 0,
+        })
+
+    res = forecaster.build_forecast(
+        energy_history=history,
+        weather_hourly=weather,
+        starting_soc_pct=60.0,
+        capacity_wh=5040,
+        now_ts=now,
+        horizon_hours=24,
+    )
+    assert res.get("ready") is True, (
+        f"forecast not ready: {res.get('readiness')}"
+    )
+
+    # The cap should be derived from the 8-day-ago peak (3000W),
+    # not the recent 48h peak (200W). At SOLAR_RECENT_CAP_MULT=2.0
+    # the cap is ≥ 6000W — well above k*GHI for the future bright
+    # hours, so they should NOT be clamped.
+    assert res["solar_recent_peak_w"] >= 2900, (
+        f"recent_peak should reflect the 8-day-ago sunny day, "
+        f"got {res['solar_recent_peak_w']}"
+    )
+
+    # Future noon hours should have non-trivial solar_w (at least
+    # 1000W — the regression's prediction unencumbered by a too-tight
+    # cap). If the cap were still based on the recent 48h (200W * 1.5
+    # = 300W), every future hour would be clamped to 300W and this
+    # assertion would fail.
+    bright_hours = [h for h in res["forecast"] if h["solar_w"] > 1000]
+    assert len(bright_hours) >= 3, (
+        f"expected several bright forecast hours; only "
+        f"{len(bright_hours)} hours over 1000W. "
+        f"solar_cap_w={res.get('solar_cap_w')}, "
+        f"forecast solar_w values: {[h['solar_w'] for h in res['forecast']]}"
+    )
+
+
 def test_build_forecast_emits_diagnostic_sources():
     # Verify the new diagnostic keys are present and labelled correctly.
     # With enough clean discharge windows, both fits should run →

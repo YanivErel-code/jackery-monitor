@@ -79,10 +79,21 @@ DEFAULT_CHARGE_EFFICIENCY = 0.90
 CHARGE_EFFICIENCY = DEFAULT_CHARGE_EFFICIENCY
 
 # Solar overshoot guard: cap forecast solar at this multiple of the device's
-# recent (last 48h) observed peak. Prevents an overfit regression from
-# predicting more solar than the array has ever produced; allows a modest
+# observed peak within SOLAR_CAP_HISTORY_S. Prevents an overfit regression
+# from predicting more solar than the array has ever produced; allows
 # headroom for clearer-sky days without runaway overprediction.
-SOLAR_RECENT_CAP_MULT = 1.5
+#
+# History window started at 48h, but that was too tight: a recent cloudy
+# stretch tanked `recent_peak`, and even when Open-Meteo correctly
+# forecast bright sun for a future hour, k*GHI got clamped down by a
+# cap derived purely from the prior weekend's clouds. The advisor flagged
+# this on 2026-05-03: predictions made 5/1 for 5/3 saturated at the
+# ac_charge floor (35%) while actuals hit 76-79%. Widening to 14 days
+# means any clear-sky day in the prior fortnight sets the cap, and the
+# multiplier 2.0 (was 1.5) gives extra headroom for genuinely brighter-
+# than-recent days.
+SOLAR_RECENT_CAP_MULT = 2.0
+SOLAR_CAP_HISTORY_S = 14 * 86400
 
 # Idle/standby load when an hour has no historical data of its own AND
 # neighboring hours don't either. ~30W covers the device's own electronics
@@ -910,12 +921,16 @@ def build_forecast(
     overhead_source = "fit" if overhead_n >= 5 else "default"
     charge_eff_source = "fit" if charge_eff_n >= 5 else "default"
 
-    # Cap projected solar by the device's recent observed peak so an
-    # overfit regression can't predict more solar than the array has
-    # actually produced. SOLAR_RECENT_CAP_MULT leaves headroom for
+    # Cap projected solar by the device's observed peak in the last
+    # SOLAR_CAP_HISTORY_S so an overfit regression can't predict more
+    # solar than the array has actually produced. The window is
+    # deliberately wide (14 days) so a recent cloudy stretch can't
+    # falsely clamp predictions for upcoming bright days — see the
+    # SOLAR_CAP_HISTORY_S comment for the advisor finding that
+    # motivated this. SOLAR_RECENT_CAP_MULT leaves headroom for
     # clearer-sky days; falls back to None (no cap) when there's no
-    # recent data to anchor against.
-    recent_cutoff = cutoff - 48 * 3600
+    # qualifying data to anchor against.
+    recent_cutoff = cutoff - SOLAR_CAP_HISTORY_S
     recent_peak = max(
         (float(r.get("solar_w") or 0) for r in energy_history
          if r.get("ts") and r["ts"] >= recent_cutoff),

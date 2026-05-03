@@ -91,11 +91,13 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # The /api/forecast/accuracy endpoint exposes a "post-fix" summary using
 # this as a `made_at` floor so the dashboard headline reflects current
 # model behavior instead of being dragged down by stale rows that age
-# out over 14 days. Currently set to the deploy of aa1f086 (robust load
-# profile + unbiased overhead fit). Override via env var when shipping
-# new fixes if updating in code is inconvenient.
+# out over 14 days. Most recent bump: solar-cap window widened from 48h
+# to 14 days (advisor flagged 5/3 that the tight window saturated long-
+# lead predictions to the ac-charge floor when recent days were cloudy).
+# Override via env var when shipping new fixes if updating in code is
+# inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777678272")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777840672")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
