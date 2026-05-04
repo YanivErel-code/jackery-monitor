@@ -347,6 +347,65 @@ def fit_inverter_overhead_pct(
     return float(median), len(pcts)
 
 
+def diagnose_idle_windows(
+    energy_history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Walk adjacent hourly buckets and report why each candidate window
+    pair was accepted or rejected by the inverter-overhead-fit gate.
+    Used by /api/forecast?_diag=1 to explain a stuck `calibrating`
+    state — the gate's `have_idle_windows: 2/5` is opaque on its own;
+    this breaks it down into actionable causes.
+
+    Mirrors the gate logic in fit_inverter_overhead_pct — keep these
+    two in sync. If a new gate is added there, add it here too."""
+    SOLAR_NOISE_WH = 50.0
+    AC_NOISE_WH = 50.0
+    MIN_OUT_W = 50.0
+
+    rows = sorted(
+        (r for r in (energy_history or []) if r.get("ts") is not None),
+        key=lambda r: r["ts"],
+    )
+    rejected = {
+        "missing_soc": 0,
+        "soc_drop_under_2pp": 0,
+        "solar_above_noise": 0,
+        "ac_input_above_noise": 0,
+        "dt_out_of_range": 0,
+        "out_w_under_50": 0,
+    }
+    qualifying = 0
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
+        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        if soc_a is None or soc_b is None:
+            rejected["missing_soc"] += 1
+            continue
+        if (soc_a - soc_b) < INVERTER_FIT_MIN_SOC_DROP_PCT:
+            rejected["soc_drop_under_2pp"] += 1
+            continue
+        if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
+            rejected["solar_above_noise"] += 1
+            continue
+        if (a.get("ac_input_wh") or 0) > AC_NOISE_WH:
+            rejected["ac_input_above_noise"] += 1
+            continue
+        dt_h = (b["ts"] - a["ts"]) / 3600.0
+        if dt_h < 0.5 or dt_h > 6.0:
+            rejected["dt_out_of_range"] += 1
+            continue
+        if ((a.get("output_wh") or 0) / dt_h) < MIN_OUT_W:
+            rejected["out_w_under_50"] += 1
+            continue
+        qualifying += 1
+    return {
+        "total_pairs": max(0, len(rows) - 1),
+        "qualifying_windows": qualifying,
+        "needed_windows": MIN_FORECAST_IDLE_WINDOWS,
+        "rejected": rejected,
+    }
+
+
 # Back-compat alias for callers / tests that import the old name.
 # Same data, just returns a watt-equivalent at a typical 500W load.
 def fit_idle_overhead_w(

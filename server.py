@@ -2622,12 +2622,26 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
 
 
 @app.get("/api/forecast")
-async def api_forecast(device_sn: str | None = None):
+async def api_forecast(device_sn: str | None = None, _diag: int = 0):
     """SOC forecast for the next ~5 days based on weather + per-device history.
 
     Returns the simulated SOC curve plus the fitted model coefficients so the
-    UI can show how confident the prediction is."""
-    return await _build_and_record_forecast(device_sn)
+    UI can show how confident the prediction is.
+
+    `_diag=1` augments the response with `idle_window_diag`, a per-rejection-
+    reason breakdown for the inverter-overhead-fit gate. Use this when a
+    device is stuck in `calibrating` and you want to know which usage
+    pattern is the blocker (e.g. AC always plugged in vs solar always
+    connected vs loads too light)."""
+    result = await _build_and_record_forecast(device_sn)
+    if _diag and device_sn:
+        try:
+            ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+            result["idle_window_diag"] = forecaster.diagnose_idle_windows(ehist)
+        except Exception as e:
+            log.debug("forecast diag failed: %s", e)
+            result["idle_window_diag"] = {"error": str(e)}
+    return result
 
 
 # Hourly cadence for the periodic forecast recorder. The advisor's

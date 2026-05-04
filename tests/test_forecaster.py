@@ -628,6 +628,49 @@ def test_inverter_overhead_pct_falls_back_when_ratios_are_negative():
     assert pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
 
+def test_diagnose_idle_windows_classifies_each_rejection():
+    """Continuous timeline of 9 hourly buckets, each adjacent pair
+    constructed to hit a specific rejection cause (or qualify). Verifies
+    the breakdown matches exactly so we catch any drift between
+    diagnose_idle_windows and fit_inverter_overhead_pct's gates."""
+    base = 1_700_000_000
+    h = lambda i, soc, out=545, solar=0, ac=0: {  # noqa: E731
+        "ts": base + i * 3600,
+        "battery_pct": soc,
+        "output_wh": out, "solar_wh": solar, "ac_input_wh": ac,
+    }
+    history = [
+        h(0, 80),                      # pair 0->1: clean 2pp drop -> QUALIFY
+        h(1, 78),                      # pair 1->2: clean 2pp drop -> QUALIFY
+        h(2, 76),                      # pair 2->3: SOC None on b -> missing_soc
+        h(3, None),                    # pair 3->4: SOC None on a -> missing_soc
+        h(4, 75),                      # pair 4->5: 1pp drop      -> soc_drop_under_2pp
+        h(5, 74, solar=1000),          # pair 5->6: solar on a    -> solar_above_noise
+        h(6, 72, ac=2000),             # pair 6->7: ac on a       -> ac_input_above_noise
+        h(7, 70, out=30),              # pair 7->8: out_wh=30W    -> out_w_under_50
+        h(8, 68, out=30),
+    ]
+    diag = forecaster.diagnose_idle_windows(history)
+    assert diag["total_pairs"] == 8
+    assert diag["qualifying_windows"] == 2
+    assert diag["needed_windows"] == forecaster.MIN_FORECAST_IDLE_WINDOWS
+    assert diag["rejected"] == {
+        "missing_soc": 2,
+        "soc_drop_under_2pp": 1,
+        "solar_above_noise": 1,
+        "ac_input_above_noise": 1,
+        "dt_out_of_range": 0,
+        "out_w_under_50": 1,
+    }
+
+
+def test_diagnose_idle_windows_handles_empty_history():
+    diag = forecaster.diagnose_idle_windows([])
+    assert diag["total_pairs"] == 0
+    assert diag["qualifying_windows"] == 0
+    assert all(v == 0 for v in diag["rejected"].values())
+
+
 def test_inverter_overhead_pct_used_by_build_forecast():
     # End-to-end: a history with a clear 10% overhead should make
     # build_forecast surface inverter_overhead_pct ≈ 0.10 in its result.
