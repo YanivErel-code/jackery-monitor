@@ -876,19 +876,24 @@ def forecast_readiness(
     capacity_wh: int,
 ) -> dict[str, Any]:
     """Decide whether we have enough per-device history to build a
-    forecast users can trust. Returns a dict with `ready` + the metrics
-    the gate evaluated, so the UI can show "8 of 24 hours captured"
-    style progress instead of a binary unhelpful "not yet".
+    forecast. Returns a dict with `ready` + the metrics the gate
+    evaluated, so the UI can show "8 of 24 hours captured" progress
+    instead of a binary unhelpful "not yet".
 
-    Gates:
-      1. ≥ MIN_FORECAST_HISTORY_HOURS of *span* between earliest and
-         latest sample. A full diurnal cycle is the minimum to fit a
-         useful solar coefficient and a per-hour load profile.
-      2. ≥ MIN_FORECAST_IDLE_WINDOWS clean discharge windows so the
-         parasitic overhead is fit from the user's own data, not the
-         population default.
+    The only hard gate is span: ≥ MIN_FORECAST_HISTORY_HOURS between
+    earliest and latest sample. A full diurnal cycle is the minimum to
+    fit a useful solar coefficient and a per-hour load profile.
 
-    A failed gate is not a bug — it's expected on a fresh install.
+    The inverter-overhead fit's window count is reported but doesn't
+    block readiness anymore. Backup devices that intentionally sit idle
+    most of the time (e.g. a HomePower 3000 used a few times a year for
+    camping) will never produce 5 clean discharge windows — requiring
+    them to run a heater for the algorithm's benefit was a poor design.
+    Instead we surface `low_confidence_overhead_fit` and let the fit
+    fall back to the population-default 10% overhead, which is close
+    enough on a mostly-idle device where parasitic drain dominates and
+    the load model is already correctly captured by the per-hour bucket
+    profile.
     """
     rows = sorted(
         (r for r in (energy_history or []) if r.get("ts") is not None),
@@ -902,13 +907,11 @@ def forecast_readiness(
             "needed_hours": MIN_FORECAST_HISTORY_HOURS,
             "have_idle_windows": 0,
             "needed_idle_windows": MIN_FORECAST_IDLE_WINDOWS,
+            "low_confidence_overhead_fit": True,
         }
     span_hours = (rows[-1]["ts"] - rows[0]["ts"]) / 3600.0
     _, n_windows = fit_idle_overhead_w(energy_history, capacity_wh)
-    ready = (
-        span_hours >= MIN_FORECAST_HISTORY_HOURS
-        and n_windows >= MIN_FORECAST_IDLE_WINDOWS
-    )
+    ready = span_hours >= MIN_FORECAST_HISTORY_HOURS
     return {
         "ready": ready,
         "reason": "ready" if ready else "calibrating",
@@ -916,6 +919,7 @@ def forecast_readiness(
         "needed_hours": MIN_FORECAST_HISTORY_HOURS,
         "have_idle_windows": n_windows,
         "needed_idle_windows": MIN_FORECAST_IDLE_WINDOWS,
+        "low_confidence_overhead_fit": n_windows < MIN_FORECAST_IDLE_WINDOWS,
     }
 
 

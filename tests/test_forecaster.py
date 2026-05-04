@@ -726,6 +726,43 @@ def test_build_forecast_blocks_when_history_too_short():
     assert r["have_hours"] < r["needed_hours"]
 
 
+def test_build_forecast_emits_for_low_usage_backup_device():
+    """A backup device that's intentionally idle most of the time (e.g.
+    a HomePower 3000 used a few times a year) won't accumulate clean
+    discharge windows — but should still get a forecast using default
+    overhead. The fit's window count is reported via the
+    `low_confidence_overhead_fit` flag for UI transparency."""
+    now = int(time.time())
+    # 6 days of history, mostly idle (1pp drift per hour, no real load).
+    # No window will pass the 2pp + 50W out_w gates — exactly the
+    # HomePower 3000 stuck-in-calibrating scenario.
+    history = []
+    soc = 90
+    for i in range(-6 * 24, 0):
+        ts = now + i * 3600
+        history.append({
+            "ts": ts, "battery_pct": soc,
+            "output_w": 20, "output_wh": 20,  # below MIN_OUT_W=50W
+            "solar_wh": 0, "ac_input_wh": 0,
+        })
+        # Drift down 1pp every 4 hours — never hits the 2pp gate.
+        if i % 4 == 0:
+            soc = max(70, soc - 1)
+    weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
+               for i in range(48)]
+    res = forecaster.build_forecast(
+        energy_history=history, weather_hourly=weather,
+        starting_soc_pct=80.0, capacity_wh=3024, now_ts=now,
+    )
+    assert res["ready"] is True, "low-usage device should still get a forecast"
+    assert len(res["forecast"]) > 0
+    r = res["readiness"]
+    assert r["reason"] == "ready"
+    assert r["low_confidence_overhead_fit"] is True
+    # have_idle_windows is reported but doesn't gate readiness anymore.
+    assert r["have_idle_windows"] < r["needed_idle_windows"]
+
+
 # ---------- fit_charge_efficiency ----------
 
 def _charge_window(ts0: int, soc0: int, soc1: int, input_wh: int):

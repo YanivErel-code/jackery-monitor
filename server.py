@@ -1369,10 +1369,7 @@ async def _smart_charge_evaluate(record: bool = True,
             tz_offset_seconds=int(loc.get("utc_offset_seconds") or 0),
             forecast_unavailable_reason=(
                 f"calibrating: {readiness.get('have_hours', 0)}h of "
-                f"{readiness.get('needed_hours', 24)}h captured, "
-                f"{readiness.get('have_idle_windows', 0)}/"
-                f"{readiness.get('needed_idle_windows', 5)} "
-                f"discharge windows"
+                f"{readiness.get('needed_hours', 24)}h captured"
             ),
         )
     # Persist the forecast so we have a continuous trace for predicted-vs-
