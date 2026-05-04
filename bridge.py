@@ -946,18 +946,33 @@ async def handle(method: str, params: dict) -> dict:
             return {"ok": False, "error": f"unknown port: {port!r}"}
         if not state.cloud_client:
             return {"ok": False, "error": "cloud client not initialised — sign in first"}
-        device = state.cloud_device or {}
-        device_sn = device.get("device_sn")
+        # Honour an explicit device_sn from the caller — that's how the
+        # per-browser view tells us "toggle the device I'm looking at,"
+        # which can differ from the bridge-active device. Validate it
+        # against the account's known devices so we don't accept a stale
+        # SN. Falls back to the bridge-active device when omitted.
+        requested_sn = (params.get("device_sn") or "").strip() or None
+        if requested_sn:
+            known = {d.get("device_sn") for d in state.cloud_devices or []}
+            if requested_sn not in known:
+                return {"ok": False,
+                        "error": f"device_sn {requested_sn!r} is not on this account"}
+            device_sn = requested_sn
+        else:
+            device = state.cloud_device or {}
+            device_sn = device.get("device_sn")
         if not device_sn:
             return {"ok": False, "error": "no device_sn — wait for first poll"}
         try:
             ack = await state.cloud_client.publish_command(device_sn, port, on)
         except Exception as e:
             event("error", "mqtt", f"set_output({port}, {on}) failed: {e}",
-                  port=port, on=on)
+                  port=port, on=on, device_sn=device_sn)
             return {"ok": False, "error": str(e)}
-        event("info", "mqtt", f"Output {port.upper()} -> {'ON' if on else 'OFF'}",
-              port=port, on=on, action_id=ack.get("action_id"))
+        event("info", "mqtt",
+              f"Output {port.upper()} -> {'ON' if on else 'OFF'} on {device_sn}",
+              port=port, on=on, device_sn=device_sn,
+              action_id=ack.get("action_id"))
         # Force a quick re-poll so the UI reflects the new state without
         # waiting for the next 15s poll cycle.
         state.cloud_force_repoll.set()

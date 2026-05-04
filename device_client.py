@@ -68,7 +68,12 @@ class DeviceClient:
     async def poll(self) -> dict[str, Any] | None:
         raise NotImplementedError
 
-    async def set_output(self, port: str, on: bool) -> None:
+    async def set_output(self, port: str, on: bool, *,
+                         device_sn: str | None = None) -> None:
+        """Toggle an output on the given device. `device_sn=None` means
+        target whichever device the backend has selected/active —
+        preserved for the mock backend and for callers that don't care
+        about per-browser view routing."""
         raise NotImplementedError
 
     async def disconnect(self) -> None:
@@ -127,7 +132,9 @@ class MockDeviceClient(DeviceClient):
             "time_remaining_h": round((self._battery / 100) * 12, 2),
         }
 
-    async def set_output(self, port, on):
+    async def set_output(self, port, on, *, device_sn=None):
+        # Mock backend has a single virtual device — device_sn is accepted
+        # for API compatibility but ignored.
         if port not in self._switches:
             raise DeviceClientError(f"unknown port {port}")
         self._switches[port] = bool(on)
@@ -254,8 +261,11 @@ class BridgeDeviceClient(DeviceClient):
     def last_status(self):
         return getattr(self, "_last_status", None)
 
-    async def set_output(self, port, on):
-        r = await self._rpc("set_output", port=port, on=bool(on))
+    async def set_output(self, port, on, *, device_sn=None):
+        params = {"port": port, "on": bool(on)}
+        if device_sn:
+            params["device_sn"] = device_sn
+        r = await self._rpc("set_output", **params)
         if not r.get("ok"):
             raise DeviceClientError(r.get("error", "set_output failed"))
 

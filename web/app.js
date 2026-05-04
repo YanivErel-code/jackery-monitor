@@ -273,6 +273,11 @@ document.querySelectorAll('.switch').forEach((btn) => {
     if (currentState !== 'ON' && currentState !== 'OFF') {
       return;  // unknown state — don't risk a blind toggle
     }
+    // Route the toggle to the device the user is *viewing*, not the one
+    // the bridge happens to be polling. Without this, a user with
+    // per-browser view set to a non-active device would silently toggle
+    // the wrong Jackery.
+    const viewSn = activeJackeryDevice()?.device_sn || null;
     const turnOn = currentState === 'OFF';
     // AC has highest blast radius (powering whatever's plugged in) — confirm
     // before turning it OFF. Turning ON is fine to do without confirm.
@@ -287,7 +292,7 @@ document.querySelectorAll('.switch').forEach((btn) => {
       const r = await fetch('/api/set_output', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ port, on: turnOn }),
+        body: JSON.stringify({ port, on: turnOn, device_sn: viewSn }),
       });
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));

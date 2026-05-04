@@ -3935,19 +3935,28 @@ def api_settings_post(body: dict):
 @app.post("/api/set_output")
 async def api_set_output(body: dict):
     """Toggle one of the device's outputs (AC/DC/USB/Car) via the cloud MQTT
-       channel. Body: {port: 'ac'|'dc'|'usb'|'car', on: bool}."""
+       channel. Body: {port: 'ac'|'dc'|'usb'|'car', on: bool,
+                       device_sn: optional}.
+
+    `device_sn` lets the per-browser view route the toggle to the device
+    the user is actually looking at — without it, the bridge sends the
+    command to whatever device it happens to be polling, which silently
+    targets the wrong Jackery for any browser whose view doesn't match
+    the bridge-active device. Defaults to the bridge-active SN when
+    omitted (back-compat for older clients)."""
     port = (body or {}).get("port")
     on = bool((body or {}).get("on"))
+    device_sn = (body or {}).get("device_sn") or None
     if port not in ("ac", "dc", "usb", "car"):
         raise HTTPException(400, "port must be one of: ac, dc, usb, car")
     setter = getattr(state.client, "set_output", None)
     if not setter:
         raise HTTPException(501, "Backend does not support output toggles")
     try:
-        await setter(port, on)
+        await setter(port, on, device_sn=device_sn)
     except DeviceClientError as e:
         raise HTTPException(400, str(e)) from e
-    return {"ok": True, "port": port, "on": on}
+    return {"ok": True, "port": port, "on": on, "device_sn": device_sn}
 
 
 @app.post("/api/pause_polling")
