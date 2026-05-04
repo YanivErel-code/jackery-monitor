@@ -91,13 +91,14 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # The /api/forecast/accuracy endpoint exposes a "post-fix" summary using
 # this as a `made_at` floor so the dashboard headline reflects current
 # model behavior instead of being dragged down by stale rows that age
-# out over 14 days. Most recent bump: solar-cap window widened from 48h
-# to 14 days (advisor flagged 5/3 that the tight window saturated long-
-# lead predictions to the ac-charge floor when recent days were cloudy).
+# out over 14 days. Most recent bump: actual_soc is now system-weighted
+# (capacity-weighted main + packs) to match predicted_soc, closing the
+# main-vs-system measurement asymmetry that was inflating long-lead MAE
+# whenever main and packs ran out of balance.
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777840672")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777906866")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -453,6 +454,26 @@ async def broadcast_status(message_type: str = "status") -> None:
         state.ws_clients.pop(ws, None)
 
 
+def _capacity_hints(device_sn: str | None) -> tuple[int | None, int | None]:
+    """Look up (main_wh, pack_wh) from the device's model_code so
+    `prediction_accuracy()` and `smart_charge_analytics()` can capacity-
+    weight the actual SOC to match the (system-weighted) predicted.
+    Returns (None, None) for unknown devices — callers fall back to
+    main-only behavior."""
+    if not device_sn:
+        return (None, None)
+    dev_meta = next(
+        (d for d in state.energy.list_devices()
+         if d.get("device_sn") == device_sn),
+        None,
+    )
+    if not dev_meta:
+        return (None, None)
+    model_code = dev_meta.get("model_code")
+    return (forecaster.battery_capacity_wh(model_code),
+            forecaster.expansion_pack_capacity_wh(model_code))
+
+
 def _system_soc_pct(main_pct: float, device_sn: str | None,
                     model_code: int | None = None) -> float:
     """Combined SOC across the main unit + every cached expansion pack
@@ -797,9 +818,16 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
     pred_sunset = sunset_e.get("predicted_soc") if sunset_e else None
     pred_sunrise = sunrise_e.get("predicted_soc") if sunrise_e else None
 
-    actual_sunset = (state.energy.actual_soc_at(device_sn, sunset_ts)
+    main_wh, pack_wh = _capacity_hints(device_sn)
+    actual_sunset = (state.energy.system_soc_at(
+                         device_sn, sunset_ts,
+                         main_capacity_wh=main_wh,
+                         pack_capacity_wh=pack_wh)
                      if sunset_ts and sunset_ts <= now else None)
-    actual_sunrise = (state.energy.actual_soc_at(device_sn, sunrise_ts)
+    actual_sunrise = (state.energy.system_soc_at(
+                          device_sn, sunrise_ts,
+                          main_capacity_wh=main_wh,
+                          pack_capacity_wh=pack_wh)
                       if sunrise_ts and sunrise_ts <= now else None)
 
     state.energy.upsert_daily_summary(
@@ -1572,9 +1600,16 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
     except Exception as e:
         log.debug("advisor: idle_overhead fit failed: %s", e)
 
+    main_wh = forecaster.battery_capacity_wh(model_code)
+    pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
+
     accuracy_summary = {}
     try:
-        samples_acc = state.energy.prediction_accuracy(device_sn)
+        samples_acc = state.energy.prediction_accuracy(
+            device_sn,
+            main_capacity_wh=main_wh,
+            pack_capacity_wh=pack_wh,
+        )
         for s in samples_acc:
             h = s["lead_time_h"]
             bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
@@ -1634,7 +1669,11 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
     recent_predictions = []
     try:
         cutoff = time.time() - 48 * 3600
-        for p in state.energy.prediction_accuracy(device_sn):
+        for p in state.energy.prediction_accuracy(
+            device_sn,
+            main_capacity_wh=main_wh,
+            pack_capacity_wh=pack_wh,
+        ):
             if p.get("target", 0) < cutoff:
                 continue
             recent_predictions.append({
@@ -1653,7 +1692,11 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
     # Smart-charge decisions joined to actuals.
     recent_decisions = []
     try:
-        for d in state.energy.smart_charge_analytics(device_sn, days=7):
+        for d in state.energy.smart_charge_analytics(
+            device_sn, days=7,
+            main_capacity_wh=main_wh,
+            pack_capacity_wh=pack_wh,
+        ):
             recent_decisions.append({
                 "decided_iso": _iso(d.get("decided_at")),
                 "action": d.get("action"),
@@ -1760,22 +1803,6 @@ def _recent_code_changes() -> list[dict[str, Any]]:
             ),
         },
         {
-            "ts_iso": "2026-05-01T17:30:00+00:00",
-            "subsystem": "known_issues",
-            "summary": (
-                "Known measurement asymmetry remains (don't re-suggest "
-                "every review): predictions are seeded with system SOC "
-                "(capacity-weighted main + expansion packs) but the "
-                "`actual_soc` field in prediction_accuracy reads from "
-                "samples.last_battery_pct which is the MAIN-only reading. "
-                "When packs are out of balance with main (e.g. main at "
-                "100%, packs at 75%) this manifests as a bias that grows "
-                "with SOC. Fix is non-trivial (needs a system-SOC column "
-                "or a join on battery_packs at target time); on the "
-                "to-do list."
-            ),
-        },
-        {
             "ts_iso": "2026-05-01T17:00:00+00:00",
             "subsystem": "telemetry",
             "summary": (
@@ -1811,6 +1838,24 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "prefer the percentage — it's the source of truth."
             ),
         },
+        {
+            "ts_iso": "2026-05-04T15:30:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Closed the predicted-vs-actual measurement asymmetry "
+                "you flagged on 2026-05-04: prediction_accuracy and "
+                "smart_charge_analytics now compute capacity-weighted "
+                "system SOC for the actual side too, by joining "
+                "battery_packs at target ±30min. Predicted (system) "
+                "now compared to actual (system). Single-unit devices "
+                "and pre-pack-recording history degenerate to the "
+                "main-only behavior, so historical data isn't rewritten. "
+                "Headline accuracy summary should drop several pp once "
+                "fresh predictions accumulate; if long-lead MAE doesn't "
+                "improve, the residual is a real solar/load-model "
+                "defect, not the asymmetry."
+            ),
+        },
     ]
 
 
@@ -1836,6 +1881,8 @@ def _make_advisor_query_fn(device_sn: str):
     return an `error` field rather than raising — Claude can then
     re-issue the call with corrected args."""
     from datetime import datetime, timezone
+
+    main_wh, pack_wh = _capacity_hints(device_sn)
 
     def _iso(ts: float | int | None) -> str | None:
         if ts is None:
@@ -1879,7 +1926,11 @@ def _make_advisor_query_fn(device_sn: str):
             start = _parse_iso(args.get("start_iso"))
             end = _parse_iso(args.get("end_iso"))
             max_lead = args.get("max_lead_h")
-            samples = state.energy.prediction_accuracy(device_sn)
+            samples = state.energy.prediction_accuracy(
+                device_sn,
+                main_capacity_wh=main_wh,
+                pack_capacity_wh=pack_wh,
+            )
             out = []
             for p in samples:
                 if start and p.get("target", 0) < start:
@@ -1902,7 +1953,11 @@ def _make_advisor_query_fn(device_sn: str):
         if name == "query_decisions":
             start = _parse_iso(args.get("start_iso"))
             end = _parse_iso(args.get("end_iso"))
-            samples = state.energy.smart_charge_analytics(device_sn, days=90)
+            samples = state.energy.smart_charge_analytics(
+                device_sn, days=90,
+                main_capacity_wh=main_wh,
+                pack_capacity_wh=pack_wh,
+            )
             out = []
             for d in samples:
                 if start and (d.get("decided_at") or 0) < start:
@@ -2681,7 +2736,12 @@ def api_forecast_accuracy(device_sn: str | None = None,
             "summary": {}, "summary_post_fix": {},
             "cutoff_ts": FORECASTER_BREAKING_CHANGE_TS,
         }
-    samples = state.energy.prediction_accuracy(device_sn)
+    main_wh, pack_wh = _capacity_hints(device_sn)
+    samples = state.energy.prediction_accuracy(
+        device_sn,
+        main_capacity_wh=main_wh,
+        pack_capacity_wh=pack_wh,
+    )
     cutoff = int(since_ts) if since_ts is not None else FORECASTER_BREAKING_CHANGE_TS
     samples_post_fix = [s for s in samples if (s.get("made_at") or 0) >= cutoff]
     return {

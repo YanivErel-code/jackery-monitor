@@ -18,6 +18,7 @@ Storage path is configurable via JACKERY_DB env var.
 """
 from __future__ import annotations
 
+import bisect
 import logging
 import os
 import sqlite3
@@ -467,11 +468,19 @@ class EnergyDB:
     def prediction_accuracy(self, device_sn: str,
                             max_age_days: int = 14,
                             limit: int = 500,
-                            since_made_at_ts: int | None = None) -> list[dict]:
+                            since_made_at_ts: int | None = None,
+                            main_capacity_wh: int | None = None,
+                            pack_capacity_wh: int | None = None) -> list[dict]:
         """Return predicted-vs-actual pairs for predictions whose target is
         in the past. Each entry has {made_at, target, predicted_soc,
-        actual_soc, lead_time_h, error}. Joins each prediction to the
-        average last_battery_pct in the ±30 min window around the target.
+        actual_soc, lead_time_h, error}.
+
+        `actual_soc` is capacity-weighted system SOC (main + expansion
+        packs) when both `main_capacity_wh` and `pack_capacity_wh` are
+        passed AND a pack snapshot exists in the target window. This
+        matches the predicted_soc which is always seeded with system
+        SOC at made_at. Without capacity hints, falls back to main-only
+        last_battery_pct (legacy behavior).
 
         `since_made_at_ts`: when set, only return predictions whose
         `made_at` is at or after this unix timestamp. Used by the
@@ -491,7 +500,7 @@ class EnergyDB:
                             WHERE s.device_sn = p.device_sn
                               AND s.bucket >= p.target - 1800
                               AND s.bucket <  p.target + 1800
-                              AND s.last_battery_pct IS NOT NULL) AS actual_soc
+                              AND s.last_battery_pct IS NOT NULL) AS main_soc
                      FROM forecast_predictions p
                     WHERE p.device_sn = ?
                       AND p.target <= ?
@@ -500,20 +509,56 @@ class EnergyDB:
                     LIMIT ?""",
                 (device_sn, now, cutoff_low, int(limit)),
             ).fetchall()
+            packs_by_ts, ts_sorted = self._packs_in_target_range(
+                c, device_sn, rows, main_capacity_wh, pack_capacity_wh,
+            )
         out: list[dict] = []
         for r in rows:
-            actual = r[3]
-            if actual is None:
+            main_soc = r[3]
+            if main_soc is None:
                 continue
+            actual = _capacity_weighted_soc(
+                float(main_soc), int(r[1]),
+                packs_by_ts, ts_sorted,
+                main_capacity_wh, pack_capacity_wh,
+            )
             out.append({
                 "made_at": r[0],
                 "target": r[1],
                 "predicted_soc": float(r[2]),
-                "actual_soc": float(actual),
+                "actual_soc": round(actual, 1),
                 "lead_time_h": round((r[1] - r[0]) / 3600, 1),
-                "error": round(abs(float(actual) - float(r[2])), 1),
+                "error": round(abs(actual - float(r[2])), 1),
             })
         return out
+
+    def _packs_in_target_range(self, c, device_sn: str,
+                               rows: list,
+                               main_wh: int | None,
+                               pack_wh: int | None,
+                               ) -> tuple[dict[int, list[float]], list[int]]:
+        """Bulk-fetch every pack snapshot whose ts overlaps any prediction
+        target in `rows` (±30min). Returns (packs_by_ts, sorted_ts) for
+        bisect-based closest-snapshot lookup. Empty when capacities aren't
+        passed or no rows have main SOC available."""
+        if not (main_wh and pack_wh and rows):
+            return {}, []
+        targets = [r[1] for r in rows if r[3] is not None]
+        if not targets:
+            return {}, []
+        t_min = min(targets) - 1800
+        t_max = max(targets) + 1800
+        pack_rows = c.execute(
+            """SELECT ts, soc_pct FROM battery_packs
+                WHERE parent_sn = ?
+                  AND ts >= ? AND ts < ?
+                  AND soc_pct IS NOT NULL""",
+            (device_sn, t_min, t_max),
+        ).fetchall()
+        packs_by_ts: dict[int, list[float]] = {}
+        for ts, soc in pack_rows:
+            packs_by_ts.setdefault(int(ts), []).append(float(soc))
+        return packs_by_ts, sorted(packs_by_ts)
 
     # ---------- weather observations (GHI + cloud cover history) ----------
     def upsert_weather_observations(self, rows: list[dict]) -> int:
@@ -707,8 +752,10 @@ class EnergyDB:
 
     def actual_soc_at(self, device_sn: str, ts: int,
                       window_s: int = 1800) -> float | None:
-        """Average last_battery_pct in the ±window around `ts`. Used by the
-        daily summary populator to read 'what SOC actually was at sunset.'"""
+        """Main-only average last_battery_pct in the ±window around `ts`.
+        Most callers should use `system_soc_at()` instead so the actual
+        matches the predicted (which is system-weighted). Kept as a
+        primitive: `system_soc_at()` calls it internally."""
         with self._conn() as c:
             row = c.execute(
                 """SELECT AVG(last_battery_pct)
@@ -720,6 +767,38 @@ class EnergyDB:
                 (device_sn, ts - window_s, ts + window_s),
             ).fetchone()
         return float(row[0]) if row and row[0] is not None else None
+
+    def system_soc_at(self, device_sn: str, ts: int, *,
+                      main_capacity_wh: int | None = None,
+                      pack_capacity_wh: int | None = None,
+                      window_s: int = 1800) -> float | None:
+        """Capacity-weighted system SOC at `ts` (main + expansion packs).
+        Joins `samples.last_battery_pct` with the closest `battery_packs`
+        snapshot in the ±window. Returns main-only when capacities aren't
+        passed or no pack snapshot is available — single-unit devices and
+        pre-pack-recording history degenerate to the main-only behavior."""
+        main_soc = self.actual_soc_at(device_sn, ts, window_s=window_s)
+        if main_soc is None:
+            return None
+        if not (main_capacity_wh and pack_capacity_wh):
+            return main_soc
+        with self._conn() as c:
+            pack_rows = c.execute(
+                """SELECT ts, soc_pct FROM battery_packs
+                    WHERE parent_sn = ?
+                      AND ts >= ? AND ts < ?
+                      AND soc_pct IS NOT NULL""",
+                (device_sn, ts - window_s, ts + window_s),
+            ).fetchall()
+        if not pack_rows:
+            return main_soc
+        packs_by_ts: dict[int, list[float]] = {}
+        for pack_ts, soc in pack_rows:
+            packs_by_ts.setdefault(int(pack_ts), []).append(float(soc))
+        return _capacity_weighted_soc(
+            main_soc, ts, packs_by_ts, sorted(packs_by_ts),
+            main_capacity_wh, pack_capacity_wh, window_s,
+        )
 
     # ---------- smart-charge decision log ----------
     def record_smart_charge_decision(self, device_sn: str, plan: dict,
@@ -795,11 +874,16 @@ class EnergyDB:
         ]
 
     def smart_charge_analytics(self, device_sn: str,
-                               days: int = 14) -> list[dict]:
-        """For each `decided_at` row whose `sunrise_ts` is in the past, look
-        up the actual SOC at that sunrise from the samples table and return
-        predicted-vs-actual pairs. Used by the Automation tab to render a
-        learning chart."""
+                               days: int = 14,
+                               main_capacity_wh: int | None = None,
+                               pack_capacity_wh: int | None = None,
+                               ) -> list[dict]:
+        """For each `decided_at` row whose `sunrise_ts` is in the past,
+        return predicted-vs-actual SOC pairs. Used by the Automation tab.
+
+        `actual_sunrise_soc_pct` is capacity-weighted system SOC when
+        capacity hints are passed (matching the predicted, which is
+        seeded with system SOC); main-only otherwise."""
         cutoff = int(time.time()) - days * 86400
         now = int(time.time())
         with self._conn() as c:
@@ -812,7 +896,7 @@ class EnergyDB:
                             WHERE s.device_sn = d.device_sn
                               AND s.bucket >= d.sunrise_ts - 1800
                               AND s.bucket <  d.sunrise_ts + 1800
-                              AND s.last_battery_pct IS NOT NULL) AS actual_soc
+                              AND s.last_battery_pct IS NOT NULL) AS main_soc
                      FROM smart_charge_decisions d
                     WHERE d.device_sn = ?
                       AND d.decided_at >= ?
@@ -821,20 +905,31 @@ class EnergyDB:
                     ORDER BY d.decided_at DESC""",
                 (device_sn, cutoff, now),
             ).fetchall()
+            # Reuse the same bulk-pack helper as prediction_accuracy:
+            # masquerade rows as (made_at, target, predicted, main_soc).
+            shaped = [(r[0], r[5], r[3], r[6]) for r in rows]
+            packs_by_ts, ts_sorted = self._packs_in_target_range(
+                c, device_sn, shaped, main_capacity_wh, pack_capacity_wh,
+            )
         out: list[dict] = []
         for r in rows:
-            actual = r[6]
-            if actual is None:
+            main_soc = r[6]
+            if main_soc is None:
                 continue
+            actual = _capacity_weighted_soc(
+                float(main_soc), int(r[5]),
+                packs_by_ts, ts_sorted,
+                main_capacity_wh, pack_capacity_wh,
+            )
             out.append({
                 "decided_at": r[0], "action": r[1], "executed": bool(r[2]),
                 "predicted_sunrise_soc_pct": r[3],
                 "target_sunrise_soc_pct": r[4],
                 "sunrise_ts": r[5],
-                "actual_sunrise_soc_pct": float(actual),
-                "prediction_error_pp": round(float(actual) - float(r[3]), 1)
+                "actual_sunrise_soc_pct": actual,
+                "prediction_error_pp": round(actual - float(r[3]), 1)
                                         if r[3] is not None else None,
-                "target_hit": (float(actual) >= float(r[4]))
+                "target_hit": (actual >= float(r[4]))
                               if r[4] is not None else None,
             })
         return out
@@ -1091,6 +1186,42 @@ class EnergyDB:
              "battery_pct": int(r[9]) if r[9] is not None else None}
             for r in rows
         ]
+
+
+def _capacity_weighted_soc(main_soc: float,
+                           target: int,
+                           packs_by_ts: dict[int, list[float]],
+                           ts_sorted: list[int],
+                           main_wh: int | None,
+                           pack_wh: int | None,
+                           window_s: int = 1800) -> float:
+    """Capacity-weighted system SOC using the closest pack snapshot to
+    `target` (within ±window_s). Falls back to `main_soc` when:
+      - capacity hints aren't passed (single-unit device or back-compat call),
+      - no pack snapshot exists in the window (single-unit device, or
+        gap in pack history),
+      - the snapshot has no valid pack readings.
+    Stays in [0, 100] regardless of input."""
+    if not (main_wh and pack_wh and ts_sorted):
+        return main_soc
+    i = bisect.bisect_left(ts_sorted, target)
+    candidates = []
+    if i < len(ts_sorted):
+        candidates.append(ts_sorted[i])
+    if i > 0:
+        candidates.append(ts_sorted[i - 1])
+    in_window = [ts for ts in candidates if target - window_s <= ts < target + window_s]
+    if not in_window:
+        return main_soc
+    best_ts = min(in_window, key=lambda ts: abs(ts - target))
+    pack_socs = packs_by_ts.get(best_ts) or []
+    if not pack_socs:
+        return main_soc
+    total_wh = main_wh + len(pack_socs) * pack_wh
+    if total_wh <= 0:
+        return main_soc
+    stored = main_soc * main_wh + sum(p * pack_wh for p in pack_socs)
+    return max(0.0, min(100.0, stored / total_wh))
 
 
 def _nullable_float(v: Any) -> float | None:
