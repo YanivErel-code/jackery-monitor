@@ -721,22 +721,33 @@ async function refreshAutomationDot() {
       fetch(`/api/algorithm/suggestions${params}`),
       fetch('/api/kasa/health'),
     ]);
-    let insightCount = 0;
+    let actionableInsights = 0;
     let kasaOffline = 0;
     if (insightsR.ok) {
       const j = await insightsR.json();
-      insightCount = (j.suggestions || []).length;
+      // Only count items the user can actually act on. INFO-severity
+      // anomalies are observations the advisor explicitly flags as
+      // "no action needed" — they belong in the list when the user
+      // opens the tab, but they shouldn't trigger the dot. Counting
+      // them was burying the actionable items behind a stack of pure
+      // observations and made the dot meaningless.
+      actionableInsights = (j.suggestions || []).filter((s) =>
+        s.kind === 'config'
+        || (s.kind === 'anomaly' && s.severity === 'warn')
+      ).length;
     }
     if (kasaHealthR.ok) {
       const k = await kasaHealthR.json();
       kasaOffline = k.offline_count || 0;
     }
     const dot = $('tab-automation-dot');
-    setAutomationDot(insightCount > 0 || kasaOffline > 0);
+    setAutomationDot(actionableInsights > 0 || kasaOffline > 0);
     if (dot) {
       // Dynamic title so hovering reveals what actually needs attention.
       const reasons = [];
-      if (insightCount > 0) reasons.push(`${insightCount} AI insight(s) pending`);
+      if (actionableInsights > 0) {
+        reasons.push(`${actionableInsights} AI insight(s) need attention`);
+      }
       if (kasaOffline > 0) reasons.push(`${kasaOffline} Kasa device(s) offline`);
       dot.title = reasons.join(' · ') || 'Automation';
     }
