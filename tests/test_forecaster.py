@@ -664,6 +664,58 @@ def test_fit_drain_model_recovers_parasitic_and_overhead():
     assert 0.05 <= overhead_pct <= 0.20, f"got pct={overhead_pct}"
 
 
+def test_fit_drain_model_recovers_parasitic_via_multi_hour_runs():
+    """Replicates the user's overnight pattern flagged by advisor on
+    2026-05-05T18:57: steady ~462 W load, true parasitic ~385 W.
+    Per-pair median was biased low by SOC quantization (true 2.8pp/h
+    rounded sometimes to 2pp, undercounting drain). The multi-hour
+    clean-discharge run path aggregates noise across the run and
+    should recover the real parasitic value."""
+    base = 1_700_000_000
+    # 8 hour-long clean buckets, simulating an overnight run.
+    # True drain: 385 + 462 * 1.10 = 893 W. On 30240 Wh that's
+    # 2.95pp/h. After 8 hours the SOC drop is ~24pp, large enough
+    # that the ±1pp quantization on each end (±0.5pp / 24pp = 4%
+    # noise) doesn't dominate the fit.
+    history = []
+    soc = 95
+    for h in range(9):
+        history.append({
+            "ts": base + h * 3600,
+            "battery_pct": soc,
+            "output_wh": 462,
+            "solar_wh": 0, "ac_input_wh": 0,
+        })
+        soc -= 3  # quantize to 3pp/h ≈ true 2.95pp/h
+    # Throw in 5 noisy short pairs at the SAME load: alternating 2pp
+    # / 3pp drops simulating the boundary jitter that biased the
+    # original per-pair median low. With the multi-hour-run fix in
+    # place, these don't matter — the run-based median dominates.
+    for i in range(5):
+        ts = base + (10 + i * 3) * 3600
+        drop = 2 if i % 2 == 0 else 3
+        history.append({"ts": ts, "battery_pct": 70 - i,
+                        "output_wh": 462,
+                        "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 70 - i - drop,
+                        "output_wh": 462,
+                        "solar_wh": 0, "ac_input_wh": 0})
+
+    parasitic_w, overhead_pct, _n = forecaster.fit_drain_model(
+        history, capacity_wh=30240,
+    )
+    # Narrow-load fallback fires; overhead pinned at default.
+    assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
+    # Multi-hour run should recover ~385 W parasitic (allowing
+    # quantization slop). The OLD per-pair median would land near
+    # ~100 W on this exact data — that's the bug.
+    assert 280 <= parasitic_w <= 450, (
+        f"got parasitic_w={parasitic_w}; multi-hour run fit should "
+        "recover the real ~385 W baseline, not collapse to the "
+        "quantization-biased ~100 W from the old per-pair fit"
+    )
+
+
 def test_fit_drain_model_uses_parasitic_only_fallback_for_narrow_loads():
     """Replicates the user's overnight pattern flagged by the advisor on
     2026-05-05: steady ~470W load, true parasitic ~415W. With loads
