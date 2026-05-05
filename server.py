@@ -3350,10 +3350,13 @@ async def api_alg_preview(device_sn: str | None = None):
     if not device_sn:
         raise HTTPException(400, "no active device")
     bundle = await _build_advisor_bundle(device_sn)
+    # Resolve the model at call time — same precedence the actual review
+    # uses (env var > anthropic_prefs > DEFAULT_MODEL). Don't reach for
+    # a module-level constant; there isn't one any more.
     return {
         "device_sn": device_sn,
         "rendered": claude_advisor._format_starter_bundle(bundle),
-        "model": claude_advisor.MODEL,
+        "model": claude_advisor._get_model(),
         "thinking_budget": claude_advisor.THINKING_BUDGET,
         "raw_bundle": bundle,
     }
