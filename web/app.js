@@ -3333,10 +3333,69 @@ function connectWs() {
       b.textContent = msg.data?.message || 'Alert';
       show(b, true);
       setTimeout(() => show(b, false), 8000);
+    } else if (msg.type === 'kasa_updated') {
+      // Server-side reconciler / probe just changed a Kasa device's
+      // user-visible state (online/is_on/error). Re-fetch the cached
+      // list so the row flips immediately, no waiting for the 60s poll.
+      _onKasaUpdatedPush();
+    } else if (msg.type === 'automation_fired') {
+      // A rule just edge-triggered. Patch our local cache so last_fired
+      // updates without re-fetching, and re-render if the user is on
+      // the Automation tab.
+      _onAutomationFiredPush(msg.data);
     }
   };
   ws.onclose = () => setTimeout(connectWs, 2000);
   ws.onerror = () => { try { ws.close(); } catch {} };
+}
+
+// Push handlers — keep the polling fallbacks in place but free-ride
+// on WS broadcasts when they arrive so the common case is real-time.
+async function _onKasaUpdatedPush() {
+  // Only pay the network cost when the user is actually looking. The
+  // 60s background poll picks up changes whenever they navigate back.
+  if (activeTab !== 'automation') return;
+  try {
+    const r = await fetch('/api/kasa/saved');
+    if (!r.ok) return;
+    const j = await r.json();
+    const next = j.devices || [];
+    if (typeof _kasaListChanged === 'function'
+        && _kasaListChanged(_savedKasaDevices, next)) {
+      _savedKasaDevices = next;
+      renderSavedKasa(_savedKasaDevices);
+    }
+  } catch { /* WS push lost — next poll tick will catch up */ }
+}
+
+function _onAutomationFiredPush(data) {
+  if (!data || !data.id) return;
+  // Patch the in-memory rule cache so last_fired surfaces immediately
+  // even on the dot-tab without re-fetching.
+  if (Array.isArray(_allRules)) {
+    const rule = _allRules.find((r) => r.id === data.id);
+    if (rule) {
+      rule.last_fired = data.last_fired || (Date.now() / 1000);
+      rule.last_error = null;  // a fire that broadcast = a fire that succeeded
+    }
+  }
+  // Re-render the rules list if the user is looking at it.
+  if (activeTab === 'automation' && typeof renderRulesWithFilter === 'function') {
+    renderRulesWithFilter();
+  }
+  // If the History panel is open for this rule, refresh it too.
+  if (typeof _autoHistoryRule !== 'undefined' && _autoHistoryRule
+      && _autoHistoryRule.id === data.id
+      && typeof _refreshAutoHistory === 'function') {
+    _refreshAutoHistory();
+  }
+  // Show a transient toast so even off-tab users see the firing.
+  const b = $('alert-banner');
+  if (b) {
+    b.textContent = `Rule fired: ${data.name} → ${(data.action || '').toUpperCase()} ${data.kasa_alias || ''}`;
+    show(b, true);
+    setTimeout(() => show(b, false), 5000);
+  }
 }
 
 // ============================================================

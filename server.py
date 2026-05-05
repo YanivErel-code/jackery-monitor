@@ -400,11 +400,14 @@ async def poll_loop() -> None:
                             await broadcast({
                                 "type": "automation_fired",
                                 "data": {
+                                    "id": rule.get("id"),
                                     "name": rule.get("name"),
                                     "action": rule.get("action"),
                                     "kasa_alias": rule.get("kasa_alias"),
+                                    "kasa_host": rule.get("kasa_host"),
                                     "jackery_device_sn": rule.get("jackery_device_sn"),
                                     "jackery_device_name": rule.get("jackery_device_name"),
+                                    "last_fired": rule.get("last_fired"),
                                 },
                             })
                     except Exception as e:
@@ -1515,6 +1518,34 @@ KASA_RECONCILER_BASE_S = 5 * 60
 KASA_RECONCILER_MAX_BACKOFF_S = 30 * 60
 
 
+def _kasa_ui_signature(d: dict | None) -> tuple | None:
+    """The user-visible bits of a Kasa device record. Used to decide
+    whether a probe outcome warrants a WS broadcast — routine reconciler
+    polls that don't change online/is_on/error don't need to wake every
+    connected browser."""
+    if not d:
+        return None
+    return (
+        state.kasa.is_online(d),
+        d.get("last_known_is_on"),
+        d.get("last_error"),
+    )
+
+
+async def _kasa_update_probe_and_notify(host: str, **kwargs) -> None:
+    """Wraps state.kasa.update_probe with a WS broadcast on user-visible
+    state change. Cheap no-op when nothing changed (the common case
+    during steady-state reconciler polls)."""
+    before = _kasa_ui_signature(state.kasa.get(host))
+    state.kasa.update_probe(host, **kwargs)
+    after = _kasa_ui_signature(state.kasa.get(host))
+    if before != after:
+        await broadcast({
+            "type": "kasa_updated",
+            "data": {"host": host},
+        })
+
+
 async def kasa_reconciler_loop():
     """Periodically probe every saved Kasa plug and persist the
     outcome (last_seen, last_error, consecutive_failures) on the
@@ -1543,14 +1574,14 @@ async def kasa_reconciler_loop():
                     continue
                 try:
                     info = await kasa_client.status(host)
-                    state.kasa.update_probe(
+                    await _kasa_update_probe_and_notify(
                         host, success=True,
                         is_on=info.get("is_on"),
                         model=info.get("model"),
                         alias=info.get("alias"),
                     )
                 except Exception as e:
-                    state.kasa.update_probe(
+                    await _kasa_update_probe_and_notify(
                         host, success=False, error=str(e),
                     )
                     log.info("Kasa reconciler: %s offline (%s)", host, e)
@@ -4004,14 +4035,16 @@ async def api_kasa_saved_list(refresh: bool = False,
     async def _probe(d):
         try:
             info = await kasa_client.status(d["host"])
-            state.kasa.update_probe(
+            await _kasa_update_probe_and_notify(
                 d["host"], success=True,
                 is_on=info.get("is_on"),
                 model=info.get("model"),
                 alias=info.get("alias"),
             )
         except Exception as e:
-            state.kasa.update_probe(d["host"], success=False, error=str(e))
+            await _kasa_update_probe_and_notify(
+                d["host"], success=False, error=str(e),
+            )
         return _enrich_kasa_for_ui(state.kasa.get(d["host"]) or d)
 
     enriched = await asyncio.gather(*[_probe(d) for d in devices])
