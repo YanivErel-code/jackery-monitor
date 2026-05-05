@@ -344,7 +344,12 @@ $('forget-creds')?.addEventListener('click', async () => {
 // ============================================================
 // TABS
 // ============================================================
-const ACTIVE_TAB_KEY = 'jackery-active-tab';
+// URL hash is the single source of truth for the active tab — refresh
+// keeps state automatically (hash persists in the URL), shared links
+// land on the right tab, and explicit nav to `/` always goes to Live.
+// We deliberately do NOT layer localStorage on top: that fights the
+// URL on explicit navigations (clearing the hash from the address bar
+// would be over-ridden by the saved value, snapping back).
 const VALID_TABS = new Set([
   'live', 'energy', 'forecast', 'device', 'automation', 'logs', 'settings',
 ]);
@@ -356,10 +361,9 @@ document.querySelectorAll('.tab').forEach((tab) => {
 function switchTab(name, opts = {}) {
   if (!VALID_TABS.has(name)) return;
   activeTab = name;
-  try { localStorage.setItem(ACTIVE_TAB_KEY, name); } catch (_) {}
-  // Reflect the tab in the URL hash so links are shareable. Live is
-  // the default — keep the URL clean (no hash) on that one. fromHash
-  // skips the rewrite when we're already responding to a hashchange.
+  // Reflect the tab in the URL hash. Live is the default — keep the
+  // URL clean (no hash) on that one. fromHash skips the rewrite when
+  // we're already responding to a hashchange we didn't trigger.
   if (!opts.fromHash) {
     const desired = name === 'live' ? '' : '#' + name;
     if (location.hash !== desired) {
@@ -388,27 +392,24 @@ function switchTab(name, opts = {}) {
   if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); }
 }
 
-// Boot resolution order: URL hash (shared link wins) > localStorage
-// (returning user) > 'live' default. Wrapped in try/catch — Safari
-// Private Browsing throws on localStorage access.
+// Boot path: pull the tab from the URL hash. Defer the actual switch
+// until the next microtask so all the `let`/`const` declarations later
+// in this file have been initialized — calling switchTab synchronously
+// here would hit TDZ errors on side-effect functions that reference
+// module-level vars (e.g. loadAnthropicKeyStatus -> _anthropicHasKey).
 function _initialTab() {
   const hashTab = location.hash.slice(1);
-  if (hashTab && VALID_TABS.has(hashTab)) return hashTab;
-  try {
-    const saved = localStorage.getItem(ACTIVE_TAB_KEY);
-    if (saved && VALID_TABS.has(saved)) return saved;
-  } catch (_) { /* localStorage disabled */ }
-  return 'live';
+  return (hashTab && VALID_TABS.has(hashTab)) ? hashTab : 'live';
 }
-const _bootTab = _initialTab();
-if (_bootTab !== 'live') {
-  switchTab(_bootTab);
-}
+queueMicrotask(() => {
+  const tab = _initialTab();
+  if (tab !== 'live') switchTab(tab);
+});
 
-// Back/forward buttons cycle through tab history. The hashchange
-// event fires for both user-driven nav (Back) and our own pushState,
-// so guard against re-entering switchTab when we just set the hash
-// ourselves.
+// Back/forward buttons cycle through tab history; manual hash edits in
+// the address bar route to the corresponding tab. The hashchange event
+// fires for our own pushState too, but the activeTab guard short-
+// circuits the re-entry.
 window.addEventListener('hashchange', () => {
   const target = location.hash.slice(1) || 'live';
   if (VALID_TABS.has(target) && target !== activeTab) {
@@ -3115,13 +3116,14 @@ $('reconnect')?.addEventListener('click', async () => {
 $('brand-home')?.addEventListener('click', (e) => {
   if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
   e.preventDefault();
-  // location.assign('/') doesn't reload when we're already at /, so
-  // use reload() — also gives the WS a clean reconnect.
-  if (location.pathname === '/' && !location.search && !location.hash) {
-    location.reload();
-  } else {
-    location.assign('/');
+  // Clear hash + query first, then reload. location.assign('/') from
+  // /#forecast just triggers a hashchange (no reload) because it's
+  // same-origin same-path different-hash — so we replaceState to
+  // strip the hash, then reload to actually refresh the page.
+  if (location.hash || location.search) {
+    history.replaceState(null, '', location.pathname);
   }
+  location.reload();
 });
 
 // Output toggles are not supported in cloud-only mode (Jackery cloud API
