@@ -47,6 +47,22 @@ def test_format_starter_bundle_is_exported():
     )
 
 
+def test_preview_endpoint_symbols_exist():
+    """The `/api/algorithm/preview` endpoint touches three symbols on
+    claude_advisor: _format_starter_bundle, _get_model, THINKING_BUDGET.
+    Lock them in so a future rename breaks this test instead of 500-ing
+    the endpoint silently like the 2026-05-05 incident."""
+    for name in ("_format_starter_bundle", "_get_model", "THINKING_BUDGET"):
+        assert hasattr(claude_advisor, name), (
+            f"claude_advisor.{name} is referenced by /api/algorithm/preview "
+            "in server.py — keep these symbols stable or update both."
+        )
+    # _get_model must be callable (it's invoked at request time) and
+    # return a non-empty string.
+    model = claude_advisor._get_model()
+    assert isinstance(model, str) and model
+
+
 def test_format_starter_bundle_renders_minimal_input():
     out = claude_advisor._format_starter_bundle(_bundle_minimal())
     assert isinstance(out, str)
