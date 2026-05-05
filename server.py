@@ -1598,7 +1598,7 @@ def _hydrate_battery_packs_from_db() -> None:
 async def _build_advisor_bundle(device_sn: str) -> dict:
     """Gather the data Claude needs to review yesterday's algorithm
     performance for one device. Plain JSON-serialisable dict — see
-    claude_advisor._format_data_bundle for the rendering."""
+    claude_advisor._format_starter_bundle for the rendering."""
     from datetime import datetime, timezone
     def _iso(ts: int | float | None) -> str:
         if ts is None:
