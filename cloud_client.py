@@ -38,6 +38,8 @@ from Cryptodome.Cipher import AES, PKCS1_v1_5
 from Cryptodome.PublicKey import RSA
 from Cryptodome.Util.Padding import pad
 
+from errors import ConfigError, IntegrationError
+
 log = logging.getLogger("cloud_client")
 
 BASE_URL = "https://iot.jackeryapp.com"
@@ -72,8 +74,9 @@ class CloudDevice:
     device_sn: str
 
 
-class CloudAuthError(RuntimeError):
-    pass
+class CloudAuthError(IntegrationError, RuntimeError):
+    """Cloud-side auth failed. Could be config (bad creds) or transient
+    (rate-limited, session contested). Subtypes narrow this when known."""
 
 
 class SessionContestedError(CloudAuthError):
@@ -84,7 +87,17 @@ class SessionContestedError(CloudAuthError):
     deliberately don't auto-relogin here — that creates a token war that
     keeps booting the user out of the phone app. The caller decides whether
     to back off or reclaim immediately.
+
+    Note: not a TransientError — re-login fixes it but at the cost of
+    invalidating the user's phone-app session, so callers must opt in
+    rather than retrying blindly.
     """
+    pass
+
+
+class CloudCredentialsError(CloudAuthError, ConfigError):
+    """The saved Jackery cloud email/password is wrong (not just stale).
+    Don't retry; surface to the user."""
     pass
 
 

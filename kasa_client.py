@@ -25,12 +25,27 @@ import logging
 from typing import Any
 
 import kasa_creds
+from errors import ConfigError, IntegrationError, TransientError
 
 log = logging.getLogger("kasa_client")
 
 
-class KasaError(RuntimeError):
-    pass
+# Multiple inheritance preserves `except RuntimeError` callers while
+# adopting the shared hierarchy for new dispatch.
+class KasaError(IntegrationError, RuntimeError):
+    """Generic kasa upstream failure. Prefer KasaTransientError or
+    KasaAuthError when the raise site can tell which kind it is."""
+
+
+class KasaTransientError(KasaError, TransientError):
+    """Retryable: timeout, connection reset, "device busy". Callers
+    should back off and try again."""
+
+
+class KasaConfigError(KasaError, ConfigError):
+    """A configuration problem the user has to fix: missing python-kasa
+    dependency, or saved Kasa cloud credentials are missing/rejected.
+    Don't retry — surface to the user."""
 
 
 def _credentials():
@@ -62,7 +77,7 @@ async def discover(timeout: float = 3.0) -> list[dict]:
     try:
         from kasa import Discover  # type: ignore
     except ImportError as e:
-        raise KasaError(f"python-kasa not installed: {e}")
+        raise KasaConfigError(f"python-kasa not installed: {e}") from e
 
     creds = _credentials()
     try:
@@ -93,20 +108,16 @@ _KASA_RETRY_BACKOFF_S = (0.4, 0.8)  # delays between attempts
 async def _with_retry(operation_name: str, fn):
     """Run an async kasa operation with bounded retries on transient
     failures. `fn` is a no-arg async callable that does one attempt
-    and returns its result (or raises). Auth failures break out of
-    the retry loop so a misconfigured credential doesn't multiply
-    its error spam by 3x."""
+    and returns its result (or raises). KasaConfigError (bad creds,
+    missing dep) breaks out immediately — retrying won't help and
+    just multiplies the user-facing error spam by 3x."""
     import asyncio
     last_err: Exception | None = None
     for attempt in range(_KASA_RETRY_ATTEMPTS):
         try:
             return await fn()
-        except KasaError as e:
-            # _connect() already classifies auth failures up-front
-            # and surfaces them as KasaError. Don't retry those.
-            if "credentials" in str(e).lower() or "auth" in str(e).lower():
-                raise
-            last_err = e
+        except KasaConfigError:
+            raise
         except Exception as e:
             last_err = e
         if attempt < _KASA_RETRY_ATTEMPTS - 1:
@@ -169,7 +180,7 @@ async def _connect(host: str):
     try:
         from kasa import Discover  # type: ignore
     except ImportError as e:
-        raise KasaError(f"python-kasa not installed: {e}")
+        raise KasaConfigError(f"python-kasa not installed: {e}") from e
     _log_kasa_version_once()
     creds = _credentials()
     first_err: Exception | None = None
@@ -182,8 +193,10 @@ async def _connect(host: str):
             return dev
         except Exception as e:
             if not _is_auth_failure(e):
-                raise KasaError(f"could not reach Kasa device at {host}: "
-                                f"{type(e).__name__}: {e}")
+                raise KasaTransientError(
+                    f"could not reach Kasa device at {host}: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
             first_err = e
             log.info("Kasa %s: credentialed connect rejected, retrying "
                      "without creds (older plug fallback)", host)
@@ -210,9 +223,14 @@ async def _connect(host: str):
                         "credential-less fallback also failed. Verify the "
                         "email matches your Kasa account exactly (case as "
                         "registered) or re-add this device.")
-        elif "zoneinfo" in lower or "no time zone" in lower:
+            raise KasaConfigError(
+                f"could not reach Kasa device at {host}: {msg}"
+            ) from err
+        if "zoneinfo" in lower or "no time zone" in lower:
             msg += " — server is missing tzdata; if you're seeing this, the latest image hasn't deployed yet."
-        raise KasaError(f"could not reach Kasa device at {host}: {msg}")
+        raise KasaTransientError(
+            f"could not reach Kasa device at {host}: {msg}"
+        ) from err
 
 
 def _describe(host: str, dev: Any) -> dict:

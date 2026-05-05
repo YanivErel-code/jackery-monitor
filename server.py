@@ -32,10 +32,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import api_auth
 import auth
+import backoff as _backoff
 import backup
 import backup_creds
 import backup_discover
@@ -224,7 +226,11 @@ async def connect_device() -> bool:
 
 
 async def poll_loop() -> None:
+    # Cap at 5 min so a transient outage doesn't slow the recovery once
+    # the bridge / network comes back. Matches the kasa reconciler base.
+    bo = _backoff.LoopBackoff(max_s=5 * 60)
     while True:
+        base_s = user_settings.get("poll_interval_s")
         try:
             # Auto-reconnect if we're not connected (e.g. bridge was down at startup,
             # or the container raced ahead of the host bridge). Without this we'd
@@ -233,7 +239,8 @@ async def poll_loop() -> None:
                 log.info("poll_loop: client not connected, attempting reconnect...")
                 ok = await connect_device()
                 if not ok:
-                    await asyncio.sleep(user_settings.get("poll_interval_s"))
+                    bo.record_failure()
+                    await asyncio.sleep(bo.next_sleep(base_s))
                     continue
 
             status_dict = await state.client.poll()
@@ -412,12 +419,14 @@ async def poll_loop() -> None:
                             })
                     except Exception as e:
                         log.warning("automation evaluate failed: %s", e)
+            bo.reset()
         except Exception as e:
+            bo.record_failure()
             log.exception("Poll loop error: %s", e)
 
         # Re-read each iteration so a settings change applies on the next
         # cycle (instead of at restart).
-        await asyncio.sleep(user_settings.get("poll_interval_s"))
+        await asyncio.sleep(bo.next_sleep(base_s))
 
 
 # ---------- WebSocket fan-out ----------
@@ -1492,6 +1501,7 @@ async def _smart_charge_narrate(plan) -> str:
 async def smart_charge_loop():
     """Periodic tick — every 5 minutes, run the smart-charge evaluator
     for every device that has a per-device config saved (mode != off)."""
+    bo = _backoff.LoopBackoff(max_s=30 * 60)
     while True:
         try:
             configs = smart_charge.get_all_configs()
@@ -1506,9 +1516,11 @@ async def smart_charge_loop():
                     await _smart_charge_evaluate(record=True, device_sn=sn)
                 except Exception as e:
                     log.warning("smart_charge tick failed for %s: %s", sn, e)
+            bo.reset()
         except Exception as e:
+            bo.record_failure()
             log.warning("smart_charge loop iteration failed: %s", e)
-        await asyncio.sleep(5 * 60)
+        await asyncio.sleep(bo.next_sleep(5 * 60))
 
 
 # Per-device probe cadence after a failure: 5 min, 10, 20, 30, 30, ...
@@ -1580,7 +1592,18 @@ async def kasa_reconciler_loop():
                         model=info.get("model"),
                         alias=info.get("alias"),
                     )
+                except kasa_client.KasaConfigError as e:
+                    # Bad creds or missing dep — actionable, not a flake.
+                    # Surface at warning so it doesn't get lost in the
+                    # info-level reconciler chatter.
+                    await _kasa_update_probe_and_notify(
+                        host, success=False, error=str(e),
+                    )
+                    log.warning("Kasa reconciler: %s misconfigured (%s)", host, e)
                 except Exception as e:
+                    # Transient (network blip, device busy). Per-device
+                    # backoff handles repeats; log at info to keep the
+                    # routine flake noise out of the warning channel.
                     await _kasa_update_probe_and_notify(
                         host, success=False, error=str(e),
                     )
@@ -2216,6 +2239,7 @@ async def advisor_loop():
     time when location info is available, otherwise just every 24h
     from the first tick. Skipping is cheap (no key / no SDK) so we
     iterate every hour to keep the wake-up logic simple."""
+    bo = _backoff.LoopBackoff(max_s=4 * 3600)
     while True:
         try:
             await asyncio.sleep(60)  # warm-up — let credentials load
@@ -2244,11 +2268,13 @@ async def advisor_loop():
                     except Exception as e:
                         log.warning("advisor loop: %s failed: %s", sn, e)
                     state.last_advisor_run_by_sn[sn] = now
+            bo.reset()
         except Exception as e:
+            bo.record_failure()
             log.warning("advisor loop iteration failed: %s", e)
         # Tick every hour. The local-time gate inside ensures we only
         # actually run reviews once per device per day.
-        await asyncio.sleep(3600)
+        await asyncio.sleep(bo.next_sleep(3600))
 
 
 @asynccontextmanager
@@ -2295,136 +2321,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Jackery 5000 Plus Monitor", lifespan=lifespan)
 
 
-# ---------- App-level authentication ----------
-# Optional layer. The first time the app starts with no /data/auth.json,
-# a one-time /setup flow lets the operator pick a username/password. After
-# that, every request must carry a valid session cookie (HMAC-signed) or
-# it gets a 401 + redirect to /login.
-#
-# Routes exempt from auth: /login, /setup, /static/*, /manifest.webmanifest,
-# /sw.js, /api/auth/* (the auth endpoints themselves), and /ws (handled
-# separately in the WebSocket handler).
-_AUTH_PUBLIC_PREFIXES = (
-    "/static",
-    "/manifest.webmanifest",
-    "/sw.js",
-    "/login",
-    "/setup",
-    "/api/auth/",
-    # Pre-auth restore: lets a fresh install pull data from backup
-    # before creating an admin account. Endpoint handlers verify
-    # auth.has_user() == False themselves — see _require_no_user().
-    "/api/backup/setup_restore/",
-)
-
-
-@app.middleware("http")
-async def _auth_middleware(request: Request, call_next):
-    path = request.url.path
-    if any(path == p or path.startswith(p) for p in _AUTH_PUBLIC_PREFIXES):
-        return await call_next(request)
-    # First-time-setup gate: no user yet → force /setup
-    if not auth.has_user():
-        if path.startswith("/api/"):
-            return JSONResponse({"detail": "setup_required"}, status_code=401)
-        return RedirectResponse("/setup", status_code=303)
-    # Auth check
-    token = request.cookies.get(auth.COOKIE_NAME)
-    payload = auth.verify_session(token)
-    if not payload:
-        if path.startswith("/api/"):
-            return JSONResponse({"detail": "auth_required"}, status_code=401)
-        return RedirectResponse("/login", status_code=303)
-    return await call_next(request)
-
-
-def _set_app_cookie(response: Response, name: str, value: str,
-                    max_age: int) -> None:
-    """Set a long-lived first-party cookie with the flags we use everywhere
-    in this app: HttpOnly, SameSite=Lax, path=/, and Secure=False because
-    Cloudflare Tunnel terminates TLS at the edge — the request to our
-    origin is HTTP, so Secure would block the cookie."""
-    response.set_cookie(
-        name, value, max_age=max_age,
-        httponly=True, samesite="lax", secure=False, path="/",
-    )
-
-
-def _set_session_cookie(response: Response, username: str) -> None:
-    _set_app_cookie(response, auth.COOKIE_NAME,
-                    auth.make_session(username), auth.SESSION_TTL_S)
-
-
-@app.post("/api/auth/setup")
-async def api_auth_setup(body: dict, response: Response):
-    """One-time bootstrap: create the admin user if none exists yet."""
-    if auth.has_user():
-        raise HTTPException(403, "already set up")
-    username = ((body or {}).get("username") or "").strip()
-    password = (body or {}).get("password") or ""
-    if not username or len(password) < 6:
-        raise HTTPException(400, "username and password (>=6 chars) required")
-    if not auth.save_user(username, password):
-        raise HTTPException(500, "failed to save user")
-    _set_session_cookie(response, username)
-    return {"ok": True, "username": username}
-
-
-@app.post("/api/auth/login")
-async def api_auth_login(body: dict, response: Response):
-    if not auth.has_user():
-        raise HTTPException(403, "setup required")
-    username = ((body or {}).get("username") or "").strip()
-    password = (body or {}).get("password") or ""
-    user = auth.load_user()
-    if not user or username != user.get("username") or \
-       not auth.verify_password(password, user.get("password_hash", "")):
-        raise HTTPException(401, "invalid credentials")
-    _set_session_cookie(response, username)
-    return {"ok": True, "username": username}
-
-
-@app.post("/api/auth/logout")
-async def api_auth_logout(response: Response):
-    response.delete_cookie(auth.COOKIE_NAME, path="/")
-    return {"ok": True}
-
-
-@app.get("/api/auth/me")
-async def api_auth_me(request: Request):
-    payload = auth.verify_session(request.cookies.get(auth.COOKIE_NAME))
-    if not payload:
-        raise HTTPException(401, "auth_required")
-    return {"username": payload.get("u")}
-
-
-@app.post("/api/auth/change_password")
-async def api_auth_change_password(body: dict, request: Request):
-    payload = auth.verify_session(request.cookies.get(auth.COOKIE_NAME))
-    if not payload:
-        raise HTTPException(401, "auth_required")
-    user = auth.load_user()
-    if not user:
-        raise HTTPException(500, "no user")
-    current = (body or {}).get("current") or ""
-    new = (body or {}).get("new") or ""
-    if not auth.verify_password(current, user.get("password_hash", "")):
-        raise HTTPException(401, "current password is wrong")
-    if len(new) < 6:
-        raise HTTPException(400, "new password too short (>=6 chars)")
-    if not auth.save_user(user["username"], new):
-        raise HTTPException(500, "failed to save")
-    return {"ok": True}
-
-
-@app.get("/login")
-def login_page():
-    return FileResponse(WEB_DIR / "login.html")
-
-
-@app.get("/setup")
-def setup_page():
-    return FileResponse(WEB_DIR / "login.html")
+api_auth.install(app, WEB_DIR)
 
 
 @app.get("/api/status")
@@ -4236,8 +4133,8 @@ async def api_view_select_device(body: dict, request: Request, response: Respons
     devs = cloud.get("devices") or []
     if not any(str(d.get("device_id")) == str(device_id) for d in devs):
         raise HTTPException(404, "device not found in current account")
-    _set_app_cookie(response, VIEW_DEVICE_COOKIE, str(device_id),
-                    VIEW_DEVICE_COOKIE_TTL_S)
+    api_auth.set_app_cookie(response, VIEW_DEVICE_COOKIE, str(device_id),
+                            VIEW_DEVICE_COOKIE_TTL_S)
     # Update only THIS browser's open WS connections so the next
     # broadcast switches view without waiting for a reconnect. We
     # identify "this browser" by the auth session cookie — uniquely
