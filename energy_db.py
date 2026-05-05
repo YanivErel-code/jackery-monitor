@@ -747,7 +747,10 @@ class EnergyDB:
         """
         if not device_sn:
             return 0
-        cutoff = int(time.time()) - days * 86400
+        from datetime import datetime, timedelta, timezone
+        cutoff_date = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).strftime("%Y-%m-%d")
         now = int(time.time())
         with self._conn() as c:
             rows = c.execute(
@@ -755,12 +758,12 @@ class EnergyDB:
                           actual_sunset_soc_pct, actual_sunrise_soc_pct
                      FROM daily_solar_summary
                     WHERE device_sn = ?
-                      AND updated_at >= ?
+                      AND date >= ?
                       AND ((actual_sunset_soc_pct IS NULL AND sunset_ts IS NOT NULL
                             AND sunset_ts <= ?)
                         OR (actual_sunrise_soc_pct IS NULL AND sunrise_ts IS NOT NULL
                             AND sunrise_ts <= ?))""",
-                (device_sn, cutoff, now, now),
+                (device_sn, cutoff_date, now, now),
             ).fetchall()
         filled = 0
         for date, sunset_ts, sunrise_ts, act_sunset, act_sunrise in rows:
@@ -795,8 +798,17 @@ class EnergyDB:
         return filled
 
     def list_daily_summary(self, device_sn: str, days: int = 30) -> list[dict]:
-        """Most recent N daily rows for a device, newest first."""
-        cutoff = int(time.time()) - days * 86400
+        """Most recent N daily rows for a device, newest first.
+
+        Filter is on the row's `date` column (lexicographic on YYYY-MM-DD,
+        which sorts correctly), NOT on `updated_at`. Otherwise the
+        backfill bumping updated_at on every tick would defeat the
+        windowing — all rows would always look 'recent' and the
+        Forecast tab's days dropdown would appear stuck."""
+        from datetime import datetime, timedelta, timezone
+        cutoff_date = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).strftime("%Y-%m-%d")
         with self._conn() as c:
             rows = c.execute(
                 """SELECT date, sunset_ts, sunrise_ts,
@@ -805,9 +817,9 @@ class EnergyDB:
                           updated_at
                      FROM daily_solar_summary
                     WHERE device_sn = ?
-                      AND updated_at >= ?
+                      AND date >= ?
                     ORDER BY date DESC""",
-                (device_sn, cutoff),
+                (device_sn, cutoff_date),
             ).fetchall()
         return [
             {"date": r[0], "sunset_ts": r[1], "sunrise_ts": r[2],

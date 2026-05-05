@@ -80,6 +80,35 @@ def test_prediction_accuracy_excludes_future_targets(db):
     assert out == []
 
 
+def test_list_daily_summary_filters_by_date_not_updated_at(db):
+    """Regression: filter must use the row's `date` column, not the
+    backfill-bumped `updated_at`. Otherwise a 'days=3' query returns
+    every row that was touched recently regardless of which day it
+    covers — defeating the Forecast tab's days-window dropdown."""
+    sn = "SN-DAYS-FILTER"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    from datetime import datetime, timedelta, timezone
+    today = datetime.now(timezone.utc)
+
+    # Seed 10 days of rows, dates today-9 .. today.
+    for offset in range(10):
+        d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        db.upsert_daily_summary(
+            device_sn=sn, local_date=d,
+            sunset_ts=int(today.timestamp()) - offset * 86400,
+            sunrise_ts=int(today.timestamp()) - offset * 86400 + 3600,
+            predicted_sunset_soc_pct=80.0 - offset,
+        )
+
+    # All rows just got their updated_at bumped to "now". A days=3
+    # query MUST limit by the row's date column; if it filtered by
+    # updated_at it would return all 10 rows.
+    rows3 = db.list_daily_summary(sn, days=3)
+    assert len(rows3) <= 4, f"expected ≤4 rows for days=3, got {len(rows3)}"
+    rows30 = db.list_daily_summary(sn, days=30)
+    assert len(rows30) == 10, f"expected 10 rows for days=30, got {len(rows30)}"
+
+
 def test_backfill_daily_actuals_fills_missing_actuals(db):
     """The single-shot tick writes only today's row, but each row's
     sunrise_ts falls on the FOLLOWING calendar day — so today's tick
