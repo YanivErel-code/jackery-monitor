@@ -39,6 +39,7 @@ import time
 import uuid
 
 import kasa_client
+from errors import ConfigError
 
 log = logging.getLogger("automation")
 
@@ -51,7 +52,9 @@ VALID_ACTIONS = ("on", "off")
 VALID_TRIGGERS = ("battery_percent",)
 
 
-class AutomationError(ValueError):
+class AutomationError(ConfigError, ValueError):
+    """Invalid automation rule (bad operator, missing host, etc.).
+    Multiple inheritance preserves `except ValueError` callers."""
     pass
 
 

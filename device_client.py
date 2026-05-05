@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from errors import IntegrationError
+
 log = logging.getLogger("device_client")
 
 # ----------- common types -----------
@@ -53,8 +55,9 @@ def device_type_for(model_code: int | None) -> str:
     return "box" if model_code == 22 else "portable"
 
 
-class DeviceClientError(RuntimeError):
-    pass
+class DeviceClientError(IntegrationError, RuntimeError):
+    """Backend-level failure (mock backend bug, bridge unreachable, ...).
+    Multiple inheritance preserves any `except RuntimeError` callers."""
 
 
 # ----------- abstract base -----------
