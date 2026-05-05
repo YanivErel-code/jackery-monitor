@@ -27,6 +27,15 @@ API_URL = "https://api.open-meteo.com/v1/forecast"
 # bad GPS coords (or whose IP geolocation lied) can pick their city
 # by name.
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+# Reverse geocoding (lat/lon -> human place name). Open-Meteo doesn't
+# offer reverse, so we use bigdatacloud's free reverse-geocode endpoint
+# — no API key, no registration, CORS-friendly. Used to backfill the
+# `label` on locations that were saved via geolocation or coords-only
+# (where the user never typed a city name).
+REVERSE_GEOCODE_URL = (
+    "https://api.bigdatacloud.net/data/reverse-geocode-client"
+)
 CACHE_TTL_S = 3600  # 1 hour
 DEFAULT_PAST_DAYS = 14
 DEFAULT_FORECAST_DAYS = 5
@@ -187,3 +196,30 @@ async def geocode(query: str, *, count: int = 5) -> dict[str, Any]:
             # Skip malformed rows rather than failing the whole call.
             continue
     return {"results": out}
+
+
+async def reverse_geocode(latitude: float,
+                          longitude: float) -> str | None:
+    """Reverse geocode (lat, lon) -> short human place name like
+    "Almaden Valley" or "San Jose". Uses bigdatacloud's free
+    reverse-geocode-client endpoint (no key, no registration). Returns
+    None on any failure — caller should treat the label as optional."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(REVERSE_GEOCODE_URL, params={
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "localityLanguage": "en",
+            })
+            r.raise_for_status()
+            j = r.json()
+    except Exception as e:
+        log.debug("reverse geocode failed for (%.4f, %.4f): %s",
+                  latitude, longitude, e)
+        return None
+    # Prefer locality (neighborhood) > city > principalSubdivision (state).
+    # bigdatacloud occasionally returns the state name in `locality` for
+    # remote coords, so we keep all three rather than picking the first.
+    name = (j.get("locality") or j.get("city")
+            or j.get("principalSubdivision") or None)
+    return str(name).strip() if name else None

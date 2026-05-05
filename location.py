@@ -115,6 +115,30 @@ def set(lat: Any, lon: Any, label: Any = None) -> dict | None:
     return record
 
 
+def set_label(label: str) -> bool:
+    """Update only the `label` on the existing record. Used to lazily
+    backfill a city name on locations saved via geolocation or coords-
+    only (where the user didn't pick a search result). No-op if there
+    is no record yet, or if the label is empty/non-string. Returns
+    True on a real write."""
+    if not isinstance(label, str):
+        return False
+    clean = label.strip()
+    if not clean:
+        return False
+    with _lock:
+        data = _read_raw()
+        if not data or "latitude" not in data:
+            return False
+        data["label"] = clean[:200]
+        os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
+        tmp = LOCATION_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, LOCATION_PATH)
+    return True
+
+
 def update_timezone(utc_offset_seconds: int,
                     timezone: str | None = None) -> bool:
     """Merge a UTC-offset (and optional IANA timezone name) into the

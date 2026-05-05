@@ -3530,9 +3530,26 @@ async def api_devices_battery_packs(device_sn: str | None = None,
 
 
 @app.get("/api/location")
-def api_location_get():
-    """Return the stored device location, if any."""
-    return device_location.get() or {"latitude": None, "longitude": None}
+async def api_location_get():
+    """Return the stored device location, if any.
+
+    Lazily backfills the human-readable `label` on records that were
+    saved via geolocation or raw coords (where the user never typed a
+    city name). One reverse-geocode call per location update — the
+    label gets persisted, so subsequent GETs return immediately."""
+    loc = device_location.get()
+    if not loc:
+        return {"latitude": None, "longitude": None}
+    if not loc.get("label") and loc.get("latitude") is not None:
+        try:
+            label = await weather_client.reverse_geocode(
+                loc["latitude"], loc["longitude"],
+            )
+            if label and device_location.set_label(label):
+                loc["label"] = label
+        except Exception as e:
+            log.debug("location label backfill failed: %s", e)
+    return loc
 
 
 @app.get("/api/location/geocode")

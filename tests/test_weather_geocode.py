@@ -128,3 +128,61 @@ def test_geocode_count_is_clamped():
         assert captured["params"]["count"] == 10
     finally:
         cm.stop()
+
+
+# ---- reverse_geocode ---------------------------------------------------
+
+def test_reverse_geocode_returns_locality_when_present():
+    """bigdatacloud's response: prefer `locality` (neighborhood) when set."""
+    cm, _ = _patched_client(get_return=_mock_response({
+        "locality": "Almaden Valley",
+        "city": "San Jose",
+        "principalSubdivision": "California",
+    }))
+    try:
+        name = _run(weather_client.reverse_geocode(37.2232, -121.8809))
+    finally:
+        cm.stop()
+    assert name == "Almaden Valley"
+
+
+def test_reverse_geocode_falls_back_to_city_then_subdivision():
+    cm, _ = _patched_client(get_return=_mock_response({
+        "locality": "",
+        "city": "San Jose",
+        "principalSubdivision": "California",
+    }))
+    try:
+        name = _run(weather_client.reverse_geocode(37.0, -121.0))
+    finally:
+        cm.stop()
+    assert name == "San Jose"
+
+    cm, _ = _patched_client(get_return=_mock_response({
+        "locality": None,
+        "city": None,
+        "principalSubdivision": "California",
+    }))
+    try:
+        name = _run(weather_client.reverse_geocode(37.0, -121.0))
+    finally:
+        cm.stop()
+    assert name == "California"
+
+
+def test_reverse_geocode_returns_none_on_network_failure():
+    cm, _ = _patched_client(get_side_effect=httpx.ConnectError("boom"))
+    try:
+        name = _run(weather_client.reverse_geocode(37.0, -121.0))
+    finally:
+        cm.stop()
+    assert name is None
+
+
+def test_reverse_geocode_returns_none_when_all_fields_missing():
+    cm, _ = _patched_client(get_return=_mock_response({}))
+    try:
+        name = _run(weather_client.reverse_geocode(37.0, -121.0))
+    finally:
+        cm.stop()
+    assert name is None
