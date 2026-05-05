@@ -344,12 +344,18 @@ $('forget-creds')?.addEventListener('click', async () => {
 // ============================================================
 // TABS
 // ============================================================
+const ACTIVE_TAB_KEY = 'jackery-active-tab';
+const VALID_TABS = new Set([
+  'live', 'energy', 'forecast', 'device', 'automation', 'logs', 'settings',
+]);
+
 document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => switchTab(tab.dataset.tab));
 });
 
 function switchTab(name) {
   activeTab = name;
+  try { localStorage.setItem(ACTIVE_TAB_KEY, name); } catch (_) {}
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.toggleAttribute('hidden', p.id !== `tab-${name}`));
   if (name === 'live')     { drawLiveChart(lastStatus); }
@@ -364,6 +370,17 @@ function switchTab(name) {
   }
   if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); }
 }
+
+// Restore the last-viewed tab on page load. Defaults to the HTML's
+// `tab on` (live) on first visit or if the saved value isn't a known
+// tab name. Wrapped in try/catch because Safari Private Browsing
+// throws on localStorage access.
+try {
+  const saved = localStorage.getItem(ACTIVE_TAB_KEY);
+  if (saved && saved !== 'live' && VALID_TABS.has(saved)) {
+    switchTab(saved);
+  }
+} catch (_) { /* localStorage disabled */ }
 
 // ---- Settings sub-tabs ---------------------------------------------------
 // The Settings tab grew enough to need internal grouping (general /
