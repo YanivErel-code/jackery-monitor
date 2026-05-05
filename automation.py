@@ -116,9 +116,16 @@ def _validate(rule: dict) -> dict:
 class AutomationEngine:
     """Stateful rule store + edge-triggered evaluator. One instance per server."""
 
-    def __init__(self) -> None:
+    def __init__(self, firing_recorder=None) -> None:
+        """`firing_recorder` is an optional callable invoked on every
+        successful firing — server.py wires it to
+        `EnergyDB.record_automation_fire` so each fire lands in a
+        persistent audit table. Kept as a callback (rather than a
+        direct DB import) to avoid a circular dependency and to keep
+        unit tests free of DB setup."""
         self.rules: list[dict] = []
         self._lock = asyncio.Lock()
+        self._firing_recorder = firing_recorder
         self._load()
 
     # ---- persistence ----
@@ -212,6 +219,26 @@ class AutomationEngine:
                         log.info("Automation fired: %s [%s SOC=%s] -> %s %s",
                                  rule["name"], target_sn, soc,
                                  rule["action"], rule["kasa_alias"])
+                        # Persist a row to the firings audit table. Best-
+                        # effort — DB hiccups shouldn't roll back the
+                        # successful Kasa toggle or block subsequent rules.
+                        if self._firing_recorder:
+                            try:
+                                self._firing_recorder(
+                                    rule_id=rule["id"],
+                                    rule_name=rule.get("name"),
+                                    action=rule["action"],
+                                    kasa_host=rule["kasa_host"],
+                                    jackery_sn=target_sn,
+                                    soc_at_fire=float(soc),
+                                    operator=rule.get("operator"),
+                                    threshold=float(rule.get("value") or 0),
+                                )
+                            except Exception as e:
+                                log.warning(
+                                    "Automation firing audit-log write failed for %s: %s",
+                                    rule["name"], e,
+                                )
                     except Exception as e:
                         rule["last_error"] = str(e)
                         # Leave last_state unchanged so we retry on the next

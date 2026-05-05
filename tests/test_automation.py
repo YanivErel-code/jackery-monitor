@@ -252,3 +252,76 @@ def test_crud(isolated_data):
     assert eng.list_rules() == []
     # Delete nonexistent
     assert eng.delete("nope") is False
+
+
+async def test_engine_calls_firing_recorder_on_successful_fire(
+    isolated_data, monkeypatch,
+):
+    """The recorder callback is the persistence hook — wired in
+    server.py to EnergyDB.record_automation_fire. A failed Kasa toggle
+    must NOT invoke the recorder (no log row for a fire that didn't
+    happen). A successful one must pass the rule + SOC context through.
+
+    `async def` test (auto-collected by pytest-asyncio) so the
+    AutomationEngine's asyncio.Lock() can attach to the running loop
+    on Python 3.9 — calling asyncio.run() repeatedly closes the
+    default loop and breaks downstream tests that build their own
+    asyncio.Lock at module import."""
+    import importlib
+
+    import automation
+    import crypto_util
+    import kasa_client
+    importlib.reload(crypto_util)
+    importlib.reload(kasa_client)
+    importlib.reload(automation)
+
+    fail_next: list[Exception] = []
+
+    async def fake_set_state(host: str, on: bool):
+        if fail_next:
+            raise fail_next.pop(0)
+        return {"host": host, "on": on}
+
+    monkeypatch.setattr(kasa_client, "set_state", fake_set_state)
+
+    recorded: list[dict] = []
+
+    def recorder(**kwargs):
+        recorded.append(kwargs)
+
+    eng = automation.AutomationEngine(firing_recorder=recorder)
+    rule = eng.upsert({
+        "name": "low-batt off",
+        "operator": "<", "value": 20, "action": "off",
+        "kasa_host": "PLUG", "jackery_device_sn": "SN-A",
+    })
+
+    # Successful fire — recorder gets called with the right context.
+    await eng.evaluate({"SN-A": 15}, active_sn="SN-A")
+    assert len(recorded) == 1
+    r = recorded[0]
+    assert r["rule_id"] == rule["id"]
+    assert r["rule_name"] == "low-batt off"
+    assert r["action"] == "off"
+    assert r["kasa_host"] == "PLUG"
+    assert r["jackery_sn"] == "SN-A"
+    assert r["soc_at_fire"] == pytest.approx(15.0)
+    assert r["operator"] == "<"
+    assert r["threshold"] == pytest.approx(20.0)
+
+    # Re-firing on the same edge state is a no-op (edge already consumed).
+    await eng.evaluate({"SN-A": 14}, active_sn="SN-A")
+    assert len(recorded) == 1
+
+    # SOC goes back above threshold then below — fresh edge, fresh log row.
+    await eng.evaluate({"SN-A": 50}, active_sn="SN-A")
+    await eng.evaluate({"SN-A": 12}, active_sn="SN-A")
+    assert len(recorded) == 2
+
+    # Now make the Kasa call fail. The toggle didn't actually happen,
+    # so the recorder MUST NOT be invoked.
+    await eng.evaluate({"SN-A": 50}, active_sn="SN-A")  # reset edge
+    fail_next.append(RuntimeError("boom"))
+    await eng.evaluate({"SN-A": 10}, active_sn="SN-A")
+    assert len(recorded) == 2  # unchanged — failed toggle isn't logged
