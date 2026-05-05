@@ -1336,6 +1336,9 @@ async function loadSavedKasa() {
   if (!list) return;
   list.innerHTML = '<div class="auto-empty">Loading devices…</div>';
   try {
+    // refresh=true on the user-initiated load forces a fresh probe so
+    // the first paint reflects current reality. Subsequent polls (see
+    // _kasaPollTimer below) just read the reconciler-maintained cache.
     const r = await fetch('/api/kasa/saved?refresh=true');
     const j = await r.json();
     _savedKasaDevices = j.devices || [];
@@ -1343,6 +1346,54 @@ async function loadSavedKasa() {
   } catch (e) {
     list.innerHTML = `<div class="auto-empty">Failed to load: ${e.message || e}</div>`;
   }
+  _scheduleSavedKasaPoll();
+}
+
+// Background re-sync of the Kasa list with the server's cached probe
+// state. The kasa_reconciler_loop on the server updates last_seen_ts /
+// consecutive_failures every 5-30 min (per-device backoff). Without
+// this poll the UI stays stuck on whatever was true at tab-load time —
+// e.g. an auth-recovering plug appears offline indefinitely until the
+// user hard-refreshes.
+let _kasaPollTimer = null;
+function _scheduleSavedKasaPoll() {
+  if (_kasaPollTimer) { clearInterval(_kasaPollTimer); _kasaPollTimer = null; }
+  _kasaPollTimer = setInterval(async () => {
+    if (activeTab !== 'automation') {
+      clearInterval(_kasaPollTimer);
+      _kasaPollTimer = null;
+      return;
+    }
+    try {
+      // No refresh=true — just read the cached state the reconciler
+      // already keeps fresh. Saves a network probe per minute per plug.
+      const r = await fetch('/api/kasa/saved');
+      if (!r.ok) return;
+      const j = await r.json();
+      const next = j.devices || [];
+      // Only re-render if the displayed state actually changed.
+      // Comparing on the fields the row template depends on keeps
+      // arbitrary stat reorderings from triggering layout flicker.
+      if (_kasaListChanged(_savedKasaDevices, next)) {
+        _savedKasaDevices = next;
+        renderSavedKasa(_savedKasaDevices);
+      }
+    } catch { /* network blip — just try again next tick */ }
+  }, 60_000);
+}
+
+function _kasaListChanged(prev, next) {
+  if ((prev?.length || 0) !== (next?.length || 0)) return true;
+  const keysWeRender = ['host', 'alias', 'model', 'is_on', 'online',
+    'error', 'last_seen_ts', 'jackery_device_sn'];
+  for (let i = 0; i < next.length; i++) {
+    const a = prev[i] || {};
+    const b = next[i] || {};
+    for (const k of keysWeRender) {
+      if ((a[k] ?? null) !== (b[k] ?? null)) return true;
+    }
+  }
+  return false;
 }
 
 function renderSavedKasa(devices) {
