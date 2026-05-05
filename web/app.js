@@ -1349,12 +1349,18 @@ async function loadSavedKasa() {
   _scheduleSavedKasaPoll();
 }
 
-// Background re-sync of the Kasa list with the server's cached probe
-// state. The kasa_reconciler_loop on the server updates last_seen_ts /
-// consecutive_failures every 5-30 min (per-device backoff). Without
-// this poll the UI stays stuck on whatever was true at tab-load time —
-// e.g. an auth-recovering plug appears offline indefinitely until the
-// user hard-refreshes.
+// Background re-sync of the Kasa list while the user is on the
+// Automation tab.
+//
+// All-online state: poll the server's cached state every 60s (cheap).
+//   The kasa_reconciler_loop keeps that cache fresh on its own
+//   schedule.
+// Any-offline state: poll with refresh=true (force a probe) every
+//   60s. The reconciler's per-device backoff grows up to 30 min after
+//   consecutive failures, so the cache can be that stale; without the
+//   forced probe the UI sits on OFFLINE long after the plug has
+//   recovered. Probing 1-3 plugs per minute is cheap, and we only do
+//   it while the user is actively staring at the tab.
 let _kasaPollTimer = null;
 function _scheduleSavedKasaPoll() {
   if (_kasaPollTimer) { clearInterval(_kasaPollTimer); _kasaPollTimer = null; }
@@ -1365,9 +1371,13 @@ function _scheduleSavedKasaPoll() {
       return;
     }
     try {
-      // No refresh=true — just read the cached state the reconciler
-      // already keeps fresh. Saves a network probe per minute per plug.
-      const r = await fetch('/api/kasa/saved');
+      const anyOffline = (_savedKasaDevices || []).some(
+        (d) => d.online === false,
+      );
+      const url = anyOffline
+        ? '/api/kasa/saved?refresh=true'
+        : '/api/kasa/saved';
+      const r = await fetch(url);
       if (!r.ok) return;
       const j = await r.json();
       const next = j.devices || [];
