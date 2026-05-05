@@ -456,10 +456,28 @@ def fit_drain_model(
     load_p90 = sorted_loads[p90_idx]
     load_range_ratio = (load_p90 / load_p10) if load_p10 > 0 else 1.0
 
-    # Narrow-load fallback: pin overhead at the default and solve
-    # `parasitic_w = drain - load * (1 + default_pct)` per window, take
-    # the median for robustness against quantization noise.
+    # Narrow-load fallback: pin overhead at the default and fit
+    # parasitic_w from MULTI-HOUR clean-discharge runs (not adjacent
+    # 1h pairs). The 1h pairs were biased low by SOC quantization
+    # noise — when the true rate is ~2.8pp/h, the integer-pp readings
+    # randomly produce 2pp drops (-30% under-count on observed drain)
+    # roughly half the time, and the median across pairs collapsed
+    # toward those low samples. Multi-hour runs accumulate enough
+    # SOC drop that ±1pp quantization noise is small relative to the
+    # signal. Advisor flagged this 2026-05-05T18:57 — fitted parasitic
+    # was 103.8 W vs the reconciled-truth ~385 W.
     if load_range_ratio < MIN_LOAD_RANGE_FOR_JOINT_FIT:
+        run_pairs = _clean_discharge_runs(rows, capacity_wh)
+        if len(run_pairs) >= 2:
+            implied = sorted(
+                d - load * (1.0 + default_overhead_pct) for load, d in run_pairs
+            )
+            parasitic_w = implied[len(implied) // 2]
+            if 0 <= parasitic_w <= 1000:
+                return float(parasitic_w), float(default_overhead_pct), len(run_pairs)
+        # Run-based fit didn't produce enough samples — last-resort
+        # fallback to the per-pair median (noisier but better than
+        # leaving the user on cold-start defaults indefinitely).
         implied_parasitics = sorted(
             d - load * (1.0 + default_overhead_pct) for load, d in pairs
         )
@@ -495,6 +513,81 @@ def fit_drain_model(
     if overhead_pct < 0 or overhead_pct > 0.50:
         return float(default_parasitic_w), float(default_overhead_pct), n
     return float(parasitic_w), float(overhead_pct), n
+
+
+def _clean_discharge_runs(
+    sorted_rows: list[dict[str, Any]],
+    capacity_wh: int,
+) -> list[tuple[float, float]]:
+    """Walk consecutive clean-discharge buckets (no solar, no AC charge,
+    SOC available) and emit one `(avg_load_w, observed_drain_w)` pair
+    per run. Only runs that span ≥ MIN_RUN_HOURS with ≥ MIN_RUN_SOC_DROP
+    qualify, so quantization noise (±1pp on each end of the run) is
+    small relative to the observed drop.
+
+    Used by `fit_drain_model`'s narrow-load fallback when the per-pair
+    median was biased low by short-window quantization rounding.
+    Reconciliation math from advisor 2026-05-05T18:57: a true ~2.8pp/h
+    drain quantized to 2pp gives 605 W observed (vs 847 W true), and
+    that low cluster pulled the per-pair median to ~100 W parasitic
+    even though reality was ~385 W. Aggregating across 4-6h runs
+    eliminates the bias.
+    """
+    SOLAR_NOISE_WH = 50.0
+    AC_NOISE_WH = 50.0
+    MIN_RUN_HOURS = 2.0
+    MIN_RUN_SOC_DROP = 3.0
+    MIN_RUN_AVG_LOAD_W = 50.0
+    MAX_RUN_HOURS = 12.0  # don't reach across overnight gaps
+    MAX_BUCKET_GAP_H = 1.5  # break a run if poll dropped > 90 min
+
+    runs: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    last_ts: float | None = None
+    for row in sorted_rows:
+        is_clean = (
+            (row.get("solar_wh") or 0) <= SOLAR_NOISE_WH
+            and (row.get("ac_input_wh") or 0) <= AC_NOISE_WH
+            and row.get("battery_pct") is not None
+        )
+        ts = row.get("ts")
+        gap_too_large = (
+            last_ts is not None
+            and ts is not None
+            and (ts - last_ts) / 3600.0 > MAX_BUCKET_GAP_H
+        )
+        if not is_clean or gap_too_large:
+            if current:
+                runs.append(current)
+            current = []
+        if is_clean:
+            current.append(row)
+            last_ts = ts
+        else:
+            last_ts = None
+    if current:
+        runs.append(current)
+
+    out: list[tuple[float, float]] = []
+    for run in runs:
+        if len(run) < 2:
+            continue
+        a, b = run[0], run[-1]
+        dt_h = (b["ts"] - a["ts"]) / 3600.0
+        if dt_h < MIN_RUN_HOURS or dt_h > MAX_RUN_HOURS:
+            continue
+        soc_drop = a["battery_pct"] - b["battery_pct"]
+        if soc_drop < MIN_RUN_SOC_DROP:
+            continue
+        observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
+        # Sum output_wh across the leading buckets — the trailing one
+        # is the SOC reading at run end and shouldn't double-count.
+        total_out_wh = sum(r.get("output_wh") or 0 for r in run[:-1])
+        avg_load_w = total_out_wh / dt_h
+        if avg_load_w < MIN_RUN_AVG_LOAD_W:
+            continue
+        out.append((avg_load_w, observed_drain_w))
+    return out
 
 
 def diagnose_idle_windows(
