@@ -189,6 +189,31 @@ CREATE TABLE IF NOT EXISTS algorithm_changes (
 CREATE INDEX IF NOT EXISTS idx_alg_changes_device_ts
     ON algorithm_changes(device_sn, applied_at);
 
+-- Automation rule firing history. Append-only — one row per successful
+-- edge-trigger firing. Replaces the in-memory `last_fired` overwrite
+-- with a real audit log: which rule fired, when, what action, what
+-- the SOC was, and which Kasa plug it acted on. Used by the Automation
+-- tab's "View history" view + by duration calculations that pair
+-- consecutive ON/OFF firings on the same plug.
+CREATE TABLE IF NOT EXISTS automation_firings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fired_at        INTEGER NOT NULL,        -- unix epoch
+    rule_id         TEXT NOT NULL,
+    rule_name       TEXT,                    -- snapshot at fire time so renames don't blank history
+    action          TEXT NOT NULL,           -- 'on' | 'off'
+    kasa_host       TEXT NOT NULL,           -- target plug (used for duration pairing)
+    jackery_sn      TEXT,                    -- which device's SOC drove the firing
+    soc_at_fire     REAL,                    -- battery_pct at the moment we fired
+    trigger         TEXT,                    -- 'soc' | future expansion
+    operator        TEXT,                    -- '<' | '<=' | '=' | '>=' | '>'
+    threshold       REAL                     -- the rule's value field
+);
+
+CREATE INDEX IF NOT EXISTS idx_automation_firings_rule_ts
+    ON automation_firings(rule_id, fired_at);
+CREATE INDEX IF NOT EXISTS idx_automation_firings_host_ts
+    ON automation_firings(kasa_host, fired_at);
+
 -- Generic per-device parameter store. Keyed by (device_sn, key) with
 -- exactly one row per param; the resolution ladder (user override >
 -- fitted value > catalog/probe > default) collapses into a single
@@ -1154,6 +1179,129 @@ class EnergyDB:
              "reasoning": r[7]}
             for r in rows
         ]
+
+    # ---------- automation_firings ----------
+    def record_automation_fire(self, *, rule_id: str, rule_name: str | None,
+                               action: str, kasa_host: str,
+                               jackery_sn: str | None,
+                               soc_at_fire: float | None,
+                               trigger: str | None = "soc",
+                               operator: str | None = None,
+                               threshold: float | None = None,
+                               fired_at: int | None = None) -> int | None:
+        """Append one row to automation_firings. Called from the rule
+        engine on every successful edge-triggered firing. Returns the
+        row id, or None if invalid input."""
+        if not rule_id or not action or not kasa_host:
+            return None
+        ts = int(fired_at if fired_at is not None else time.time())
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO automation_firings
+                       (fired_at, rule_id, rule_name, action, kasa_host,
+                        jackery_sn, soc_at_fire, trigger, operator, threshold)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts, rule_id, rule_name, action, kasa_host, jackery_sn,
+                 soc_at_fire, trigger, operator, threshold),
+            )
+            return cur.lastrowid
+
+    def list_automation_firings(self, *,
+                                rule_id: str | None = None,
+                                kasa_host: str | None = None,
+                                days: int = 30,
+                                limit: int = 500) -> list[dict]:
+        """Return firings, newest first. Filter by rule_id (history per
+        rule) or kasa_host (firings on a specific plug, used for duration
+        pairing across rules that share a target)."""
+        cutoff = int(time.time()) - days * 86400
+        clauses = ["fired_at >= ?"]
+        params: list = [cutoff]
+        if rule_id:
+            clauses.append("rule_id = ?")
+            params.append(rule_id)
+        if kasa_host:
+            clauses.append("kasa_host = ?")
+            params.append(kasa_host)
+        where = " AND ".join(clauses)
+        params.append(int(limit))
+        with self._conn() as c:
+            rows = c.execute(
+                f"""SELECT id, fired_at, rule_id, rule_name, action,
+                          kasa_host, jackery_sn, soc_at_fire, trigger,
+                          operator, threshold
+                     FROM automation_firings
+                    WHERE {where}
+                    ORDER BY fired_at DESC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+        return [
+            {"id": r[0], "fired_at": r[1], "rule_id": r[2],
+             "rule_name": r[3], "action": r[4], "kasa_host": r[5],
+             "jackery_sn": r[6], "soc_at_fire": r[7],
+             "trigger": r[8], "operator": r[9], "threshold": r[10]}
+            for r in rows
+        ]
+
+    def automation_on_intervals(self, kasa_host: str, *,
+                                days: int = 30) -> list[dict]:
+        """Pair consecutive firings on a Kasa plug into ON intervals.
+        Walks firings chronologically: each `on` opens an interval,
+        each `off` closes it. Returns the list of intervals plus a
+        running total of ON-time. An open interval (last action was
+        `on`, no closing `off` yet) is closed at `now` so the user
+        can see "currently ON for Xh."
+
+        Robust to:
+          - Repeated `on` firings without a closing `off` (consolidates
+            to a single interval starting at the first one).
+          - Repeated `off` firings without a preceding `on` (drops them
+            silently — nothing was on to close).
+          - The first event in the window being `off` (drops it; we
+            don't know how long it had been on before our window).
+        """
+        if not kasa_host:
+            return []
+        firings = list(reversed(
+            self.list_automation_firings(
+                kasa_host=kasa_host, days=days, limit=10000,
+            )
+        ))  # oldest first for state-machine pairing
+        intervals: list[dict] = []
+        open_at: int | None = None
+        open_rule: dict | None = None
+        for f in firings:
+            if f["action"] == "on" and open_at is None:
+                open_at = f["fired_at"]
+                open_rule = f
+            elif f["action"] == "off" and open_at is not None:
+                intervals.append({
+                    "on_at": open_at,
+                    "off_at": f["fired_at"],
+                    "duration_s": f["fired_at"] - open_at,
+                    "opened_by_rule_id": open_rule["rule_id"] if open_rule else None,
+                    "opened_by_rule_name": open_rule["rule_name"] if open_rule else None,
+                    "closed_by_rule_id": f["rule_id"],
+                    "closed_by_rule_name": f["rule_name"],
+                    "open": False,
+                })
+                open_at = None
+                open_rule = None
+            # repeated on/off without a complement → ignore (state stays as-is)
+        if open_at is not None:
+            now = int(time.time())
+            intervals.append({
+                "on_at": open_at,
+                "off_at": None,
+                "duration_s": now - open_at,
+                "opened_by_rule_id": open_rule["rule_id"] if open_rule else None,
+                "opened_by_rule_name": open_rule["rule_name"] if open_rule else None,
+                "closed_by_rule_id": None,
+                "closed_by_rule_name": None,
+                "open": True,
+            })
+        return intervals
 
     # ---------- device_params ----------
     def set_device_param(self, device_sn: str, key: str, value: float | None, *,

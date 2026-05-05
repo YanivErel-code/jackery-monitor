@@ -165,8 +165,13 @@ class AppState:
         self.advisor_jobs: dict[str, dict[str, Any]] = {}
         # Battery-SOC automation engine — rules persisted to /data/automation.json,
         # evaluated each poll cycle, edge-triggered so a rule fires once per
-        # threshold crossing instead of every single poll.
-        self.automation: AutomationEngine = AutomationEngine()
+        # threshold crossing instead of every single poll. Each successful
+        # firing writes an audit row via record_automation_fire so the
+        # Automation tab's "View history" view + duration calculations have
+        # a real persisted log to work from.
+        self.automation: AutomationEngine = AutomationEngine(
+            firing_recorder=self.energy.record_automation_fire,
+        )
         # Saved Kasa device registry — devices the user has manually added &
         # tested. Rule editor picks from this list instead of asking for an
         # IP each time.
@@ -3679,6 +3684,45 @@ def api_automation_upsert(body: dict):
 def api_automation_delete(rule_id: str):
     deleted = state.automation.delete(rule_id)
     return {"ok": True, "deleted": deleted}
+
+
+@app.get("/api/automation/rules/{rule_id}/history")
+def api_automation_rule_history(rule_id: str, days: int = 30):
+    """Persistent firing log for one rule over the last N days, plus
+    paired ON/OFF intervals for the rule's target Kasa plug.
+
+    Returns:
+      - `firings`: every successful edge-triggered fire, newest first.
+      - `intervals`: ON-time intervals built by walking ALL firings on
+        the same kasa_host (so an ON from rule-X paired with an OFF
+        from rule-Y still counts as one interval — what the user
+        actually experienced on the plug).
+      - `total_on_seconds`: sum of interval durations in the window.
+    """
+    days = max(1, min(int(days), 365))
+    firings = state.energy.list_automation_firings(
+        rule_id=rule_id, days=days, limit=2000,
+    )
+    # Find the rule's current Kasa host so we can pair intervals across
+    # complementary rules. If the rule has been deleted, fall back to
+    # the host recorded on the most recent firing.
+    rule = next((r for r in state.automation.list_rules()
+                 if r.get("id") == rule_id), None)
+    kasa_host = (rule or {}).get("kasa_host")
+    if not kasa_host and firings:
+        kasa_host = firings[0]["kasa_host"]
+    intervals = (state.energy.automation_on_intervals(kasa_host, days=days)
+                 if kasa_host else [])
+    total_on = sum(i["duration_s"] for i in intervals)
+    return {
+        "rule_id": rule_id,
+        "rule_exists": rule is not None,
+        "kasa_host": kasa_host,
+        "days": days,
+        "firings": firings,
+        "intervals": intervals,
+        "total_on_seconds": total_on,
+    }
 
 
 @app.get("/api/kasa/credentials")

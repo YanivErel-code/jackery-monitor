@@ -1594,6 +1594,7 @@ function renderAutomationRules(rules) {
           <input type="checkbox" data-toggle="${r.id}" ${r.enabled ? 'checked' : ''} />
           ${r.enabled ? 'enabled' : 'paused'}
         </label>
+        <button class="btn btn-ghost" data-history="${r.id}" type="button">History</button>
         <button class="btn btn-ghost" data-edit="${r.id}" type="button">Edit</button>
         <button class="btn btn-ghost" data-del="${r.id}" type="button">Delete</button>
       </div>
@@ -1601,6 +1602,10 @@ function renderAutomationRules(rules) {
   }).join('');
 
   // Wire per-row controls
+  list.querySelectorAll('[data-history]').forEach((b) => {
+    b.addEventListener('click', () =>
+      openAutomationHistory(rules.find((r) => r.id === b.dataset.history)));
+  });
   list.querySelectorAll('[data-edit]').forEach((b) => {
     b.addEventListener('click', () => openAutomationEditor(rules.find((r) => r.id === b.dataset.edit)));
   });
@@ -1687,6 +1692,117 @@ function closeAutomationEditor() {
   const ed = $('auto-editor');
   if (ed) ed.hidden = true;
 }
+
+// ============================================================
+// AUTOMATION RULE HISTORY — per-rule firing log + on-time intervals
+// ============================================================
+let _autoHistoryRule = null;
+
+async function openAutomationHistory(rule) {
+  if (!rule) return;
+  _autoHistoryRule = rule;
+  const card = $('auto-history');
+  if (!card) return;
+  card.hidden = false;
+  $('auto-history-title').textContent = `History — ${rule.name}`;
+  card.scrollIntoView({behavior: 'smooth', block: 'start'});
+  await _refreshAutoHistory();
+}
+
+async function _refreshAutoHistory() {
+  const rule = _autoHistoryRule;
+  if (!rule) return;
+  const days = parseInt($('auto-history-days')?.value || '30', 10) || 30;
+  const summary = $('auto-history-summary');
+  const empty = $('auto-history-empty');
+  const body = $('auto-history-body');
+  if (summary) summary.textContent = 'Loading…';
+  if (empty) empty.hidden = true;
+  if (body) body.innerHTML = '';
+  try {
+    const r = await fetch(
+      `/api/automation/rules/${encodeURIComponent(rule.id)}/history?days=${days}`,
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    _renderAutoHistory(j);
+  } catch (e) {
+    if (summary) summary.textContent = `Failed to load: ${e.message || e}`;
+  }
+}
+
+function _renderAutoHistory(j) {
+  const summary = $('auto-history-summary');
+  const empty = $('auto-history-empty');
+  const body = $('auto-history-body');
+  const firings = j.firings || [];
+  const intervals = j.intervals || [];
+  if (!firings.length) {
+    if (summary) summary.textContent = `No firings in the last ${j.days} days.`;
+    if (empty) empty.hidden = false;
+    if (body) body.innerHTML = '';
+    return;
+  }
+  if (empty) empty.hidden = true;
+  const totalH = (j.total_on_seconds || 0) / 3600;
+  const openCount = intervals.filter((i) => i.open).length;
+  const lines = [
+    `${firings.length} firing${firings.length === 1 ? '' : 's'} in the last ${j.days} days`,
+    `${intervals.length} ON interval${intervals.length === 1 ? '' : 's'} (paired across all rules on this plug)`,
+    `total ON-time: ${totalH.toFixed(1)} h`,
+  ];
+  if (openCount) lines.push('plug currently ON (interval still open)');
+  if (summary) summary.textContent = lines.join(' · ');
+
+  const fmtTs = (ts) =>
+    ts == null ? '—' : new Date(ts * 1000).toLocaleString();
+  const fmtDur = (s) => {
+    if (s == null) return '—';
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+  const safe = (s) => String(s ?? '').replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+
+  // ON intervals first (the "what actually happened on the plug" view).
+  let html = '';
+  if (intervals.length) {
+    html += `<h3 style="margin:16px 0 6px;font-size:13px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em">On intervals</h3>
+      <table class="acc-table"><thead><tr>
+        <th>Started</th><th>Ended</th><th>Duration</th><th>Opened by</th><th>Closed by</th>
+      </tr></thead><tbody>` +
+      intervals.slice().reverse().map((i) => `<tr>
+        <td>${fmtTs(i.on_at)}</td>
+        <td>${i.open ? '<em>still on</em>' : fmtTs(i.off_at)}</td>
+        <td>${fmtDur(i.duration_s)}</td>
+        <td>${safe(i.opened_by_rule_name || i.opened_by_rule_id || '—')}</td>
+        <td>${safe(i.closed_by_rule_name || i.closed_by_rule_id || '—')}</td>
+      </tr>`).join('') + '</tbody></table>';
+  }
+  // Raw firing log second (transparency / debugging).
+  html += `<h3 style="margin:16px 0 6px;font-size:13px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em">Firings</h3>
+    <table class="acc-table"><thead><tr>
+      <th>Time</th><th>Action</th><th>SOC</th><th>Threshold</th>
+    </tr></thead><tbody>` +
+    firings.map((f) => `<tr>
+      <td>${fmtTs(f.fired_at)}</td>
+      <td>${safe((f.action || '').toUpperCase())}</td>
+      <td>${f.soc_at_fire == null ? '—' : Math.round(f.soc_at_fire) + '%'}</td>
+      <td>${f.operator || ''} ${f.threshold == null ? '' : f.threshold + '%'}</td>
+    </tr>`).join('') + '</tbody></table>';
+  if (body) body.innerHTML = html;
+}
+
+$('auto-history-close')?.addEventListener('click', () => {
+  const card = $('auto-history');
+  if (card) card.hidden = true;
+  _autoHistoryRule = null;
+});
+
+$('auto-history-days')?.addEventListener('change', () => {
+  _refreshAutoHistory();
+});
 
 $('auto-add')?.addEventListener('click', () => openAutomationEditor(null));
 $('auto-cancel')?.addEventListener('click', closeAutomationEditor);

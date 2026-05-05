@@ -940,6 +940,28 @@
           </div>
         </form>
       </section>
+
+      <!-- Rule history: shown inline when the user clicks "History" on a
+           rule row. Lists every persisted firing for the rule plus paired
+           ON/OFF intervals on the rule's Kasa plug, with total ON-time. -->
+      <section id="auto-history" class="card" hidden>
+        <div class="card-header">
+          <h2 id="auto-history-title">Rule history</h2>
+          <div style="display:flex; gap:8px; align-items:center">
+            <select id="auto-history-days" class="device-select" style="max-width:140px">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+            </select>
+            <button id="auto-history-close" class="btn btn-ghost" type="button">Close</button>
+          </div>
+        </div>
+        <p class="hint" id="auto-history-summary" style="margin:6px 0 12px">—</p>
+        <div id="auto-history-empty" class="hint" hidden>
+          No firings recorded yet for this rule.
+        </div>
+        <div id="auto-history-body"></div>
+      </section>
     </section>
 
     <!-- ============== LOGS TAB ============== -->
