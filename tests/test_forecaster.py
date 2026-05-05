@@ -699,6 +699,47 @@ def test_fit_drain_model_uses_parasitic_only_fallback_for_narrow_loads():
     assert 350 <= parasitic_w <= 450, f"got parasitic_w={parasitic_w}"
 
 
+def test_fit_drain_model_outlier_does_not_disable_narrow_fallback():
+    """Advisor caught (2026-05-05) that one outlier high-load window
+    in a 14d history was pushing max/min above 2x even though 99% of
+    windows clustered narrowly — disabling the parasitic-only fallback.
+    The percentile-based metric (p90/p10) ignores outliers and
+    correctly classifies the device as 'narrow'."""
+    base = 1_700_000_000
+    # 16 narrow-load buckets at ~470W steady (real overnight pattern)
+    # plus 2 outlier buckets at 1500W (one short kettle run during 14d).
+    # max/min = 1500/465 = 3.23 → old gate would pick OLS path (collapses).
+    # p90/p10 should land near 1.0 → narrow-fallback fires correctly.
+    history = []
+    soc = 95
+    for h in range(16):
+        load_w = 465 if h % 2 == 0 else 475
+        history.append({
+            "ts": base + h * 3600,
+            "battery_pct": soc,
+            "output_wh": load_w,
+            "solar_wh": 0, "ac_input_wh": 0,
+        })
+        soc -= 3  # 3pp/h drop at ~932W true drain
+    # Tack on 2 outlier high-load hours (1500W kettle run).
+    for h in range(2):
+        history.append({
+            "ts": base + (16 + h) * 3600,
+            "battery_pct": soc,
+            "output_wh": 1500,
+            "solar_wh": 0, "ac_input_wh": 0,
+        })
+        soc -= 6  # 6pp/h drop at higher load
+
+    parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    assert n >= 5
+    assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT, \
+        "narrow-load fallback should fire despite outlier high-load window"
+    assert 350 <= parasitic_w <= 450, f"got parasitic_w={parasitic_w}"
+
+
 def test_fit_drain_model_falls_back_when_too_few_windows():
     """Single qualifying window is not enough — defaults are returned
     so callers don't blindly trust a one-shot fit."""

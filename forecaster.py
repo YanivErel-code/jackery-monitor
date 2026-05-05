@@ -126,14 +126,23 @@ IDLE_OVERHEAD_W = DEFAULT_IDLE_OVERHEAD_W
 # 5000+ on 2026-05-04 that the pure-percentage model couldn't represent).
 DEFAULT_PARASITIC_W = 50.0
 
-# Minimum max/min load ratio to trust the joint OLS fit of (parasitic_w,
+# Minimum p90/p10 load ratio to trust the joint OLS fit of (parasitic_w,
 # overhead_pct). When loads are narrow — e.g. a device that runs the same
 # steady ~470W every night — the (load, drain) regressor pair is nearly
 # collinear and OLS can't separate intercept from slope, so the fit
 # silently collapses into the priors. Below this ratio we fall back to
-# a parasitic-only fit (overhead pinned at default). Advisor diagnosed
-# the collapse on 2026-05-05: the deployed joint fit returned exactly
-# (50W, 0.10) when the real values were ~(415W, 0.10).
+# a parasitic-only fit (overhead pinned at default).
+#
+# Uses 10th vs 90th percentile, NOT raw max/min: the original max/min
+# version was fooled by a single outlier high-load window (one kettle
+# run during a 14d history at otherwise-narrow ~460W loads pushes
+# max/min above 2x even though 99% of windows are tightly clustered).
+# Advisor caught this on 2026-05-05 ~12h after we shipped the original
+# fallback — the deployed fit was still returning exactly the (50W,
+# 0.10) cold-start defaults despite the load distribution being
+# clearly narrow at the inner spread. p90/p10 ignores the outliers and
+# correctly classifies the device as "narrow" → parasitic-only path
+# fires.
 MIN_LOAD_RANGE_FOR_JOINT_FIT = 2.0
 
 # Cutoff for "recent" samples in load-profile recency weighting (seconds).
@@ -437,14 +446,19 @@ def fit_drain_model(
     if n < min_windows:
         return float(default_parasitic_w), float(default_overhead_pct), n
 
-    loads = [p[0] for p in pairs]
-    load_min = min(loads)
-    load_max = max(loads)
-    load_range_ratio = (load_max / load_min) if load_min > 0 else 1.0
+    # Robust load-range metric: 10th vs 90th percentile of load values,
+    # so a single outlier high-load window can't disable the narrow-
+    # distribution fallback. See MIN_LOAD_RANGE_FOR_JOINT_FIT comment.
+    sorted_loads = sorted(p[0] for p in pairs)
+    p10_idx = max(0, int(n * 0.10))
+    p90_idx = min(n - 1, int(n * 0.90))
+    load_p10 = sorted_loads[p10_idx]
+    load_p90 = sorted_loads[p90_idx]
+    load_range_ratio = (load_p90 / load_p10) if load_p10 > 0 else 1.0
 
-    # Narrow-load fallback: see MIN_LOAD_RANGE_FOR_JOINT_FIT comment.
-    # Pin overhead at the default and solve `parasitic_w = drain - load *
-    # (1 + default_pct)` per window, take the median for robustness.
+    # Narrow-load fallback: pin overhead at the default and solve
+    # `parasitic_w = drain - load * (1 + default_pct)` per window, take
+    # the median for robustness against quantization noise.
     if load_range_ratio < MIN_LOAD_RANGE_FOR_JOINT_FIT:
         implied_parasitics = sorted(
             d - load * (1.0 + default_overhead_pct) for load, d in pairs
