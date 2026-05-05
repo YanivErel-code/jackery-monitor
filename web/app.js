@@ -353,9 +353,26 @@ document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => switchTab(tab.dataset.tab));
 });
 
-function switchTab(name) {
+function switchTab(name, opts = {}) {
+  if (!VALID_TABS.has(name)) return;
   activeTab = name;
   try { localStorage.setItem(ACTIVE_TAB_KEY, name); } catch (_) {}
+  // Reflect the tab in the URL hash so links are shareable. Live is
+  // the default — keep the URL clean (no hash) on that one. fromHash
+  // skips the rewrite when we're already responding to a hashchange.
+  if (!opts.fromHash) {
+    const desired = name === 'live' ? '' : '#' + name;
+    if (location.hash !== desired) {
+      try {
+        if (desired) {
+          history.pushState(null, '', desired);
+        } else {
+          // Strip hash without reload — fresh start at the bare URL.
+          history.pushState(null, '', location.pathname + location.search);
+        }
+      } catch (_) { /* old browser or restricted context */ }
+    }
+  }
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.toggleAttribute('hidden', p.id !== `tab-${name}`));
   if (name === 'live')     { drawLiveChart(lastStatus); }
@@ -371,16 +388,33 @@ function switchTab(name) {
   if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); }
 }
 
-// Restore the last-viewed tab on page load. Defaults to the HTML's
-// `tab on` (live) on first visit or if the saved value isn't a known
-// tab name. Wrapped in try/catch because Safari Private Browsing
-// throws on localStorage access.
-try {
-  const saved = localStorage.getItem(ACTIVE_TAB_KEY);
-  if (saved && saved !== 'live' && VALID_TABS.has(saved)) {
-    switchTab(saved);
+// Boot resolution order: URL hash (shared link wins) > localStorage
+// (returning user) > 'live' default. Wrapped in try/catch — Safari
+// Private Browsing throws on localStorage access.
+function _initialTab() {
+  const hashTab = location.hash.slice(1);
+  if (hashTab && VALID_TABS.has(hashTab)) return hashTab;
+  try {
+    const saved = localStorage.getItem(ACTIVE_TAB_KEY);
+    if (saved && VALID_TABS.has(saved)) return saved;
+  } catch (_) { /* localStorage disabled */ }
+  return 'live';
+}
+const _bootTab = _initialTab();
+if (_bootTab !== 'live') {
+  switchTab(_bootTab);
+}
+
+// Back/forward buttons cycle through tab history. The hashchange
+// event fires for both user-driven nav (Back) and our own pushState,
+// so guard against re-entering switchTab when we just set the hash
+// ourselves.
+window.addEventListener('hashchange', () => {
+  const target = location.hash.slice(1) || 'live';
+  if (VALID_TABS.has(target) && target !== activeTab) {
+    switchTab(target, { fromHash: true });
   }
-} catch (_) { /* localStorage disabled */ }
+});
 
 // ---- Settings sub-tabs ---------------------------------------------------
 // The Settings tab grew enough to need internal grouping (general /
