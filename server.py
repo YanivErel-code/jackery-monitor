@@ -838,6 +838,20 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
         predicted_sunrise_soc_pct=pred_sunrise,
         actual_sunrise_soc_pct=actual_sunrise,
     )
+    # Back-fill any past rows whose actuals are still null. Each row's
+    # `sunrise_ts` typically falls on the FOLLOWING calendar day, so
+    # today's tick can never back-fill yesterday's sunrise from the
+    # single-row write above. The back-fill walks the last 14 days
+    # and fills in actuals for any (sunset_ts, sunrise_ts) that has
+    # aged into the past with samples available.
+    try:
+        state.energy.backfill_daily_actuals(
+            device_sn,
+            main_capacity_wh=main_wh,
+            pack_capacity_wh=pack_wh,
+        )
+    except Exception as e:
+        log.debug("daily summary backfill failed: %s", e)
 
 
 # Per-pack temperature reporting on the Jackery 5000 Plus is unreliable

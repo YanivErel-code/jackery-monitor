@@ -80,6 +80,54 @@ def test_prediction_accuracy_excludes_future_targets(db):
     assert out == []
 
 
+def test_backfill_daily_actuals_fills_missing_actuals(db):
+    """The single-shot tick writes only today's row, but each row's
+    sunrise_ts falls on the FOLLOWING calendar day — so today's tick
+    can never back-fill yesterday's sunrise. backfill_daily_actuals
+    walks recent rows and fills any null actuals whose `*_ts` has
+    aged into the past with samples available."""
+    sn = "SN-BACKFILL"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    now = int(time.time())
+    sunset_ts = now - 3 * 3600       # 3h ago, in the past
+    sunrise_ts = now - 1 * 3600      # 1h ago, in the past
+    future_sunrise_ts = now + 6 * 3600  # 6h ahead, still future
+
+    # Row 1: sunset + sunrise both in the past; both actuals null at first.
+    db.upsert_daily_summary(
+        device_sn=sn, local_date="2026-05-04",
+        sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
+        predicted_sunset_soc_pct=80.0,
+        predicted_sunrise_soc_pct=45.0,
+    )
+    # Row 2: sunset past, sunrise still in the future.
+    db.upsert_daily_summary(
+        device_sn=sn, local_date="2026-05-05",
+        sunset_ts=sunset_ts, sunrise_ts=future_sunrise_ts,
+        predicted_sunset_soc_pct=78.0,
+        predicted_sunrise_soc_pct=42.0,
+    )
+    # Seed samples around each past ts so the join finds an actual.
+    for ts, soc in [(sunset_ts - 60, 76), (sunset_ts + 60, 76),
+                    (sunrise_ts - 60, 49), (sunrise_ts + 60, 49)]:
+        db.record(sn, ts, input_w=0, output_w=0, battery_pct=soc, solar_w=0)
+
+    filled = db.backfill_daily_actuals(sn, days=14)
+    # Row 1: sunset + sunrise = 2 fills. Row 2: sunset only = 1 fill.
+    assert filled == 3
+
+    rows = {r["date"]: r for r in db.list_daily_summary(sn, days=14)}
+    assert rows["2026-05-04"]["actual_sunset_soc_pct"] == 76.0
+    assert rows["2026-05-04"]["actual_sunrise_soc_pct"] == 49.0
+    assert rows["2026-05-05"]["actual_sunset_soc_pct"] == 76.0
+    # Future sunrise still null — not yet eligible for back-fill.
+    assert rows["2026-05-05"]["actual_sunrise_soc_pct"] is None
+
+    # Idempotent: rerun does nothing because actuals are already filled.
+    again = db.backfill_daily_actuals(sn, days=14)
+    assert again == 0
+
+
 def test_smart_charge_analytics_includes_mode_and_reason(db):
     """The DB persists `mode` + `reason` on every decision, but the
     analytics SELECT was missing them — so the advisor's decisions

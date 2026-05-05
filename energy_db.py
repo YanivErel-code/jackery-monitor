@@ -728,6 +728,72 @@ class EnergyDB:
                      predicted_sunrise_soc_pct, actual_sunrise_soc_pct, now),
                 )
 
+    def backfill_daily_actuals(self, device_sn: str, *,
+                               days: int = 14,
+                               main_capacity_wh: int | None = None,
+                               pack_capacity_wh: int | None = None) -> int:
+        """Walk daily_solar_summary rows missing actual_sunset / actual_sunrise
+        whose corresponding `*_ts` is in the past, and fill in the actual
+        from the samples + battery_packs join.
+
+        The single-shot tick path (`_update_daily_summary`) only ever writes
+        to today's row, but the row's `sunrise_ts` typically falls on the
+        FOLLOWING calendar day — so today's tick can't back-fill yesterday's
+        sunrise. This helper, run from each tick, walks recent rows and
+        fills in any actuals that have aged into the past.
+
+        Returns the count of values filled (sunset + sunrise across all
+        rows). Idempotent — re-running over already-filled rows is a no-op.
+        """
+        if not device_sn:
+            return 0
+        cutoff = int(time.time()) - days * 86400
+        now = int(time.time())
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT date, sunset_ts, sunrise_ts,
+                          actual_sunset_soc_pct, actual_sunrise_soc_pct
+                     FROM daily_solar_summary
+                    WHERE device_sn = ?
+                      AND updated_at >= ?
+                      AND ((actual_sunset_soc_pct IS NULL AND sunset_ts IS NOT NULL
+                            AND sunset_ts <= ?)
+                        OR (actual_sunrise_soc_pct IS NULL AND sunrise_ts IS NOT NULL
+                            AND sunrise_ts <= ?))""",
+                (device_sn, cutoff, now, now),
+            ).fetchall()
+        filled = 0
+        for date, sunset_ts, sunrise_ts, act_sunset, act_sunrise in rows:
+            fill_sunset: float | None = None
+            fill_sunrise: float | None = None
+            if act_sunset is None and sunset_ts and sunset_ts <= now:
+                fill_sunset = self.system_soc_at(
+                    device_sn, int(sunset_ts),
+                    main_capacity_wh=main_capacity_wh,
+                    pack_capacity_wh=pack_capacity_wh,
+                )
+            if act_sunrise is None and sunrise_ts and sunrise_ts <= now:
+                fill_sunrise = self.system_soc_at(
+                    device_sn, int(sunrise_ts),
+                    main_capacity_wh=main_capacity_wh,
+                    pack_capacity_wh=pack_capacity_wh,
+                )
+            if fill_sunset is None and fill_sunrise is None:
+                continue
+            self.upsert_daily_summary(
+                device_sn=device_sn, local_date=date,
+                sunset_ts=None, sunrise_ts=None,
+                predicted_sunset_soc_pct=None,
+                actual_sunset_soc_pct=fill_sunset,
+                predicted_sunrise_soc_pct=None,
+                actual_sunrise_soc_pct=fill_sunrise,
+            )
+            if fill_sunset is not None:
+                filled += 1
+            if fill_sunrise is not None:
+                filled += 1
+        return filled
+
     def list_daily_summary(self, device_sn: str, days: int = 30) -> list[dict]:
         """Most recent N daily rows for a device, newest first."""
         cutoff = int(time.time()) - days * 86400
