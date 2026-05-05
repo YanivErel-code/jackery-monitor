@@ -5220,9 +5220,17 @@ async function loadAlgorithmAdvisor() {
   if (!wrap) return;
   const dev = activeJackeryDevice();
   const deviceSn = dev?.device_sn;
-  const params = deviceSn ? `?device_sn=${encodeURIComponent(deviceSn)}` : '';
+  // Build the query string properly. The previous code did
+  // `${params}&status=pending`.replace(/^&/, '?') — that only fixes
+  // the leading-`&` case if `params` is THE WHOLE URL, not when
+  // `params` is empty mid-template. When deviceSn was missing (fresh
+  // page load before WS populates lastStatus), the URL came out as
+  // `/api/algorithm/suggestions&status=pending` and 404'd. URLSearch-
+  // Params handles the joining cleanly.
+  const qs = new URLSearchParams({status: 'pending'});
+  if (deviceSn) qs.set('device_sn', deviceSn);
   try {
-    const r = await fetch(`/api/algorithm/suggestions${params}&status=pending`.replace(/^&/, '?'));
+    const r = await fetch(`/api/algorithm/suggestions?${qs}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     renderAlgorithmSuggestions(j.suggestions || []);
