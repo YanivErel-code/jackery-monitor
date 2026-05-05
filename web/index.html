@@ -468,6 +468,71 @@
           <div class="kpi-value"><span id="forecast-avg-load">—</span><small>W</small></div>
         </section>
       </div>
+
+      <!-- Sunset/sunrise prediction-vs-actual table — daily accuracy
+           rollup. Backed by daily_solar_summary, written each smart-
+           charge tick. Surfaces the same data as the Logs → Debug
+           panel but in a scannable visual + summary KPIs. -->
+      <section id="daily-accuracy-card" class="card" hidden>
+        <div class="card-header">
+          <h2>Sunset / sunrise accuracy</h2>
+          <select id="daily-accuracy-days" class="device-select" style="max-width:140px">
+            <option value="3">Last 3 days</option>
+            <option value="7">Last 7 days</option>
+            <option value="14" selected>Last 14 days</option>
+            <option value="30">Last 30 days</option>
+            <option value="60">Last 60 days</option>
+            <option value="90">Last 90 days</option>
+          </select>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Predicted SOC at sunset / sunrise vs what actually happened. Error in pp.
+          Green ≤3pp, yellow 4-8pp, red &gt;8pp.
+        </p>
+
+        <!-- Summary KPIs over the selected window. MAE = mean absolute
+             error in percentage points. Hit rate = share of days where
+             |error| ≤ 5pp (a "good enough" call). Computed on the
+             client side from the rendered rows so the same source of
+             truth drives both the table and the summary. -->
+        <div id="daily-accuracy-summary" class="acc-summary">
+          <div class="acc-summary-tile">
+            <div class="acc-summary-label">Sunset MAE</div>
+            <div class="acc-summary-value"><span id="daily-acc-sunset-mae">—</span><small>pp</small></div>
+            <div class="acc-summary-sub" id="daily-acc-sunset-n">—</div>
+          </div>
+          <div class="acc-summary-tile">
+            <div class="acc-summary-label">Sunrise MAE</div>
+            <div class="acc-summary-value"><span id="daily-acc-sunrise-mae">—</span><small>pp</small></div>
+            <div class="acc-summary-sub" id="daily-acc-sunrise-n">—</div>
+          </div>
+          <div class="acc-summary-tile">
+            <div class="acc-summary-label">Hit rate (|err| ≤ 5pp)</div>
+            <div class="acc-summary-value"><span id="daily-acc-hitrate">—</span><small>%</small></div>
+            <div class="acc-summary-sub" id="daily-acc-hitrate-sub">—</div>
+          </div>
+        </div>
+
+        <div id="daily-accuracy-empty" class="hint" hidden>
+          No daily summary rows yet — fills in over the next few days as
+          the smart-charge tick logs each sunset/sunrise.
+        </div>
+        <table id="daily-accuracy-table" class="acc-table" hidden>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th colspan="3" class="acc-group acc-group-sunset">Sunset</th>
+              <th colspan="3" class="acc-group acc-group-sunrise">Sunrise</th>
+            </tr>
+            <tr class="acc-subhead">
+              <th></th>
+              <th>Pred</th><th>Actual</th><th>Err</th>
+              <th>Pred</th><th>Actual</th><th>Err</th>
+            </tr>
+          </thead>
+          <tbody id="daily-accuracy-tbody"></tbody>
+        </table>
+      </section>
     </section>
 
     <!-- ============== DEVICE TAB ============== -->

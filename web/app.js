@@ -4103,8 +4103,120 @@ async function fetchForecast() {
       }
     }
     drawForecastChart(j);
+    // Daily sunset/sunrise pred-vs-actual table + MAE summary. Independent
+    // of the main forecast — own /api/daily_summary fetch with a user-
+    // controlled window. Render is fire-and-forget; failures shouldn't
+    // block the rest of the Forecast tab.
+    renderDailyAccuracy().catch((err) =>
+      console.warn('daily accuracy render failed', err));
   } catch (e) { console.warn('forecast fetch failed', e); }
 }
+
+// ============================================================
+// Daily sunset/sunrise prediction accuracy table on Forecast tab.
+// Data source: /api/daily_summary, written each smart-charge tick.
+// ============================================================
+async function renderDailyAccuracy() {
+  const card = $('daily-accuracy-card');
+  if (!card) return;
+  const sel = $('daily-accuracy-days');
+  const days = parseInt(sel?.value || '14', 10) || 14;
+  const sn = activeJackeryDevice()?.device_sn;
+  const url = sn
+    ? `/api/daily_summary?days=${days}&device_sn=${encodeURIComponent(sn)}`
+    : `/api/daily_summary?days=${days}`;
+  const r = await fetch(url);
+  if (!r.ok) { card.hidden = true; return; }
+  const j = await r.json();
+  const rows = j.rows || [];
+  card.hidden = false;
+  const tbody = $('daily-accuracy-tbody');
+  const table = $('daily-accuracy-table');
+  const empty = $('daily-accuracy-empty');
+  if (!rows.length) {
+    if (tbody) tbody.innerHTML = '';
+    if (table) table.hidden = true;
+    if (empty) empty.hidden = false;
+    _renderAccuracySummary([], []);
+    return;
+  }
+  if (empty) empty.hidden = true;
+  if (table) table.hidden = false;
+
+  // Render newest-first, but keep MAE math over the full window.
+  const sorted = [...rows].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const sunsetErrs = [];
+  const sunriseErrs = [];
+  const html = sorted.map((row) => {
+    const date = row.date || '—';
+    const sp = row.predicted_sunset_soc_pct;
+    const sa = row.actual_sunset_soc_pct;
+    const rp = row.predicted_sunrise_soc_pct;
+    const ra = row.actual_sunrise_soc_pct;
+    const sErr = (sp != null && sa != null) ? sa - sp : null;
+    const rErr = (rp != null && ra != null) ? ra - rp : null;
+    if (sErr != null) sunsetErrs.push(sErr);
+    if (rErr != null) sunriseErrs.push(rErr);
+    return `<tr>
+      <td>${date}</td>
+      <td>${_fmtPct(sp)}</td>
+      <td>${_fmtPct(sa)}</td>
+      ${_fmtErrCell(sErr)}
+      <td>${_fmtPct(rp)}</td>
+      <td>${_fmtPct(ra)}</td>
+      ${_fmtErrCell(rErr)}
+    </tr>`;
+  }).join('');
+  if (tbody) tbody.innerHTML = html;
+  _renderAccuracySummary(sunsetErrs, sunriseErrs);
+}
+
+function _fmtPct(v) {
+  return (v == null) ? '<span class="acc-missing">—</span>' : `${Math.round(v)}%`;
+}
+
+function _fmtErrCell(err) {
+  if (err == null) return '<td class="acc-missing">—</td>';
+  const abs = Math.abs(err);
+  const cls = abs <= 3 ? 'acc-err-good' : abs <= 8 ? 'acc-err-warn' : 'acc-err-bad';
+  const sign = err > 0 ? '+' : '';
+  return `<td class="${cls}">${sign}${err.toFixed(1)}</td>`;
+}
+
+function _renderAccuracySummary(sunsetErrs, sunriseErrs) {
+  const mae = (xs) => xs.length
+    ? (xs.reduce((s, x) => s + Math.abs(x), 0) / xs.length).toFixed(1)
+    : null;
+  const setText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  const sunsetMae = mae(sunsetErrs);
+  const sunriseMae = mae(sunriseErrs);
+  setText('daily-acc-sunset-mae', sunsetMae ?? '—');
+  setText('daily-acc-sunset-n', sunsetErrs.length
+    ? `${sunsetErrs.length} day${sunsetErrs.length === 1 ? '' : 's'} measured`
+    : 'no data');
+  setText('daily-acc-sunrise-mae', sunriseMae ?? '—');
+  setText('daily-acc-sunrise-n', sunriseErrs.length
+    ? `${sunriseErrs.length} day${sunriseErrs.length === 1 ? '' : 's'} measured`
+    : 'no data');
+  // Hit rate = share of all measured points (sunset + sunrise) where
+  // |error| ≤ 5pp. Single number across both phases gives a quick "is
+  // the model basically right" read independent of which phase.
+  const all = sunsetErrs.concat(sunriseErrs);
+  const hits = all.filter((e) => Math.abs(e) <= 5).length;
+  const hitRate = all.length ? Math.round((hits / all.length) * 100) : null;
+  setText('daily-acc-hitrate', hitRate ?? '—');
+  setText('daily-acc-hitrate-sub', all.length
+    ? `${hits} of ${all.length} predictions within 5pp`
+    : 'no data');
+}
+
+// Re-render when the user picks a different window. No new server data
+// per change — the API call is small and re-running keeps the summary
+// in sync with whatever range is active.
+$('daily-accuracy-days')?.addEventListener('change', () => {
+  renderDailyAccuracy().catch((err) =>
+    console.warn('daily accuracy render failed', err));
+});
 
 // Run once on app boot: if the server has no location yet AND the user
 // hasn't previously denied the prompt in this browser, ask. After any

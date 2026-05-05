@@ -2225,3 +2225,96 @@ footer {
 }
 .forecast-current-loc .loc-name { color: var(--text); font-weight: 500; }
 .forecast-current-loc .loc-coords { font-variant-numeric: tabular-nums; }
+
+
+/* Sunset/sunrise prediction-vs-actual table on the Forecast tab.
+   Compact row layout with grouped header showing pred / actual /
+   error per phase. Error cell color codes magnitude so the eye
+   catches misses at a glance. */
+.acc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+.acc-table th, .acc-table td {
+  padding: 6px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.06));
+}
+.acc-table th:first-child, .acc-table td:first-child {
+  text-align: left;
+  color: var(--text-dim);
+}
+.acc-table thead th {
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-size: 11px;
+}
+.acc-table .acc-group {
+  text-align: center;
+  border-left: 1px solid var(--border, rgba(255,255,255,.06));
+  padding-bottom: 2px;
+}
+.acc-table .acc-subhead th {
+  border-bottom: 1px solid var(--border, rgba(255,255,255,.10));
+  padding-top: 0;
+  font-size: 10px;
+}
+.acc-table .acc-subhead th:nth-child(2),
+.acc-table tbody td:nth-child(2) {
+  border-left: 1px solid var(--border, rgba(255,255,255,.06));
+}
+.acc-table .acc-subhead th:nth-child(5),
+.acc-table tbody td:nth-child(5) {
+  border-left: 1px solid var(--border, rgba(255,255,255,.06));
+}
+.acc-table tbody td.acc-err-good   { color: #4ade80; }
+.acc-table tbody td.acc-err-warn   { color: #facc15; }
+.acc-table tbody td.acc-err-bad    { color: #f87171; }
+.acc-table tbody td.acc-missing    { color: var(--text-dim); }
+
+/* Three-up summary row above the daily-accuracy table: per-phase MAE
+   plus an overall hit-rate score for the selected window. */
+.acc-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 0 0 14px 0;
+}
+.acc-summary-tile {
+  background: var(--surface-2, rgba(255,255,255,.03));
+  border: 1px solid var(--border, rgba(255,255,255,.06));
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.acc-summary-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 4px;
+}
+.acc-summary-value {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono, monospace);
+}
+.acc-summary-value small {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-left: 4px;
+  font-weight: 400;
+  font-family: var(--font-sans, sans-serif);
+}
+.acc-summary-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+@media (max-width: 600px) {
+  .acc-summary { grid-template-columns: 1fr; }
+}
