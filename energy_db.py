@@ -895,7 +895,7 @@ class EnergyDB:
             rows = c.execute(
                 """SELECT d.decided_at, d.action, d.executed,
                           d.predicted_sunrise_soc_pct, d.target_sunrise_soc_pct,
-                          d.sunrise_ts,
+                          d.sunrise_ts, d.mode, d.reason,
                           (SELECT AVG(s.last_battery_pct)
                              FROM samples s
                             WHERE s.device_sn = d.device_sn
@@ -912,13 +912,13 @@ class EnergyDB:
             ).fetchall()
             # Reuse the same bulk-pack helper as prediction_accuracy:
             # masquerade rows as (made_at, target, predicted, main_soc).
-            shaped = [(r[0], r[5], r[3], r[6]) for r in rows]
+            shaped = [(r[0], r[5], r[3], r[8]) for r in rows]
             packs_by_ts, ts_sorted = self._packs_in_target_range(
                 c, device_sn, shaped, main_capacity_wh, pack_capacity_wh,
             )
         out: list[dict] = []
         for r in rows:
-            main_soc = r[6]
+            main_soc = r[8]
             if main_soc is None:
                 continue
             actual = _capacity_weighted_soc(
@@ -931,6 +931,8 @@ class EnergyDB:
                 "predicted_sunrise_soc_pct": r[3],
                 "target_sunrise_soc_pct": r[4],
                 "sunrise_ts": r[5],
+                "mode": r[6],
+                "reason": r[7],
                 "actual_sunrise_soc_pct": actual,
                 "prediction_error_pp": round(actual - float(r[3]), 1)
                                         if r[3] is not None else None,

@@ -80,6 +80,46 @@ def test_prediction_accuracy_excludes_future_targets(db):
     assert out == []
 
 
+def test_smart_charge_analytics_includes_mode_and_reason(db):
+    """The DB persists `mode` + `reason` on every decision, but the
+    analytics SELECT was missing them — so the advisor's decisions
+    table showed mode=None and reason=None on every row, hiding
+    whether OFF was a 'pred>target skip' vs a 'test mode skip' vs
+    anything else. Confirmed by advisor flag on 2026-05-05T15:50."""
+    sn = "SN-DECISIONS"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    now = int(time.time())
+    sunrise = now - 86400  # yesterday's sunrise (in the past)
+
+    db.record_smart_charge_decision(
+        device_sn=sn,
+        plan={
+            "decided_at": sunrise - 3600,
+            "mode": "test",
+            "action": "off",
+            "reason": "predicted SOC 60% >= target 35%; coasting",
+            "current_soc_pct": 65.0,
+            "predicted_sunrise_soc_pct": 60.0,
+            "target_sunrise_soc_pct": 35.0,
+            "sunrise_ts": sunrise,
+        },
+        executed=False,
+    )
+    # Need an actual SOC reading near sunrise so the analytics row is
+    # included (it gates on main_soc IS NOT NULL).
+    db.record(sn, sunrise - 60, input_w=0, output_w=0,
+              battery_pct=58, solar_w=0)
+    db.record(sn, sunrise + 60, input_w=0, output_w=0,
+              battery_pct=58, solar_w=0)
+
+    rows = db.smart_charge_analytics(sn, days=2)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["mode"] == "test"
+    assert row["action"] == "off"
+    assert "coasting" in row["reason"]
+
+
 def test_prediction_accuracy_capacity_weights_actual_soc(db):
     """When capacity hints are passed, the actual SOC is the capacity-
     weighted system SOC (main + packs at target ts), so it can be compared
