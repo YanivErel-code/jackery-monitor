@@ -91,14 +91,14 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # The /api/forecast/accuracy endpoint exposes a "post-fix" summary using
 # this as a `made_at` floor so the dashboard headline reflects current
 # model behavior instead of being dragged down by stale rows that age
-# out over 14 days. Most recent bump: actual_soc is now system-weighted
-# (capacity-weighted main + packs) to match predicted_soc, closing the
-# main-vs-system measurement asymmetry that was inflating long-lead MAE
-# whenever main and packs ran out of balance.
+# out over 14 days. Most recent bump: drain model is now hybrid
+# (parasitic_w baseline + percentage of throughput) instead of
+# pure-percentage, so the 200-500W constant draw on multi-pack rigs
+# the advisor flagged as "unaccounted gap" is captured directly.
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777906866")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777949981")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -1208,7 +1208,11 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
     elif key == "inverter_overhead_pct":
         try:
             cap = _resolved_capacity_wh(device_sn)
-            pct, n = forecaster.fit_inverter_overhead_pct(
+            # Use the joint drain-model fit so the percentage and the
+            # parasitic baseline come from the same regression — the
+            # standalone percentage fit systematically overestimates
+            # overhead on devices with significant constant draw.
+            _parasitic_w, pct, n = forecaster.fit_drain_model(
                 _cached_history(device_sn), cap,
             )
             source = "fit" if n >= 5 else "default"
@@ -1217,6 +1221,22 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
                 confidence=("high" if n >= 20 else "medium" if n >= 10 else "low"),
             )
             return {"value": pct, "source": source, "n_samples": n,
+                    "updated_at": int(time.time())}
+        except Exception as e:
+            log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
+
+    elif key == "parasitic_w":
+        try:
+            cap = _resolved_capacity_wh(device_sn)
+            parasitic, _pct, n = forecaster.fit_drain_model(
+                _cached_history(device_sn), cap,
+            )
+            source = "fit" if n >= 5 else "default"
+            state.energy.set_device_param(
+                device_sn, key, parasitic, source=source, n_samples=n,
+                confidence=("high" if n >= 20 else "medium" if n >= 10 else "low"),
+            )
+            return {"value": parasitic, "source": source, "n_samples": n,
                     "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
@@ -1584,18 +1604,21 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
 
     cfg = smart_charge.get_config(device_sn)
 
-    # Per-device fitted parasitic overhead — let Claude see the value
-    # it's currently using and how many windows it was fit from. Cheap:
-    # uses the same hourly buckets the forecaster does.
-    fitted_overhead_w: float | None = None
-    fitted_overhead_n: int = 0
+    # Per-device fitted drain coefficients — let Claude see what the
+    # simulator is actually using. Hybrid model:
+    #   drain_w = parasitic_w + load_w * (1 + inverter_overhead_pct)
+    # Both surfaced; advisor should reason about them together when
+    # diagnosing load-accuracy gaps.
+    fitted_parasitic_w: float | None = None
+    fitted_overhead_pct: float | None = None
+    fitted_drain_n: int = 0
     try:
         ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
-        fitted_overhead_w, fitted_overhead_n = forecaster.fit_idle_overhead_w(
-            ehist, capacity,
+        fitted_parasitic_w, fitted_overhead_pct, fitted_drain_n = (
+            forecaster.fit_drain_model(ehist, capacity)
         )
     except Exception as e:
-        log.debug("advisor: idle_overhead fit failed: %s", e)
+        log.debug("advisor: drain model fit failed: %s", e)
 
     main_wh = forecaster.battery_capacity_wh(model_code)
     pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
@@ -1715,9 +1738,19 @@ async def _build_advisor_bundle(device_sn: str) -> dict:
         "main_soc_pct": main_soc,
         "system_soc_pct": round(sys_soc, 1) if sys_soc is not None else None,
         "smart_charge_config": cfg,
-        "fitted_idle_overhead_w": (round(fitted_overhead_w, 1)
-                                   if fitted_overhead_w is not None else None),
-        "fitted_idle_overhead_n_windows": fitted_overhead_n,
+        # Hybrid drain model: surface both terms so the advisor can
+        # reason about parasitic baseline vs throughput-scaled overhead
+        # separately. `fitted_idle_overhead_w` keeps its old name for
+        # back-compat in the narrator/UI but now holds the parasitic_w
+        # term directly (the right interpretation all along).
+        "fitted_parasitic_w": (round(fitted_parasitic_w, 1)
+                               if fitted_parasitic_w is not None else None),
+        "fitted_inverter_overhead_pct": (round(fitted_overhead_pct, 4)
+                                         if fitted_overhead_pct is not None else None),
+        "fitted_drain_n_windows": fitted_drain_n,
+        "fitted_idle_overhead_w": (round(fitted_parasitic_w, 1)
+                                   if fitted_parasitic_w is not None else None),
+        "fitted_idle_overhead_n_windows": fitted_drain_n,
         "forecast_accuracy_summary": accuracy_summary,
         "recent_samples": recent_samples,
         "recent_weather": recent_weather,
@@ -1851,6 +1884,29 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "fresh predictions accumulate; if long-lead MAE doesn't "
                 "improve, the residual is a real solar/load-model "
                 "defect, not the asymmetry."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-05T03:00:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Drain model switched from pure-percentage to hybrid: "
+                "drain_w = parasitic_w + load_w * (1 + overhead_pct), "
+                "fit jointly via 2-param OLS on (load, drain) pairs. "
+                "Closes the 'unaccounted ~430W gap' you flagged on "
+                "2026-05-04 02:00→12:00 (and similar on 5/3 overnight): "
+                "BMS + idle inverter + pack-balancing on multi-pack "
+                "rigs is a near-constant baseline that the previous "
+                "percentage-only model couldn't represent — its 50% "
+                "overhead clamp rejected exactly the windows where "
+                "this baseline showed up, falling back to the 10% "
+                "default. The bundle now exposes `parasitic_w` "
+                "alongside `inverter_overhead_pct`; reason about the "
+                "two together when evaluating load accuracy. The legacy "
+                "`idle_overhead_w` field now holds parasitic_w directly "
+                "(it always meant absolute watts; only the fit was "
+                "wrong). User confirmed no DC loads (USB/12V/car port) "
+                "so the gap is genuine parasitic, not unmeasured load."
             ),
         },
     ]

@@ -228,6 +228,11 @@ DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
         "unit": "ratio",
         "description": "Fraction of throughput lost as heat in DC→AC conversion. 0.10 (10%) is typical for modern LiFePO4 inverters.",
     },
+    "parasitic_w": {
+        "label": "Parasitic baseline",
+        "unit": "W",
+        "description": "Constant draw that doesn't scale with AC throughput — BMS, idle inverter, pack-balancing, DC-bus losses. 50W is typical for single-unit setups; multi-pack rigs commonly fit 200-500W.",
+    },
     "charge_efficiency": {
         "label": "Charge efficiency",
         "unit": "ratio",

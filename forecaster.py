@@ -118,6 +118,14 @@ INVERTER_OVERHEAD_PCT = DEFAULT_INVERTER_OVERHEAD_PCT
 DEFAULT_IDLE_OVERHEAD_W = 50.0  # was 200 (flat); now 10pct of 500W typical
 IDLE_OVERHEAD_W = DEFAULT_IDLE_OVERHEAD_W
 
+# Constant parasitic baseline (W). Captures BMS, idle inverter, pack-balancing
+# current, DC-bus draw, and any other steady-state load that doesn't scale
+# with AC throughput. Fit per-device by `fit_drain_model`; the default is a
+# conservative "small backup unit" baseline. For multi-pack rigs the fitted
+# value is typically 200-500W (advisor flagged a 430W gap on the user's
+# 5000+ on 2026-05-04 that the pure-percentage model couldn't represent).
+DEFAULT_PARASITIC_W = 50.0
+
 # Cutoff for "recent" samples in load-profile recency weighting (seconds).
 # Variable buckets (high IQR / median) weight samples newer than this 70%
 # vs older 30%, so recent behavior shifts dominate without throwing away
@@ -345,6 +353,97 @@ def fit_inverter_overhead_pct(
     if median < 0.0 or median > 0.50:
         return float(default), len(pcts)
     return float(median), len(pcts)
+
+
+def fit_drain_model(
+    energy_history: list[dict[str, Any]],
+    capacity_wh: int,
+    *,
+    default_parasitic_w: float = DEFAULT_PARASITIC_W,
+    default_overhead_pct: float = DEFAULT_INVERTER_OVERHEAD_PCT,
+    min_windows: int = 5,
+) -> tuple[float, float, int]:
+    """Joint 2-parameter fit of the drain model::
+
+        drain_w ≈ parasitic_w + load_w * (1 + overhead_pct)
+
+    The pure-percentage model (`fit_inverter_overhead_pct`) systematically
+    misses the steady-state baseline draw — BMS, idle inverter, pack
+    balancing current, DC-bus losses. For multi-pack setups that
+    baseline can be 200-500W and is too large to absorb into a
+    "percentage of throughput" framing without the fit's 50% sanity
+    clamp rejecting every window. The advisor flagged a 430W
+    unaccounted gap on the user's 5000+ on 2026-05-04 that boiled down
+    to exactly this model limitation.
+
+    Returns ``(parasitic_w, overhead_pct, n_windows)``. Falls back to
+    ``(default_parasitic_w, default_overhead_pct, n)`` when the fit
+    can't converge or produces implausible coefficients (negative
+    parasitic, >1000W parasitic, negative overhead, >50% overhead).
+
+    Window-selection gates mirror `fit_inverter_overhead_pct` exactly;
+    keep them in sync with `diagnose_idle_windows` if you change either.
+    """
+    SOLAR_NOISE_WH = 50.0
+    AC_NOISE_WH = 50.0
+    MIN_OUT_W = 50.0
+
+    rows = sorted(
+        (r for r in (energy_history or []) if r.get("ts") is not None),
+        key=lambda r: r["ts"],
+    )
+    pairs: list[tuple[float, float]] = []
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
+        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        if soc_a is None or soc_b is None:
+            continue
+        soc_drop = soc_a - soc_b
+        if soc_drop < INVERTER_FIT_MIN_SOC_DROP_PCT:
+            continue
+        if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
+            continue
+        if (a.get("ac_input_wh") or 0) > AC_NOISE_WH:
+            continue
+        dt_h = (b["ts"] - a["ts"]) / 3600.0
+        if dt_h < 0.5 or dt_h > 6.0:
+            continue
+        observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
+        reported_load_w = (a.get("output_wh") or 0) / dt_h
+        if reported_load_w < MIN_OUT_W:
+            continue
+        pairs.append((reported_load_w, observed_drain_w))
+
+    n = len(pairs)
+    if n < min_windows:
+        return float(default_parasitic_w), float(default_overhead_pct), n
+
+    # Ordinary least-squares: y = a + b * x where y=drain_w, x=load_w.
+    # parasitic_w = a, overhead_pct = b - 1.
+    sum_x = sum(x for x, _ in pairs)
+    sum_y = sum(y for _, y in pairs)
+    sum_xy = sum(x * y for x, y in pairs)
+    sum_xx = sum(x * x for x, _ in pairs)
+    denom = n * sum_xx - sum_x * sum_x
+    if denom <= 0:
+        # Degenerate: all loads identical, can't separate intercept from slope.
+        return float(default_parasitic_w), float(default_overhead_pct), n
+    b_coef = (n * sum_xy - sum_x * sum_y) / denom
+    a_coef = (sum_y - b_coef * sum_x) / n
+
+    parasitic_w = a_coef
+    overhead_pct = b_coef - 1.0
+
+    # Plausibility clamps — fall back to defaults when either coefficient
+    # leaves the physically-reasonable band. Negative parasitic implies the
+    # battery gains energy at idle; >1000W on a single device is a sensor
+    # fault; >50% overhead is a measurement-error band per the original
+    # percentage-model rationale.
+    if parasitic_w < 0 or parasitic_w > 1000:
+        return float(default_parasitic_w), float(default_overhead_pct), n
+    if overhead_pct < 0 or overhead_pct > 0.50:
+        return float(default_parasitic_w), float(default_overhead_pct), n
+    return float(parasitic_w), float(overhead_pct), n
 
 
 def diagnose_idle_windows(
@@ -959,11 +1058,13 @@ def build_forecast(
 
     k, n_fit = fit_solar_coefficient(energy_history, weather_hourly)
     profile = fit_load_profile(energy_history, now_ts=now_ts)
-    # Per-device inverter overhead as a percentage of throughput
-    # (modern inverters lose ~10% to heat in DC→AC conversion).
-    # Fit from the user's own discharge history; falls back to 10%
-    # default during the first ~24h of operation.
-    overhead_pct, overhead_n = fit_inverter_overhead_pct(
+    # Per-device drain model: parasitic baseline (W) + percentage of
+    # throughput. The parasitic term captures BMS, idle inverter, pack
+    # balancing, and any unmeasured DC bus draw — pieces the
+    # pure-percentage model couldn't represent and which the advisor
+    # consistently flagged as an "unaccounted gap" on multi-pack rigs
+    # (e.g. 430W on the user's 5000+ on 2026-05-04).
+    parasitic_w, overhead_pct, overhead_n = fit_drain_model(
         energy_history, capacity_wh,
     )
     # Per-device charge efficiency, same idea: fit from the ratio of
@@ -1014,7 +1115,9 @@ def build_forecast(
         if solar_cap is not None and solar_w > solar_cap:
             solar_w = solar_cap
             capped = True
-        load_w = expected_load_w(profile, ts, inverter_overhead_pct=overhead_pct)
+        load_w = expected_load_w(profile, ts,
+                                  idle_overhead_w=parasitic_w,
+                                  inverter_overhead_pct=overhead_pct)
         forecast_hours.append({
             "ts": ts,
             "solar_w": round(solar_w, 1),
@@ -1057,14 +1160,19 @@ def build_forecast(
         # load profile, replacing the old 2*mean heuristic that biased
         # busy-hour predictions upward.
         "output_w_p95": round(out_p95, 1),
-        # Auto-fitted per-device inverter overhead as a fraction of
-        # throughput. _n reports how many clean discharge windows the
-        # fit used — when small, value is the 10% default.
+        # Hybrid drain model: parasitic_w (constant baseline) +
+        # base_load * (1 + inverter_overhead_pct). _n reports how many
+        # clean discharge windows fed the joint fit — when small, both
+        # values are population defaults (50W parasitic, 10% overhead).
+        "parasitic_w": round(parasitic_w, 1),
         "inverter_overhead_pct": round(overhead_pct, 4),
         "inverter_overhead_n_windows": overhead_n,
         "inverter_overhead_source": overhead_source,
-        # Back-compat: report watt-equivalent at typical 500W load too.
-        "idle_overhead_w": round(overhead_pct * 500.0, 1),
+        # Back-compat: legacy clients read `idle_overhead_w` expecting an
+        # absolute watt figure. Surface the fitted parasitic_w directly
+        # under that name (it's now the right interpretation), and keep
+        # _n_windows wired to the same fit count.
+        "idle_overhead_w": round(parasitic_w, 1),
         "idle_overhead_n_windows": overhead_n,
         # Auto-fitted per-device charge efficiency (input_wh → stored_wh
         # ratio). Same n_windows convention as idle_overhead.

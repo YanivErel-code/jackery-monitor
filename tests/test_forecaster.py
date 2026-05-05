@@ -628,6 +628,82 @@ def test_inverter_overhead_pct_falls_back_when_ratios_are_negative():
     assert pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
 
+def test_fit_drain_model_recovers_parasitic_and_overhead():
+    """Synthesize history where the true drain follows
+       drain = 300 + load * 1.10
+    (300W constant baseline + 10% throughput overhead). The pure-
+    percentage model would compute pct = (drain - load) / load which
+    explodes for low loads — this hybrid fit recovers both terms."""
+    base = 1_700_000_000
+    history = []
+    # 12 clean discharge windows at varying loads. drain in W; on a
+    # 30000Wh capacity, drain*1h corresponds to drain/300 pp drop.
+    # Make sure soc_drop >= 2pp.
+    for i, load_w in enumerate([200, 400, 600, 800, 1000, 1200,
+                                 200, 500, 700, 900, 1100, 1300]):
+        true_drain = 300 + load_w * 1.10
+        # 1h windows. pp_drop = drain / capacity * 100.
+        pp_drop = true_drain / 30000 * 100  # ~2-5pp
+        soc0 = 80 - i * 6
+        soc1 = round(soc0 - pp_drop, 0)  # cloud quantizes to 1pp
+        history.append({"ts": base + i * 3 * 3600,
+                        "battery_pct": soc0,
+                        "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": base + i * 3 * 3600 + 3600,
+                        "battery_pct": int(soc1),
+                        "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+    parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    assert n >= 5
+    # Quantization noise on 1pp SOC steps loosens the fit; require
+    # rough recovery, not exact match.
+    assert 200 <= parasitic_w <= 400, f"got parasitic_w={parasitic_w}"
+    assert 0.05 <= overhead_pct <= 0.20, f"got pct={overhead_pct}"
+
+
+def test_fit_drain_model_falls_back_when_too_few_windows():
+    """Single qualifying window is not enough — defaults are returned
+    so callers don't blindly trust a one-shot fit."""
+    history = _discharge_window(1_700_000_000, 80, 78, out_w=545)
+    parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    assert n == 1
+    assert parasitic_w == forecaster.DEFAULT_PARASITIC_W
+    assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
+
+
+def test_fit_drain_model_falls_back_on_implausible_coefficients():
+    """If the OLS produces a negative parasitic (e.g. all windows have
+    drain < load * 1.0), fall back to defaults rather than emit a value
+    that says the battery gains energy at idle."""
+    base = 1_700_000_000
+    history = []
+    # 8 windows with drain consistently BELOW load (sensor over-reads
+    # or hidden charging). Makes OLS regress to negative intercept.
+    for i, load_w in enumerate([1000, 1200, 1400, 1600, 1800,
+                                 1000, 1300, 1500]):
+        # Force soc_drop < load * 1h / capacity, so drain < load.
+        pp_drop = max(2, int((load_w * 0.6) / 30000 * 100))
+        history.append({"ts": base + i * 3 * 3600,
+                        "battery_pct": 80,
+                        "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": base + i * 3 * 3600 + 3600,
+                        "battery_pct": 80 - pp_drop,
+                        "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+    parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    assert n >= 5
+    assert parasitic_w == forecaster.DEFAULT_PARASITIC_W
+    assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
+
+
 def test_diagnose_idle_windows_classifies_each_rejection():
     """Continuous timeline of 9 hourly buckets, each adjacent pair
     constructed to hit a specific rejection cause (or qualify). Verifies

@@ -180,18 +180,24 @@ def _format_starter_bundle(bundle: dict) -> str:
         lines.append(f"- {k}: {v}")
     lines.append("")
 
-    overhead_w = bundle.get("fitted_idle_overhead_w")
-    overhead_n = bundle.get("fitted_idle_overhead_n_windows", 0)
-    if overhead_w is not None:
-        lines.append("## Auto-fitted parasitic overhead")
+    parasitic_w = bundle.get("fitted_parasitic_w")
+    overhead_pct = bundle.get("fitted_inverter_overhead_pct")
+    drain_n = bundle.get("fitted_drain_n_windows", 0)
+    if parasitic_w is not None or overhead_pct is not None:
+        lines.append("## Auto-fitted drain model")
         lines.append(
-            f"- idle_overhead_w (used in load model): {overhead_w} W "
-            f"(fit from {overhead_n} clean discharge windows)"
+            "- model: drain_w = parasitic_w + load_w * (1 + inverter_overhead_pct)"
         )
-        if overhead_n < 5:
-            lines.append("  ⚠ Few windows — value is still the population "
-                         "default. Wait until more discharge data accumulates "
-                         "before flagging it as wrong.")
+        if parasitic_w is not None:
+            lines.append(f"- parasitic_w: {parasitic_w} W (constant baseline)")
+        if overhead_pct is not None:
+            lines.append(f"- inverter_overhead_pct: {overhead_pct} "
+                         f"(throughput multiplier)")
+        lines.append(f"- fit windows: {drain_n}")
+        if drain_n < 5:
+            lines.append("  ⚠ Few windows — both values are still population "
+                         "defaults. Wait until more discharge data accumulates "
+                         "before flagging them as wrong.")
         lines.append("")
 
     # Recent code changes that re-define what historical data means.
