@@ -3339,10 +3339,11 @@ def api_alg_suggestion_dismiss(suggestion_id: int):
 
 @app.get("/api/algorithm/preview")
 async def api_alg_preview(device_sn: str | None = None):
-    """Return the exact text bundle the advisor sends to Claude — minus
-    the system prompt and the tool schema. Used by the UI's "Show what
-    Claude sees" button so the user can verify the data flow without
-    burning an API call."""
+    """Return the exact starter bundle the advisor sends to Claude as
+    its opening user message — minus the system prompt and the tool
+    schema. Claude follows up with DB query tools, but this is the
+    initial context. Used by the UI's "Show what Claude sees" button
+    so the user can verify the data flow without burning an API call."""
     import claude_advisor
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
@@ -3351,7 +3352,7 @@ async def api_alg_preview(device_sn: str | None = None):
     bundle = await _build_advisor_bundle(device_sn)
     return {
         "device_sn": device_sn,
-        "rendered": claude_advisor._format_data_bundle(bundle),
+        "rendered": claude_advisor._format_starter_bundle(bundle),
         "model": claude_advisor.MODEL,
         "thinking_budget": claude_advisor.THINKING_BUDGET,
         "raw_bundle": bundle,
