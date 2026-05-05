@@ -151,3 +151,27 @@ def test_update_timezone_preserves_label(tmp_path, monkeypatch):
     assert got["label"] == "San Jose, California, US"
     assert got["utc_offset_seconds"] == -25200
     assert got["timezone"] == "America/Los_Angeles"
+
+
+def test_set_label_backfills_existing_record(tmp_path, monkeypatch):
+    """Lazy-fill path: a record saved without a label gets one stamped
+    on later (e.g. after a successful reverse-geocode call)."""
+    loc = _fresh_location(monkeypatch, tmp_path)
+    loc.set(37.2232, -121.8809)  # no label
+    assert loc.get().get("label") is None
+    assert loc.set_label("Almaden Valley") is True
+    assert loc.get()["label"] == "Almaden Valley"
+    # Coords preserved through the label update.
+    assert abs(loc.get()["latitude"] - 37.2232) < 1e-6
+
+
+def test_set_label_rejects_empty_or_unset_record(tmp_path, monkeypatch):
+    loc = _fresh_location(monkeypatch, tmp_path)
+    # No record yet — can't backfill.
+    assert loc.set_label("Anywhere") is False
+    loc.set(37.0, -121.0)
+    # Empty / non-string labels are dropped.
+    assert loc.set_label("") is False
+    assert loc.set_label("   ") is False
+    assert loc.set_label(None) is False  # type: ignore[arg-type]
+    assert loc.get().get("label") is None
