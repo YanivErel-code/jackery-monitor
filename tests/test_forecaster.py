@@ -664,6 +664,41 @@ def test_fit_drain_model_recovers_parasitic_and_overhead():
     assert 0.05 <= overhead_pct <= 0.20, f"got pct={overhead_pct}"
 
 
+def test_fit_drain_model_uses_parasitic_only_fallback_for_narrow_loads():
+    """Replicates the user's overnight pattern flagged by the advisor on
+    2026-05-05: steady ~470W load, true parasitic ~415W. With loads
+    nearly identical across windows, the joint OLS is ill-conditioned
+    and the original code collapsed to the (50W, 0.10) prior. The
+    parasitic-only fallback should recover ~415W instead."""
+    base = 1_700_000_000
+    # Continuous 9-hour timeline, SOC drops 3pp/hour at ~470W steady load.
+    # True drain = 415 + 470*1.10 = 932W ≈ 3.1pp/h on 30000Wh; quantized
+    # to 3pp gives observed drain = 900W → implied parasitic = 900 -
+    # 470*1.10 ≈ 383W. Loads alternate 465/475 to make the median
+    # non-degenerate but stay well within the 2x narrow-load gate.
+    history = []
+    soc = 90
+    for h in range(9):
+        load_w = 465 if h % 2 == 0 else 475
+        history.append({
+            "ts": base + h * 3600,
+            "battery_pct": soc,
+            "output_wh": load_w,
+            "solar_wh": 0, "ac_input_wh": 0,
+        })
+        soc -= 3
+
+    parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    assert n >= 5
+    # Parasitic-only fallback fires; overhead pinned at default.
+    assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
+    # Quantization loosens the fit; require rough recovery near ~383W
+    # (the true 415W minus ~32W loss to integer-pp SOC steps).
+    assert 350 <= parasitic_w <= 450, f"got parasitic_w={parasitic_w}"
+
+
 def test_fit_drain_model_falls_back_when_too_few_windows():
     """Single qualifying window is not enough — defaults are returned
     so callers don't blindly trust a one-shot fit."""

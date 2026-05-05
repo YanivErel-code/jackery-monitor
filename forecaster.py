@@ -126,6 +126,16 @@ IDLE_OVERHEAD_W = DEFAULT_IDLE_OVERHEAD_W
 # 5000+ on 2026-05-04 that the pure-percentage model couldn't represent).
 DEFAULT_PARASITIC_W = 50.0
 
+# Minimum max/min load ratio to trust the joint OLS fit of (parasitic_w,
+# overhead_pct). When loads are narrow — e.g. a device that runs the same
+# steady ~470W every night — the (load, drain) regressor pair is nearly
+# collinear and OLS can't separate intercept from slope, so the fit
+# silently collapses into the priors. Below this ratio we fall back to
+# a parasitic-only fit (overhead pinned at default). Advisor diagnosed
+# the collapse on 2026-05-05: the deployed joint fit returned exactly
+# (50W, 0.10) when the real values were ~(415W, 0.10).
+MIN_LOAD_RANGE_FOR_JOINT_FIT = 2.0
+
 # Cutoff for "recent" samples in load-profile recency weighting (seconds).
 # Variable buckets (high IQR / median) weight samples newer than this 70%
 # vs older 30%, so recent behavior shifts dominate without throwing away
@@ -381,6 +391,15 @@ def fit_drain_model(
     can't converge or produces implausible coefficients (negative
     parasitic, >1000W parasitic, negative overhead, >50% overhead).
 
+    When the user's load distribution is narrow (max/min ratio below
+    `MIN_LOAD_RANGE_FOR_JOINT_FIT`), the joint OLS regression is
+    ill-conditioned — the (load, drain) pairs are nearly collinear and
+    the solver collapses to the priors. In that case we pin
+    `overhead_pct` at the default and fit `parasitic_w` alone via the
+    median of `drain_i - load_i * (1 + default_pct)` per window. This
+    is what the advisor flagged on 2026-05-05 after we shipped the
+    initial joint fit.
+
     Window-selection gates mirror `fit_inverter_overhead_pct` exactly;
     keep them in sync with `diagnose_idle_windows` if you change either.
     """
@@ -418,6 +437,23 @@ def fit_drain_model(
     if n < min_windows:
         return float(default_parasitic_w), float(default_overhead_pct), n
 
+    loads = [p[0] for p in pairs]
+    load_min = min(loads)
+    load_max = max(loads)
+    load_range_ratio = (load_max / load_min) if load_min > 0 else 1.0
+
+    # Narrow-load fallback: see MIN_LOAD_RANGE_FOR_JOINT_FIT comment.
+    # Pin overhead at the default and solve `parasitic_w = drain - load *
+    # (1 + default_pct)` per window, take the median for robustness.
+    if load_range_ratio < MIN_LOAD_RANGE_FOR_JOINT_FIT:
+        implied_parasitics = sorted(
+            d - load * (1.0 + default_overhead_pct) for load, d in pairs
+        )
+        parasitic_w = implied_parasitics[len(implied_parasitics) // 2]
+        if parasitic_w < 0 or parasitic_w > 1000:
+            return float(default_parasitic_w), float(default_overhead_pct), n
+        return float(parasitic_w), float(default_overhead_pct), n
+
     # Ordinary least-squares: y = a + b * x where y=drain_w, x=load_w.
     # parasitic_w = a, overhead_pct = b - 1.
     sum_x = sum(x for x, _ in pairs)
@@ -426,7 +462,8 @@ def fit_drain_model(
     sum_xx = sum(x * x for x, _ in pairs)
     denom = n * sum_xx - sum_x * sum_x
     if denom <= 0:
-        # Degenerate: all loads identical, can't separate intercept from slope.
+        # Degenerate: all loads identical (defensive — the load-range
+        # gate above should already catch this).
         return float(default_parasitic_w), float(default_overhead_pct), n
     b_coef = (n * sum_xy - sum_x * sum_y) / denom
     a_coef = (sum_y - b_coef * sum_x) / n

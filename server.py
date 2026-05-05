@@ -98,7 +98,7 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777949981")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777952684")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -1907,6 +1907,23 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "(it always meant absolute watts; only the fit was "
                 "wrong). User confirmed no DC loads (USB/12V/car port) "
                 "so the gap is genuine parasitic, not unmeasured load."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-05T03:45:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Followup on the hybrid drain fit: you correctly "
+                "flagged 03:13 that the OLS collapsed to (50W, 0.10) "
+                "priors when the user's load distribution is narrow "
+                "(steady ~470W overnight). Added a load-range gate "
+                "(MIN_LOAD_RANGE_FOR_JOINT_FIT=2.0): when max/min "
+                "load < 2x, fall back to a parasitic-only fit with "
+                "overhead pinned at the default — solve "
+                "parasitic_w = drain - load * (1 + default_pct) per "
+                "window, take the median. For the user's 5000+ this "
+                "should now recover parasitic_w ≈ 380-420W instead "
+                "of the 50W default."
             ),
         },
     ]
