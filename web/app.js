@@ -4458,6 +4458,11 @@ async function fetchForecast() {
       }
     }
     drawForecastChart(j);
+    // Today's energy budget breakdown — same data as the chart, but
+    // walks the simulator math from now to sunset so the user can
+    // verify how SOC_now becomes SOC_sunset. Pure transform of `j`,
+    // no extra fetch.
+    renderTodayEnergyBudget(j);
     // Daily sunset/sunrise pred-vs-actual table + MAE summary. Independent
     // of the main forecast — own /api/daily_summary fetch with a user-
     // controlled window. Render is fire-and-forget; failures shouldn't
@@ -4465,6 +4470,122 @@ async function fetchForecast() {
     renderDailyAccuracy().catch((err) =>
       console.warn('daily accuracy render failed', err));
   } catch (e) { console.warn('forecast fetch failed', e); }
+}
+
+// ============================================================
+// Today's energy budget — narrative breakdown of the forecast.
+// Walks from now to the last solar hour, summing solar + load,
+// and replaying the simulator's per-hour math (charge_efficiency
+// applied only to net-positive hours). load_w in the forecast
+// already includes parasitic + inverter overhead.
+// ============================================================
+function renderTodayEnergyBudget(j) {
+  const card = $('today-budget-card');
+  if (!card) return;
+  const fc = j?.forecast || [];
+  const empty = $('today-budget-empty');
+  const table = $('today-budget-table');
+  const summary = $('today-budget-summary');
+  if (!fc.length || !j.ready) {
+    card.hidden = false;
+    if (empty) empty.hidden = false;
+    if (table) table.hidden = true;
+    if (summary) summary.textContent = '—';
+    return;
+  }
+  // Find the window from now to the last solar hour. fc[0] is the
+  // first hour ahead. Walk to the first non-solar hour after dawn;
+  // the index just before is the last daylight hour ("sunset" in
+  // the EOD-pill sense).
+  let i = 0;
+  // Skip any leading non-solar (we're in the dark part of today
+  // already — happens at night).
+  while (i < fc.length && (fc[i].solar_w || 0) <= 0) i++;
+  // Walk through the daylight band.
+  const dawnIdx = i;
+  while (i < fc.length && (fc[i].solar_w || 0) > 0) i++;
+  // dawnIdx..i-1 inclusive is today's daylight band.
+  if (i <= dawnIdx) {
+    card.hidden = false;
+    if (empty) empty.hidden = false;
+    if (table) table.hidden = true;
+    if (summary) summary.textContent = 'After sunset — open tomorrow';
+    return;
+  }
+  // The "starting SOC" for the walk is whatever the simulator was at
+  // before the first hour in our window. fc[dawnIdx-1].predicted_soc
+  // if there's a prior hour, else j.starting_soc_pct.
+  const socStart = dawnIdx > 0
+    ? fc[dawnIdx - 1].predicted_soc
+    : j.starting_soc_pct;
+  const window = fc.slice(dawnIdx, i);
+  const eff = Number(j.charge_efficiency ?? 0.85);
+  const cap = Number(j.capacity_wh ?? 30240);
+  let solarWh = 0;
+  let loadWh = 0;
+  let storedWh = 0;
+  const rows = window.map((h, idx) => {
+    const solar = Number(h.solar_w ?? 0);
+    const load = Number(h.load_w ?? 0);
+    const net = solar - load;
+    const effNet = net > 0 ? net * eff : net;
+    solarWh += solar;
+    loadWh += load;
+    storedWh += effNet;
+    const dpp = effNet / cap * 100;
+    return {
+      h: new Date(h.ts * 1000).toLocaleTimeString([], {hour: 'numeric'}),
+      solar: Math.round(solar),
+      load: Math.round(load),
+      net: Math.round(net),
+      dpp,
+      soc: h.predicted_soc,
+    };
+  });
+  const socEnd = window[window.length - 1].predicted_soc;
+
+  card.hidden = false;
+  if (empty) empty.hidden = true;
+  if (table) table.hidden = false;
+
+  // Header summary collapsed-state hint: "16 → 40% · 20.2 kWh in"
+  if (summary) {
+    summary.textContent =
+      `${Math.round(socStart)} → ${Math.round(socEnd)}% · `
+      + `${(solarWh / 1000).toFixed(1)} kWh solar`;
+  }
+
+  const fmt1 = (n) => (Math.round(n * 10) / 10).toFixed(1);
+  const setText = (id, txt) => {
+    const el = $(id);
+    if (el) el.textContent = txt;
+  };
+  setText('tb-eff', eff.toFixed(2));
+  setText('tb-solar-kwh', fmt1(solarWh / 1000));
+  setText('tb-solar-sub', `${rows.length} h, peak ${Math.round(Math.max(...rows.map(r => r.solar)))} W`);
+  setText('tb-load-kwh', fmt1(loadWh / 1000));
+  setText('tb-load-sub', `avg ${Math.round(loadWh / rows.length)} W`);
+  setText('tb-net-kwh', fmt1(storedWh / 1000));
+  setText('tb-net-sub',
+    `${(socEnd - socStart >= 0 ? '+' : '')}${(socEnd - socStart).toFixed(1)} pp `
+    + `(loss: ${fmt1((solarWh - loadWh - storedWh) / 1000)} kWh)`);
+
+  const tbody = $('today-budget-tbody');
+  if (tbody) {
+    tbody.innerHTML = rows.map((r) => {
+      const netCls = r.net > 0 ? 'acc-err-good' : (r.net < 0 ? 'acc-err-bad' : '');
+      const dppCls = r.dpp >= 0 ? 'acc-err-good' : 'acc-err-bad';
+      const sign = (n) => (n > 0 ? '+' : '') + Math.round(n);
+      return `<tr>
+        <td>${r.h}</td>
+        <td>${r.solar}</td>
+        <td>${r.load}</td>
+        <td class="${netCls}">${sign(r.net)}</td>
+        <td class="${dppCls}">${(r.dpp >= 0 ? '+' : '') + r.dpp.toFixed(2)}</td>
+        <td>${r.soc.toFixed(1)}</td>
+      </tr>`;
+    }).join('');
+  }
 }
 
 // ============================================================
@@ -5190,6 +5311,53 @@ document.getElementById('battery-packs-toggle')?.addEventListener('keydown', (e)
     e.preventDefault();
     toggleBatteryPacksCollapsed();
   }
+});
+
+// Generic collapse: any card with `data-collapse-key` works the same
+// way as battery-packs (default-collapsed + sticky per-key state via
+// localStorage). Used by the Forecast tab's "Today's energy budget"
+// and "Sunset/sunrise accuracy" cards. Distinct from
+// `data-settings-collapse-key` (settings-tab-only with extra search
+// indexing) so adding one of these doesn't pollute settings search.
+function _collapseStorageKey(key) { return `jackery-collapse-${key}`; }
+function _applyCollapseFor(card) {
+  const key = card.dataset.collapseKey;
+  if (!key) return;
+  const saved = localStorage.getItem(_collapseStorageKey(key));
+  // Default state is whatever the HTML declared (typically `collapsed`
+  // class set in markup). User pref overrides if set.
+  if (saved === '1') card.classList.add('collapsed');
+  else if (saved === '0') card.classList.remove('collapsed');
+  card.querySelector('.collapsible-header')?.setAttribute(
+    'aria-expanded', String(!card.classList.contains('collapsed')),
+  );
+}
+function _toggleCollapseFor(card) {
+  const key = card.dataset.collapseKey;
+  if (!key) return;
+  const nowCollapsed = !card.classList.contains('collapsed');
+  card.classList.toggle('collapsed', nowCollapsed);
+  card.querySelector('.collapsible-header')?.setAttribute(
+    'aria-expanded', String(!nowCollapsed),
+  );
+  localStorage.setItem(_collapseStorageKey(key), nowCollapsed ? '1' : '0');
+}
+document.querySelectorAll('[data-collapse-key]').forEach((card) => {
+  _applyCollapseFor(card);
+  const hdr = card.querySelector('.collapsible-header');
+  if (!hdr) return;
+  hdr.addEventListener('click', (e) => {
+    // Don't hijack clicks on form controls inside the header (e.g.
+    // the days-window dropdown on the accuracy card).
+    if (e.target.closest('input, select, button, a, textarea')) return;
+    _toggleCollapseFor(card);
+  });
+  hdr.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      _toggleCollapseFor(card);
+    }
+  });
 });
 // Apply persisted state on load. (Body of the function tolerates
 // the elements being absent so order-of-script-load doesn't matter.)
