@@ -26,7 +26,31 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
+
+
+class EnergyWindow(TypedDict):
+    """Energy totals over a single window. `since` is the unix timestamp
+    the window starts at (omitted on lifetime since lifetime has no
+    start)."""
+    input_wh: float
+    output_wh: float
+
+
+class EnergyWindowSince(EnergyWindow):
+    since: int
+
+
+class DeviceTotals(TypedDict):
+    """Shape returned by EnergyDB.totals(device_sn). Lifetime + three
+    rolling windows. The server may decorate this with `today_savings`,
+    `lifetime_savings`, and `cost_plan` before sending it to the UI —
+    those are added in server._decorate_totals_with_savings."""
+    device_sn: str
+    lifetime: EnergyWindow
+    today: EnergyWindowSince
+    last_7d: EnergyWindowSince
+    last_30d: EnergyWindowSince
 
 log = logging.getLogger("energy_db")
 
@@ -286,6 +310,11 @@ class EnergyDB:
     def _conn(self):
         with self._lock:
             con = sqlite3.connect(self.path, timeout=5.0)
+            # sqlite3.Row supports BOTH index access (r[0]) and dict-style
+            # access (r["device_sn"]), so flipping this on is backwards-
+            # compatible with all existing index-based callers and lets
+            # new code write `dict(r)` to materialize a row in one step.
+            con.row_factory = sqlite3.Row
             try:
                 con.execute("PRAGMA journal_mode=WAL")
                 con.execute("PRAGMA synchronous=NORMAL")
@@ -398,12 +427,7 @@ class EnergyDB:
                           first_seen, last_seen, capacity_wh_override
                    FROM devices ORDER BY last_seen DESC"""
             ).fetchall()
-        return [
-            {"device_sn": r[0], "name": r[1], "model_code": r[2],
-             "model_name": r[3], "first_seen": r[4], "last_seen": r[5],
-             "capacity_wh_override": r[6]}
-            for r in rows
-        ]
+        return [dict(r) for r in rows]
 
     def get_capacity_override(self, device_sn: str) -> int | None:
         if not device_sn:
@@ -436,7 +460,7 @@ class EnergyDB:
             )
         return True
 
-    def totals(self, device_sn: str) -> dict:
+    def totals(self, device_sn: str) -> DeviceTotals:
         """Lifetime + windowed totals for a single device."""
         now = int(time.time())
         windows = {
@@ -445,7 +469,7 @@ class EnergyDB:
             "last_30d": now - 30 * 86400,
         }
         with self._conn() as c:
-            out: dict = {"device_sn": device_sn}
+            out: dict[str, Any] = {"device_sn": device_sn}
             # Lifetime
             r = c.execute(
                 "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0) "
@@ -460,7 +484,7 @@ class EnergyDB:
                     (device_sn, since),
                 ).fetchone()
                 out[label] = {"input_wh": r[0], "output_wh": r[1], "since": since}
-        return out
+        return out  # type: ignore[return-value]
 
     def all_totals(self) -> list[dict]:
         return [self.totals(d["device_sn"]) | {"name": d["name"]}

@@ -19,17 +19,16 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 import auth
 
-_AUTH_PUBLIC_PREFIXES = (
+# Always-public paths that don't depend on any other module:
+# the auth routes themselves, the static asset bundle, and the
+# pages that render the login/setup forms.
+_BUILTIN_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/static",
     "/manifest.webmanifest",
     "/sw.js",
     "/login",
     "/setup",
     "/api/auth/",
-    # Pre-auth restore: lets a fresh install pull data from backup
-    # before creating an admin account. Endpoint handlers verify
-    # auth.has_user() == False themselves — see _require_no_user().
-    "/api/backup/setup_restore/",
 )
 
 
@@ -50,13 +49,21 @@ def _set_session_cookie(response: Response, username: str) -> None:
                    auth.make_session(username), auth.SESSION_TTL_S)
 
 
-def install(app: FastAPI, web_dir: Path) -> None:
-    """Register auth middleware, /api/auth/* routes, and login/setup pages."""
+def install(app: FastAPI, web_dir: Path,
+            extra_public_prefixes: tuple[str, ...] = ()) -> None:
+    """Register auth middleware, /api/auth/* routes, and login/setup pages.
+
+    `extra_public_prefixes` lets other modules opt their own paths out of
+    the auth gate without coupling api_auth to them. e.g. backup uses
+    this to expose /api/backup/setup_restore/ pre-auth so a fresh
+    install can pull data from a snapshot before there's an admin
+    account."""
+    public_prefixes = _BUILTIN_PUBLIC_PREFIXES + tuple(extra_public_prefixes)
 
     @app.middleware("http")
     async def _auth_middleware(request: Request, call_next):
         path = request.url.path
-        if any(path == p or path.startswith(p) for p in _AUTH_PUBLIC_PREFIXES):
+        if any(path == p or path.startswith(p) for p in public_prefixes):
             return await call_next(request)
         # First-time-setup gate: no user yet → force /setup
         if not auth.has_user():

@@ -219,7 +219,7 @@ def test_secondary_view_history_pulls_from_energy_db(server_state, monkeypatch):
     monkeypatch.setattr(server_state.state.energy, "history", fake_history)
 
     # Reset the TTL cache so we know the hydrate ran for THIS test.
-    server_state._view_history_cache.clear()
+    server_state.state.view_history_cache.clear()
 
     out = server_state.serialize_status(view_device_id="id-B")
     assert captured["sn"] == "SN-B"
@@ -344,7 +344,7 @@ def test_view_history_is_cached(server_state, monkeypatch):
         return []
     monkeypatch.setattr(server_state.state.energy, "history", fake_history)
 
-    server_state._view_history_cache.clear()
+    server_state.state.view_history_cache.clear()
     server_state.serialize_status(view_device_id="id-B")
     server_state.serialize_status(view_device_id="id-B")
     server_state.serialize_status(view_device_id="id-B")
