@@ -2106,12 +2106,24 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     # empty placeholder would corrupt prediction-accuracy analytics.
     if result.get("ready"):
         state.energy.record_forecast(device_sn, time.time(), result["forecast"])
+    # Today's actual solar so far — used by the day-strip "Today" tile
+    # to show full-day total (actual past + forecast remaining) rather
+    # than just the forward-looking remainder. Without this the user
+    # sees e.g. "12 kWh" labeled "Today" when they've already harvested
+    # 15+ kWh by mid-afternoon.
+    today_actual_solar_wh = 0.0
+    try:
+        totals = state.energy.totals(device_sn)
+        today_actual_solar_wh = float((totals.get("today") or {}).get("solar_wh") or 0)
+    except Exception as e:
+        log.debug("today_actual_solar_wh fetch failed for %s: %s", device_sn, e)
     return {
         "device_sn": device_sn,
         "low_battery_threshold": user_settings.get("low_battery_threshold"),
         "main_soc_pct": main_soc,
         "system_soc_pct": starting_soc,
         "pack_count": len(state.battery_packs_by_sn.get(device_sn, [])),
+        "today_actual_solar_wh": today_actual_solar_wh,
         **result,
         "configured": True,
     }
