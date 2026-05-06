@@ -711,7 +711,14 @@ function setAutomationDot(visible) {
 async function refreshAutomationDot() {
   // Skip the network call when we're already on Automation — clicking
   // the tab clears the dot directly. Polling here would be wasted work.
-  if (activeTab === 'automation') { setAutomationDot(false); return; }
+  // Also reset the title so it doesn't keep a stale "1 device offline"
+  // hover hint from before the user switched in.
+  if (activeTab === 'automation') {
+    setAutomationDot(false);
+    const dot = $('tab-automation-dot');
+    if (dot) dot.title = 'Automation';
+    return;
+  }
   try {
     const dev = activeJackeryDevice();
     const params = dev?.device_sn
