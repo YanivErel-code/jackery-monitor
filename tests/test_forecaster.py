@@ -832,6 +832,73 @@ def test_fit_drain_model_falls_back_on_implausible_coefficients():
     assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
 
+def test_fit_drain_model_uses_system_soc_when_present():
+    """Multi-pack rig — main pack drains 6× faster than system before
+    BMS rebalances. fit_drain_model must walk system_soc when present
+    so observed_drain isn't inflated by the pack ratio. Replicates the
+    advisor finding 2026-05-06T13:47: with battery_pct only, fit
+    over-attributes drain (parasitic ~370 W); with system_soc, fit
+    recovers truth (~130 W)."""
+    base = 1_700_000_000
+    history_main_only = []
+    history_with_system = []
+    # 6-pack rig: main pack 5040 Wh, system 30240 Wh. True drain is
+    # 130 W parasitic + 460 W load * 1.10 = 636 W. On the SYSTEM that's
+    # 636/30240 = 2.1pp/h — close to noise on integer-pp main but fine
+    # on capacity-weighted system. Generate 6 multi-hour clean runs
+    # (not 1h pairs) so the multi-hour-runs path can fit cleanly.
+    main_pack_wh = 5040
+    system_wh = 30240
+    pack_ratio = system_wh / main_pack_wh  # 6.0
+    for run in range(6):
+        # Each run: 5h, true drain ~636 W → ~10.5pp on system, but
+        # main reports a faster drop because of pack-balancing lag.
+        # We model that as main dropping `pack_ratio` × system rate
+        # initially, decaying to system rate over the run.
+        soc_main = 80.0
+        soc_system = 80.0
+        run_base = base + run * 12 * 3600
+        for h in range(6):  # 6 hourly samples → 5h run
+            history_main_only.append({
+                "ts": run_base + h * 3600,
+                "battery_pct": int(round(soc_main)),
+                "output_wh": 460,
+                "solar_wh": 0, "ac_input_wh": 0,
+            })
+            history_with_system.append({
+                "ts": run_base + h * 3600,
+                "battery_pct": int(round(soc_main)),
+                "system_soc": round(soc_system, 2),
+                "output_wh": 460,
+                "solar_wh": 0, "ac_input_wh": 0,
+            })
+            # System drops at the truth rate: 636 W / 30240 Wh = 2.1pp/h
+            soc_system -= 2.1
+            # Main drops faster early in the run, then converges
+            # (BMS slowly balances). Approximate as 4× then 1× so the
+            # 1h pair fit would see 4× drop, but the multi-hour run
+            # sees something between.
+            decay = 4.0 if h < 2 else 1.5 if h < 4 else 1.0
+            soc_main -= 2.1 * decay
+
+    # With main-only data the fit is biased high by the pack-ratio
+    # effect — main slope > system slope, multiplied by system capacity.
+    p_main, _, n_main = forecaster.fit_drain_model(
+        history_main_only, capacity_wh=system_wh,
+    )
+    # With system_soc available, the fit walks that and recovers
+    # something close to truth (130 W ± noise).
+    p_sys, _, n_sys = forecaster.fit_drain_model(
+        history_with_system, capacity_wh=system_wh,
+    )
+    # The system-soc fit should land much closer to the 130 W truth
+    # than the main-only fit. Don't assert exact values — quantization
+    # noise + the synthetic decay model make exact recovery hard —
+    # but the system fit must be substantially lower.
+    assert p_sys < p_main, f"system-soc fit ({p_sys}) should be < main-only fit ({p_main})"
+    assert p_sys < 250, f"system-soc fit too high: {p_sys}"
+
+
 def test_diagnose_idle_windows_classifies_each_rejection():
     """Continuous timeline of 9 hourly buckets, each adjacent pair
     constructed to hit a specific rejection cause (or qualify). Verifies
@@ -854,13 +921,17 @@ def test_diagnose_idle_windows_classifies_each_rejection():
         h(7, 70, out=30),              # pair 7->8: out_wh=30W    -> out_w_under_50
         h(8, 68, out=30),
     ]
-    diag = forecaster.diagnose_idle_windows(history)
+    # Pass capacity_wh explicitly — diagnose mirrors the fit's dual gate
+    # (pp + Wh). 30000 Wh keeps every 2pp main-pack drop above the 100 Wh
+    # signal floor so the pp gate is the only one that can reject.
+    diag = forecaster.diagnose_idle_windows(history, capacity_wh=30000)
     assert diag["total_pairs"] == 8
     assert diag["qualifying_windows"] == 2
     assert diag["needed_windows"] == forecaster.MIN_FORECAST_IDLE_WINDOWS
     assert diag["rejected"] == {
         "missing_soc": 2,
-        "soc_drop_under_2pp": 1,
+        "soc_drop_below_min_pp": 1,
+        "drain_below_min_wh": 0,
         "solar_above_noise": 1,
         "ac_input_above_noise": 1,
         "dt_out_of_range": 0,

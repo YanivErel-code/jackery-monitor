@@ -186,15 +186,42 @@ LOAD_BUCKET_CAP_MULT = 2.0
 # computing median. Skipped when n<5 (too few to trim safely).
 LOAD_BUCKET_TRIM_PCT = 0.10
 
-# Inverter-overhead fit: minimum SOC drop (in percentage points) for a
-# window to count. The cloud reports SOC in 1pp integer steps, so a
-# nominal 1pp drop could be anywhere from 0.5pp (rounded up) to 1.5pp
-# (rounded down) — that's ±50% quantization noise on the implied drain.
-# Requiring 2pp brings the noise floor down to ±25% per window, and the
-# median across many windows averages it out. Trade-off: fewer
-# qualifying windows, which is fine because we already require
-# min_windows=5.
-INVERTER_FIT_MIN_SOC_DROP_PCT = 2.0
+# Slope-based fits use TWO complementary gates:
+#   1. pp threshold — guards against SOC quantization noise on each
+#      individual pair. Cloud reports SOC in 1pp integer steps so the
+#      ±0.5pp rounding on each end of a window means a true 0.5pp drop
+#      can read as 1pp, doubling the implied drain. Different per SOC
+#      type:
+#        - battery_pct (single int from main): noise floor ~1pp;
+#          require ≥2pp signal so noise can't dominate.
+#        - system_soc (capacity-weighted across N packs): each pack
+#          quantizes to 1pp but the weighted average has finer
+#          resolution, ~0.4pp on a 6-pack rig. ≥0.5pp signal is
+#          comparable S/N — we don't need 2pp here, and 2pp on system
+#          would gate out almost every window (system SOC drops 4-6×
+#          slower than main on multi-pack rigs).
+#   2. Wh threshold — guards against the OPPOSITE failure mode: a
+#      huge-capacity rig where 2pp is a wall of energy. Ensures every
+#      qualifying window has a real signal regardless of capacity.
+#      ~100 Wh corresponds to the prior 2pp-on-5040Wh-main signal.
+INVERTER_FIT_MIN_SOC_DROP_PCT_MAIN = 2.0
+INVERTER_FIT_MIN_SOC_DROP_PCT_SYSTEM = 0.5
+MIN_FIT_DRAIN_WH = 100.0
+# Charge-efficiency fit: prior 1pp main / 0.25pp system + 50 Wh floor.
+CHARGE_FIT_MIN_SOC_GAIN_PCT_MAIN = 1.0
+CHARGE_FIT_MIN_SOC_GAIN_PCT_SYSTEM = 0.25
+MIN_FIT_GAIN_WH = 50.0
+# Multi-hour clean-discharge runs (drain model's narrow-load fallback):
+# longer dt makes the per-pp noise less critical, but we still want a
+# real-energy floor so a tiny end-to-end SOC change over a long run
+# isn't promoted to a "qualifying" sample.
+MIN_RUN_SOC_DROP_PCT_MAIN = 3.0
+MIN_RUN_SOC_DROP_PCT_SYSTEM = 0.5
+MIN_RUN_DRAIN_WH = 150.0
+
+
+def _row_has_system_soc(row: dict[str, Any]) -> bool:
+    return row.get("system_soc") is not None
 
 
 def battery_capacity_wh(model_code: int | None) -> int:
@@ -277,6 +304,26 @@ def fit_solar_coefficient(
 
 
 # ---------- idle overhead ----------
+def _row_soc(row: dict[str, Any]) -> float | None:
+    """Slope-based fits below want capacity-weighted system SOC when
+    available (multi-pack rigs) and main `battery_pct` otherwise. The
+    history extension in energy_db.history() adds `system_soc` per row
+    when capacity hints are passed; absent that field, fall back to
+    `battery_pct` so single-unit devices and legacy callers still work.
+
+    The two values diverge on multi-pack devices: main-pack SOC drains
+    4-6× faster than system SOC before the BMS rebalances, so any
+    slope-based fit that walks main but multiplies by system capacity
+    over-attributes drain by the pack ratio. Advisor flagged this as
+    the root cause of parasitic_w fitting at 316-370W vs the empirical
+    ~130W on the 30240 Wh / 6-pack rig 2026-05-06."""
+    s = row.get("system_soc")
+    if s is not None:
+        return float(s)
+    p = row.get("battery_pct")
+    return float(p) if p is not None else None
+
+
 def fit_inverter_overhead_pct(
     energy_history: list[dict[str, Any]],
     capacity_wh: int,
@@ -334,15 +381,19 @@ def fit_inverter_overhead_pct(
     pcts: list[float] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
-        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
         soc_drop = soc_a - soc_b
-        # Require >= 2pp so quantization noise (±0.5pp on each end =
-        # ±1pp total) can't dominate the implied drain. With 1pp
-        # windows, a true 0.5pp drop reads as 1pp — a 100% over-read
-        # of drain, fitting an artificial 100% overhead on that window.
-        if soc_drop < INVERTER_FIT_MIN_SOC_DROP_PCT:
+        # Dual gate: pp threshold (noise) + Wh threshold (signal).
+        # See INVERTER_FIT_MIN_SOC_DROP_PCT_* / MIN_FIT_DRAIN_WH.
+        min_pp = (INVERTER_FIT_MIN_SOC_DROP_PCT_SYSTEM
+                  if _row_has_system_soc(a) and _row_has_system_soc(b)
+                  else INVERTER_FIT_MIN_SOC_DROP_PCT_MAIN)
+        if soc_drop < min_pp:
+            continue
+        observed_drain_wh = soc_drop * capacity_wh / 100.0
+        if observed_drain_wh < MIN_FIT_DRAIN_WH:
             continue
         if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
             continue
@@ -354,7 +405,7 @@ def fit_inverter_overhead_pct(
         # changed via untracked sources.
         if dt_h < 0.5 or dt_h > 6.0:
             continue
-        observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
+        observed_drain_w = observed_drain_wh / dt_h
         reported_out_w = (a.get("output_wh") or 0) / dt_h
         if reported_out_w < MIN_OUT_W:
             continue
@@ -423,11 +474,18 @@ def fit_drain_model(
     pairs: list[tuple[float, float]] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
-        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
         soc_drop = soc_a - soc_b
-        if soc_drop < INVERTER_FIT_MIN_SOC_DROP_PCT:
+        # Dual gate (same as fit_inverter_overhead_pct).
+        min_pp = (INVERTER_FIT_MIN_SOC_DROP_PCT_SYSTEM
+                  if _row_has_system_soc(a) and _row_has_system_soc(b)
+                  else INVERTER_FIT_MIN_SOC_DROP_PCT_MAIN)
+        if soc_drop < min_pp:
+            continue
+        observed_drain_wh = soc_drop * capacity_wh / 100.0
+        if observed_drain_wh < MIN_FIT_DRAIN_WH:
             continue
         if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
             continue
@@ -436,7 +494,7 @@ def fit_drain_model(
         dt_h = (b["ts"] - a["ts"]) / 3600.0
         if dt_h < 0.5 or dt_h > 6.0:
             continue
-        observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
+        observed_drain_w = observed_drain_wh / dt_h
         reported_load_w = (a.get("output_wh") or 0) / dt_h
         if reported_load_w < MIN_OUT_W:
             continue
@@ -536,7 +594,6 @@ def _clean_discharge_runs(
     SOLAR_NOISE_WH = 50.0
     AC_NOISE_WH = 50.0
     MIN_RUN_HOURS = 2.0
-    MIN_RUN_SOC_DROP = 3.0
     MIN_RUN_AVG_LOAD_W = 50.0
     MAX_RUN_HOURS = 12.0  # don't reach across overnight gaps
     MAX_BUCKET_GAP_H = 1.5  # break a run if poll dropped > 90 min
@@ -548,7 +605,7 @@ def _clean_discharge_runs(
         is_clean = (
             (row.get("solar_wh") or 0) <= SOLAR_NOISE_WH
             and (row.get("ac_input_wh") or 0) <= AC_NOISE_WH
-            and row.get("battery_pct") is not None
+            and _row_soc(row) is not None
         )
         ts = row.get("ts")
         gap_too_large = (
@@ -576,10 +633,19 @@ def _clean_discharge_runs(
         dt_h = (b["ts"] - a["ts"]) / 3600.0
         if dt_h < MIN_RUN_HOURS or dt_h > MAX_RUN_HOURS:
             continue
-        soc_drop = a["battery_pct"] - b["battery_pct"]
-        if soc_drop < MIN_RUN_SOC_DROP:
+        soc_a, soc_b = _row_soc(a), _row_soc(b)
+        if soc_a is None or soc_b is None:
             continue
-        observed_drain_w = soc_drop * capacity_wh / 100.0 / dt_h
+        soc_drop = soc_a - soc_b
+        min_pp = (MIN_RUN_SOC_DROP_PCT_SYSTEM
+                  if _row_has_system_soc(a) and _row_has_system_soc(b)
+                  else MIN_RUN_SOC_DROP_PCT_MAIN)
+        if soc_drop < min_pp:
+            continue
+        observed_drain_wh = soc_drop * capacity_wh / 100.0
+        if observed_drain_wh < MIN_RUN_DRAIN_WH:
+            continue
+        observed_drain_w = observed_drain_wh / dt_h
         # Sum output_wh across the leading buckets — the trailing one
         # is the SOC reading at run end and shouldn't double-count.
         total_out_wh = sum(r.get("output_wh") or 0 for r in run[:-1])
@@ -592,6 +658,7 @@ def _clean_discharge_runs(
 
 def diagnose_idle_windows(
     energy_history: list[dict[str, Any]],
+    capacity_wh: int | None = None,
 ) -> dict[str, Any]:
     """Walk adjacent hourly buckets and report why each candidate window
     pair was accepted or rejected by the inverter-overhead-fit gate.
@@ -611,21 +678,30 @@ def diagnose_idle_windows(
     )
     rejected = {
         "missing_soc": 0,
-        "soc_drop_under_2pp": 0,
+        "soc_drop_below_min_pp": 0,
+        "drain_below_min_wh": 0,
         "solar_above_noise": 0,
         "ac_input_above_noise": 0,
         "dt_out_of_range": 0,
         "out_w_under_50": 0,
     }
     qualifying = 0
+    cap_wh = float(capacity_wh) if capacity_wh else float(DEFAULT_BATTERY_CAPACITY_WH)
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
-        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             rejected["missing_soc"] += 1
             continue
-        if (soc_a - soc_b) < INVERTER_FIT_MIN_SOC_DROP_PCT:
-            rejected["soc_drop_under_2pp"] += 1
+        soc_drop = soc_a - soc_b
+        min_pp = (INVERTER_FIT_MIN_SOC_DROP_PCT_SYSTEM
+                  if _row_has_system_soc(a) and _row_has_system_soc(b)
+                  else INVERTER_FIT_MIN_SOC_DROP_PCT_MAIN)
+        if soc_drop < min_pp:
+            rejected["soc_drop_below_min_pp"] += 1
+            continue
+        if soc_drop * cap_wh / 100.0 < MIN_FIT_DRAIN_WH:
+            rejected["drain_below_min_wh"] += 1
             continue
         if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
             rejected["solar_above_noise"] += 1
@@ -843,7 +919,6 @@ def fit_charge_efficiency(
     Returns (efficiency, n_windows_used).
     """
     MIN_INPUT_WH = 100.0
-    MIN_SOC_GAIN_PCT = 1.0
     MAX_START_SOC_PCT = 95.0   # below the top-balance taper regime
     MAX_END_SOC_PCT = 99.0     # below the 100% ceiling clip
 
@@ -854,11 +929,20 @@ def fit_charge_efficiency(
     effs: list[float] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
-        soc_a, soc_b = a.get("battery_pct"), b.get("battery_pct")
+        soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
         soc_gain = soc_b - soc_a
-        if soc_gain < MIN_SOC_GAIN_PCT:
+        # Dual gate (pp + Wh). System SOC has finer effective resolution
+        # so its pp threshold is laxer; the Wh floor catches the case
+        # where capacity is huge and pp doesn't translate to real signal.
+        min_pp = (CHARGE_FIT_MIN_SOC_GAIN_PCT_SYSTEM
+                  if _row_has_system_soc(a) and _row_has_system_soc(b)
+                  else CHARGE_FIT_MIN_SOC_GAIN_PCT_MAIN)
+        if soc_gain < min_pp:
+            continue
+        stored_wh = soc_gain * capacity_wh / 100.0
+        if stored_wh < MIN_FIT_GAIN_WH:
             continue
         if soc_a > MAX_START_SOC_PCT or soc_b > MAX_END_SOC_PCT:
             continue
@@ -868,7 +952,6 @@ def fit_charge_efficiency(
         dt_h = (b["ts"] - a["ts"]) / 3600.0
         if dt_h <= 0 or dt_h > 6.0:
             continue
-        stored_wh = soc_gain * capacity_wh / 100.0
         eff = stored_wh / input_wh
         effs.append(eff)
 

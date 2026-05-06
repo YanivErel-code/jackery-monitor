@@ -1388,9 +1388,26 @@ class EnergyDB:
             return cur.rowcount
 
     def history(self, device_sn: str, hours: int = 24,
-                bucket_s: int = 600) -> list[dict]:
+                bucket_s: int = 600,
+                main_capacity_wh: int | None = None,
+                pack_capacity_wh: int | None = None) -> list[dict]:
         """Time-bucketed history. bucket_s controls aggregation granularity:
-           600 (10min) for 24h view, 3600 (1h) for 7d, 86400 (1d) for 30d."""
+           600 (10min) for 24h view, 3600 (1h) for 7d, 86400 (1d) for 30d.
+
+        When both `main_capacity_wh` and `pack_capacity_wh` are provided,
+        each row also gets a `system_soc` field — the capacity-weighted
+        SOC across main + every expansion pack at that bucket's
+        timestamp (using the closest battery_packs snapshot within
+        ±30 min). Multi-pack rigs need this: `battery_pct` from the
+        cloud is the MAIN unit's SOC only, and the main pack drains
+        4-6× faster than the system before BMS rebalances. Slope-based
+        fits in forecaster (drain model, charge efficiency, inverter
+        overhead) that compute drain via `soc_drop × system_capacity`
+        will over-attribute drain by the pack ratio if they walk
+        `battery_pct`. With `system_soc` available they walk that
+        instead. Single-unit devices and back-compat callers (no
+        capacity hints) keep the prior behavior; `system_soc` is
+        omitted from those rows."""
         since = int(time.time()) - hours * 3600
         bucket_s = max(BUCKET_S, int(bucket_s))
         with self._conn() as c:
@@ -1411,14 +1428,39 @@ class EnergyDB:
                     ORDER BY b""",
                 (bucket_s, bucket_s, device_sn, since),
             ).fetchall()
-        return [
-            {"ts": r[0], "input_wh": r[1] or 0, "output_wh": r[2] or 0,
-             "solar_wh": r[3] or 0, "ac_input_wh": r[4] or 0,
-             "input_w": int(r[5] or 0), "output_w": int(r[6] or 0),
-             "solar_w": int(r[7] or 0), "ac_input_w": int(r[8] or 0),
-             "battery_pct": int(r[9]) if r[9] is not None else None}
-            for r in rows
-        ]
+            # Bulk-fetch pack snapshots covering the bucket range when
+            # capacity hints permit a system-SOC computation. The same
+            # ±30min window the prediction-accuracy join uses.
+            packs_by_ts: dict[int, list[float]] = {}
+            ts_sorted: list[int] = []
+            if main_capacity_wh and pack_capacity_wh and rows:
+                ts_min = rows[0][0] - 1800
+                ts_max = rows[-1][0] + 1800
+                pack_rows = c.execute(
+                    """SELECT ts, soc_pct FROM battery_packs
+                        WHERE parent_sn = ?
+                          AND ts >= ? AND ts < ?
+                          AND soc_pct IS NOT NULL""",
+                    (device_sn, ts_min, ts_max),
+                ).fetchall()
+                for ts, soc in pack_rows:
+                    packs_by_ts.setdefault(int(ts), []).append(float(soc))
+                ts_sorted = sorted(packs_by_ts)
+        out = []
+        for r in rows:
+            row = {"ts": r[0], "input_wh": r[1] or 0, "output_wh": r[2] or 0,
+                   "solar_wh": r[3] or 0, "ac_input_wh": r[4] or 0,
+                   "input_w": int(r[5] or 0), "output_w": int(r[6] or 0),
+                   "solar_w": int(r[7] or 0), "ac_input_w": int(r[8] or 0),
+                   "battery_pct": int(r[9]) if r[9] is not None else None}
+            if ts_sorted and row["battery_pct"] is not None:
+                row["system_soc"] = _capacity_weighted_soc(
+                    float(row["battery_pct"]), int(row["ts"]),
+                    packs_by_ts, ts_sorted,
+                    main_capacity_wh, pack_capacity_wh,
+                )
+            out.append(row)
+        return out
 
 
 def _capacity_weighted_soc(main_soc: float,
