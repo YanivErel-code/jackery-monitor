@@ -4535,6 +4535,17 @@ function renderForecastDayStrip(j) {
     prevEnd = d.endSoc;
   }
 
+  // For the FIRST tile (Today), the forecast only contains hours from
+  // now forward — morning solar that already happened isn't in `fc`.
+  // Add today's actual solar_wh so far (from the samples table, surfaced
+  // as `today_actual_solar_wh` on the response) so the "Today" label
+  // reflects the FULL day's total, not just the remaining hours. Other
+  // tiles stay forecast-only.
+  if (days.length > 0) {
+    const todayActualWh = Number(j?.today_actual_solar_wh ?? 0);
+    if (todayActualWh > 0) days[0].solarWh += todayActualWh;
+  }
+
   // Cap to the visible 5-day window. The forecaster returns ~5d so
   // this is usually a no-op; defensive against backend changes.
   const visible = days.slice(0, 5);

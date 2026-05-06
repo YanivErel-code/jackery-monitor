@@ -38,6 +38,7 @@ class EnergyWindow(TypedDict):
     start)."""
     input_wh: float
     output_wh: float
+    solar_wh: float
 
 
 class EnergyWindowSince(EnergyWindow):
@@ -487,18 +488,21 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             out: dict[str, Any] = {"device_sn": device_sn}
             # Lifetime
             r = c.execute(
-                "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0) "
+                "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
+                "COALESCE(SUM(solar_wh),0) "
                 "FROM samples WHERE device_sn = ?", (device_sn,)
             ).fetchone()
-            out["lifetime"] = {"input_wh": r[0], "output_wh": r[1]}
+            out["lifetime"] = {"input_wh": r[0], "output_wh": r[1], "solar_wh": r[2]}
             # Windows
             for label, since in windows.items():
                 r = c.execute(
-                    "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0) "
+                    "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
+                    "COALESCE(SUM(solar_wh),0) "
                     "FROM samples WHERE device_sn = ? AND bucket >= ?",
                     (device_sn, since),
                 ).fetchone()
-                out[label] = {"input_wh": r[0], "output_wh": r[1], "since": since}
+                out[label] = {"input_wh": r[0], "output_wh": r[1],
+                              "solar_wh": r[2], "since": since}
         return out  # type: ignore[return-value]
 
     def all_totals(self) -> list[dict]:
