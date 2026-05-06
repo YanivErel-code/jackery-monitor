@@ -495,6 +495,52 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "unchanged because the pp gate dominated there anyway."
             ),
         },
+        {
+            "ts_iso": "2026-05-06T17:57:49+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "fit_solar_coefficient now filters to clear-sky pairs "
+                "(GHI ≥ 700 W/m² AND cloud_cover ≤ 30%) before the "
+                "least-squares fit, falling back to the broad GHI>50 "
+                "pool only if too few clear-sky samples exist. "
+                "Open-Meteo's `shortwave_radiation` is post-cloud "
+                "all-sky GHI and clouds attenuate panel output non-"
+                "linearly, so mixing cloudy and clear hours pulled the "
+                "LSQ slope below the clear-sky truth. Symptom on the "
+                "user's 5000+ on 2026-05-06: actuals peaked at 3700+W "
+                "but fit_solar_coefficient returned k=3.04 (predicting "
+                "2891W peak), driving an 18pp long-lead MAE. Expect k "
+                "to drift up to ~3.5-3.7 over the next refit cycle and "
+                "long-lead MAE to drop into the 10-12pp range. Don't "
+                "re-flag the prior under-prediction as a new defect — "
+                "this commit IS the fix."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-06T17:57:49+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "fit_charge_efficiency now subtracts output_wh from "
+                "input_wh before computing the per-window efficiency. "
+                "Was: eff = stored_wh / input_wh. Now: eff = stored_wh "
+                "/ max(input_wh - output_wh, 0). Bug: when loads ran "
+                "concurrently with charging (very common — solar "
+                "charges battery while home draws ~150W constantly), "
+                "the load passthrough showed up as fake 'charging "
+                "losses' and dragged the fit below the LiFePO4 "
+                "physical floor. User's 5000+ was fitting to 0.583 "
+                "with the old code (advisor flagged 'that can't be "
+                "right'); LiFePO4 + inverter is 0.85-0.95 in reality. "
+                "simulate_soc applies eff to (solar - load) net "
+                "inflow, so the new denominator matches simulator "
+                "semantics. Residual under-bias from parasitic + "
+                "overhead drain during the window is single-digit "
+                "percent (those drains eat into ΔSOC but aren't "
+                "subtracted from input_wh), much smaller than the "
+                "load-passthrough error this fixes. Don't re-flag the "
+                "old 0.583 as a separate defect."
+            ),
+        },
     ]
 
 

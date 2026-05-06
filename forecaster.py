@@ -68,6 +68,21 @@ MIN_FIT_SAMPLES = 2
 # replace this within a day or so of running.
 DEFAULT_SOLAR_COEFF = 0.32
 
+# Clear-sky filter for fit_solar_coefficient. Open-Meteo's
+# `shortwave_radiation` is post-cloud all-sky GHI, so the same numeric
+# GHI value can correspond to "low sun + clear" or "high sun + thick
+# clouds", and panel output drops non-linearly with cloud opacity (a
+# 70% cloudy sky is NOT 30% of clear output — it's typically 15-25%).
+# Including cloudy samples in a least-squares fit pulls the slope below
+# the clear-sky truth: the user's 5000+ rig hit 3700W actual peak but
+# fit_solar_coefficient returned k=3.04 (predicting 2891W) because the
+# regression averaged clear and overcast hours. Filter to bright +
+# low-cloud pairs first to capture the panels' true GHI→W relationship,
+# then fall back to the broader GHI>50 pool only if the clear-sky pool
+# is too sparse for a stable fit.
+CLEAR_SKY_GHI_THRESHOLD = 700.0
+CLEAR_SKY_MAX_CLOUD_PCT = 30.0
+
 # Default charge efficiency: not all solar Wh ends up as stored Wh.
 # LiFePO4 chemistry + inverter/charger losses typically combine to
 # ~5-10%. The default below is a conservative cold-start fallback.
@@ -269,7 +284,11 @@ def fit_solar_coefficient(
     if not any(v > 50 for v in by_hour_solar.values()):
         return 0.0, 0
 
-    pairs: list[tuple[float, float]] = []
+    # Build two pools: clear-sky pairs (preferred — capture the panel's
+    # true GHI→W relationship without cloud attenuation noise) and a
+    # broader fallback for devices with persistently overcast histories.
+    clear_sky_pairs: list[tuple[float, float]] = []
+    broad_pairs: list[tuple[float, float]] = []
     for w in weather_hourly:
         h = (int(w.get("ts") or 0) // 3600) * 3600
         ghi = float(w.get("ghi_w_m2") or 0)
@@ -278,7 +297,13 @@ def fit_solar_coefficient(
         sol = by_hour_solar.get(h)
         if sol is None or sol <= 0:
             continue
-        pairs.append((ghi, sol))
+        broad_pairs.append((ghi, sol))
+        cloud = float(w.get("cloud_cover_pct") or 0)
+        if ghi >= CLEAR_SKY_GHI_THRESHOLD and cloud <= CLEAR_SKY_MAX_CLOUD_PCT:
+            clear_sky_pairs.append((ghi, sol))
+
+    pairs = (clear_sky_pairs if len(clear_sky_pairs) >= MIN_FIT_SAMPLES
+             else broad_pairs)
 
     if len(pairs) < MIN_FIT_SAMPLES:
         return DEFAULT_SOLAR_COEFF, len(pairs)
@@ -885,12 +910,27 @@ def fit_charge_efficiency(
       - SOC at start < 95% (avoid the top-balance regime where charge
         tapers and the BMS reports input that isn't really stored),
       - SOC at end ≤ 99% (no clipping at the 100% ceiling),
-      - input_wh ≥ 100Wh in the window (enough signal vs noise),
+      - net_input_wh ≥ 100Wh in the window (see net-energy note below),
       - dt 1-6h (longer than that mixes regimes).
 
     For each qualifying window:
+      net_input_wh = max(input_wh - output_wh, 0)
       stored_wh = ΔSOC% * capacity_wh / 100
-      efficiency = stored_wh / input_wh
+      efficiency = stored_wh / net_input_wh
+
+    Net-energy denominator: when loads run concurrently with charging
+    (e.g. solar charges battery while the home draws ~150W constantly),
+    only `input_wh - output_wh` is the energy actually available to
+    store. The original code divided stored_wh by raw input_wh, which
+    silently attributed the load passthrough as charging losses — on
+    one user's history that pulled the fit to 0.583, well below the
+    LiFePO4 + inverter physical floor of ~0.85. simulate_soc applies
+    `eff` to (solar - load) net inflow, so this denominator matches
+    the simulator's semantics. The fit is still slightly biased low
+    by parasitic+overhead drain during the window (those drains eat
+    into ΔSOC but aren't subtracted from input_wh), but the residual
+    is single-digit-percent rather than the multi-tens that load
+    passthrough caused.
 
     Take the median across windows for robustness. Clamp to a sane
     physical range [0.50, 0.99] — anything outside that band is almost
@@ -924,13 +964,15 @@ def fit_charge_efficiency(
         stored_wh = soc_gain * capacity_wh / 100.0
         if soc_a > MAX_START_SOC_PCT or soc_b > MAX_END_SOC_PCT:
             continue
-        input_wh = a.get("input_wh") or 0
-        if input_wh < MIN_INPUT_WH:
+        input_wh = float(a.get("input_wh") or 0)
+        output_wh = float(a.get("output_wh") or 0)
+        net_input_wh = max(input_wh - output_wh, 0.0)
+        if net_input_wh < MIN_INPUT_WH:
             continue
         dt_h = (b["ts"] - a["ts"]) / 3600.0
         if dt_h <= 0 or dt_h > 6.0:
             continue
-        eff = stored_wh / input_wh
+        eff = stored_wh / net_input_wh
         effs.append(eff)
 
     if len(effs) < min_windows:
