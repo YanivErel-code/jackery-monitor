@@ -473,6 +473,28 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "should resolve. Single-unit devices unchanged."
             ),
         },
+        {
+            "ts_iso": "2026-05-06T15:30:06+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Removed absolute Wh signal-floor gates from the "
+                "slope-based fits (drain model, charge efficiency, "
+                "inverter overhead, multi-hour clean-discharge runs). "
+                "Were 100 Wh / 50 Wh / 150 Wh respectively. They were "
+                "redundant on multi-pack rigs (the pp gate already "
+                "translates to a comparable Wh threshold via "
+                "pp×capacity) and over-strict on small single-unit "
+                "devices: HP3K's typical 30 W load yielded ~60 Wh/h "
+                "drain, qualifying under the pp gate but failing the "
+                "100 Wh signal floor — fit_windows collapsed to 0 "
+                "(advisor flagged 2026-05-06T15:10). Pp gates remain "
+                "(2pp main / 0.5pp system for drain & inverter, 1pp / "
+                "0.25pp for charge efficiency, 3pp / 0.5pp for runs). "
+                "Expect HP3K's parasitic_w to start fitting from "
+                "discharge windows again; the 5000+ behavior is "
+                "unchanged because the pp gate dominated there anyway."
+            ),
+        },
     ]
 
 

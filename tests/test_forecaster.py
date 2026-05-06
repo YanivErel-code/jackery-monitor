@@ -921,17 +921,13 @@ def test_diagnose_idle_windows_classifies_each_rejection():
         h(7, 70, out=30),              # pair 7->8: out_wh=30W    -> out_w_under_50
         h(8, 68, out=30),
     ]
-    # Pass capacity_wh explicitly — diagnose mirrors the fit's dual gate
-    # (pp + Wh). 30000 Wh keeps every 2pp main-pack drop above the 100 Wh
-    # signal floor so the pp gate is the only one that can reject.
-    diag = forecaster.diagnose_idle_windows(history, capacity_wh=30000)
+    diag = forecaster.diagnose_idle_windows(history)
     assert diag["total_pairs"] == 8
     assert diag["qualifying_windows"] == 2
     assert diag["needed_windows"] == forecaster.MIN_FORECAST_IDLE_WINDOWS
     assert diag["rejected"] == {
         "missing_soc": 2,
         "soc_drop_below_min_pp": 1,
-        "drain_below_min_wh": 0,
         "solar_above_noise": 1,
         "ac_input_above_noise": 1,
         "dt_out_of_range": 0,
