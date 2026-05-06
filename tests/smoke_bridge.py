@@ -146,8 +146,10 @@ async def main():
         print("[ok] last_status.cloud  =", st.get("cloud", {}).get("state"))
         assert st.get("source") == "cloud", st
         assert st.get("cloud", {}).get("state") == "connected", st
-        # BLE should be in error/scanning since stub fails
-        assert st.get("ble", {}).get("state") in ("error", "scanning", "idle"), st
+        # BLE was removed from the architecture — the bridge is cloud-only
+        # now, and `last_status.ble` is no longer populated. The stub
+        # NativeBleClient at the top of the file is kept just so importing
+        # bridge.py doesn't crash; we no longer assert anything about it.
 
         await cli.disconnect()
         print("\nALL BRIDGE SMOKE TESTS PASSED")

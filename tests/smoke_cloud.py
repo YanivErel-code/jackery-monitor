@@ -175,12 +175,26 @@ async def run() -> None:
             tele["battery_percent"], tele["output_power_w"],
             tele["ac_output_v"], tele["ac_output_hz"]))
 
-        # Force expiry -> should re-login transparently
+        # Force expiry: the client now raises SessionContestedError so
+        # the caller can decide whether to re-login (vs. silently
+        # kicking the user out of their phone app — see cloud_client's
+        # SessionContestedError docstring). The smoke verifies both
+        # halves: the error is raised, AND an explicit re-login + retry
+        # succeeds.
         EXPIRED_TOKEN_TRIGGER["_force_expire"] = True
         client.token = "stale"
+        try:
+            await client.fetch_properties(devs[0].device_id)
+        except cc.SessionContestedError as e:
+            print("[ok] expired token surfaces SessionContestedError:", e)
+        else:
+            raise AssertionError("expected SessionContestedError")
+        # Caller-driven re-login: drop the token and call again.
+        EXPIRED_TOKEN_TRIGGER["_force_expire"] = False
+        client.token = None
         props2 = await client.fetch_properties(devs[0].device_id)
         assert props2["rb"] == 87
-        print("[ok] auto re-login on expired token")
+        print("[ok] explicit re-login restores access")
 
         await client.aclose()
         print("\nALL SMOKE TESTS PASSED")
