@@ -469,12 +469,74 @@
         </section>
       </div>
 
+      <!-- Today's energy budget — narrative breakdown of the
+           forecast walk from now to sunset. Solar in, total drain,
+           per-hour table, and the simulator's arithmetic. Collapsed
+           by default; the headline (now SOC → sunset SOC) is on the
+           hero card so opening this is purely "show your work". -->
+      <section id="today-budget-card" class="card collapsible collapsed"
+               data-collapse-key="today-budget" hidden>
+        <div class="card-header collapsible-header"
+             role="button" tabindex="0" aria-expanded="false"
+             aria-controls="today-budget-body">
+          <h2>Today's energy budget</h2>
+          <span id="today-budget-summary" class="hint">—</span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
+        </div>
+        <div id="today-budget-body">
+          <p class="hint" style="margin:6px 0 12px">
+            Hour-by-hour walk from now to sunset. Solar minus load
+            gives net W; positive hours are multiplied by
+            <code id="tb-eff">—</code> charge efficiency before
+            updating SOC. <code>load_w</code> already includes
+            parasitic + inverter overhead.
+          </p>
+          <div class="acc-summary" id="today-budget-totals">
+            <div class="acc-summary-tile">
+              <div class="acc-summary-label">Solar in</div>
+              <div class="acc-summary-value"><span id="tb-solar-kwh">—</span><small>kWh</small></div>
+              <div class="acc-summary-sub" id="tb-solar-sub">—</div>
+            </div>
+            <div class="acc-summary-tile">
+              <div class="acc-summary-label">Drain (load + parasitic + overhead)</div>
+              <div class="acc-summary-value"><span id="tb-load-kwh">—</span><small>kWh</small></div>
+              <div class="acc-summary-sub" id="tb-load-sub">—</div>
+            </div>
+            <div class="acc-summary-tile">
+              <div class="acc-summary-label">Net to battery</div>
+              <div class="acc-summary-value"><span id="tb-net-kwh">—</span><small>kWh</small></div>
+              <div class="acc-summary-sub" id="tb-net-sub">—</div>
+            </div>
+          </div>
+          <table id="today-budget-table" class="acc-table" hidden>
+            <thead>
+              <tr>
+                <th>Hour</th>
+                <th>Solar W</th>
+                <th>Load W</th>
+                <th>Net W</th>
+                <th>ΔSOC pp</th>
+                <th>SOC %</th>
+              </tr>
+            </thead>
+            <tbody id="today-budget-tbody"></tbody>
+          </table>
+          <p id="today-budget-empty" class="hint" hidden>
+            Forecast hasn't fitted yet — open after the calibrating
+            badge clears.
+          </p>
+        </div>
+      </section>
+
       <!-- Sunset/sunrise prediction-vs-actual table — daily accuracy
            rollup. Backed by daily_solar_summary, written each smart-
            charge tick. Surfaces the same data as the Logs → Debug
            panel but in a scannable visual + summary KPIs. -->
-      <section id="daily-accuracy-card" class="card" hidden>
-        <div class="card-header">
+      <section id="daily-accuracy-card" class="card collapsible collapsed"
+               data-collapse-key="daily-accuracy" hidden>
+        <div class="card-header collapsible-header"
+             role="button" tabindex="0" aria-expanded="false"
+             aria-controls="daily-accuracy-body">
           <h2>Sunset / sunrise accuracy</h2>
           <select id="daily-accuracy-days" class="device-select" style="max-width:140px">
             <option value="3">Last 3 days</option>
@@ -484,7 +546,9 @@
             <option value="60">Last 60 days</option>
             <option value="90">Last 90 days</option>
           </select>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
+        <div id="daily-accuracy-body">
         <p class="hint" style="margin:6px 0 12px">
           Predicted SOC at sunset / sunrise vs what actually happened. Error in pp.
           Green ≤3pp, yellow 4-8pp, red &gt;8pp.
@@ -532,6 +596,7 @@
           </thead>
           <tbody id="daily-accuracy-tbody"></tbody>
         </table>
+        </div>
       </section>
     </section>
 
