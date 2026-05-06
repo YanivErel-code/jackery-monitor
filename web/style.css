@@ -374,6 +374,12 @@ main {
   vertical-align: middle;
   animation: pulse 2s ease-in-out infinite;
 }
+/* The class rule above ties on specificity with the UA's [hidden]
+   { display: none } rule, and wins by source order — meaning
+   `dot.hidden = true` from JS had no visual effect, so the dot was
+   permanently visible regardless of state. Restore the intended
+   hidden behavior with a higher-specificity selector. */
+.tab-dot[hidden] { display: none; }
 
 .tab-panel {
   display: flex; flex-direction: column; gap: 18px;
