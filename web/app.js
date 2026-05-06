@@ -3064,12 +3064,13 @@ function renderSmartChargePlan(plan, narration) {
   const narrationLine = narration
     ? `<div class="sc-narration" style="margin-top:10px; padding-left:0">💬 ${safe(narration)}</div>`
     : '';
-  // Counterfactual lives next to display predicted so the user can see
-  // when smart-charge is doing real work vs coasting on solar.
-  const baseline = plan.baseline_predicted_sunrise_soc_pct;
-  const baselineLine = baseline != null
-    ? `<div><span class="sc-lbl">No-AC sunrise SOC</span><span>${Math.round(baseline)}%</span></div>`
-    : '';
+  // The forecast itself is now the truth (no floor), so
+  // predicted_sunrise_soc_pct and baseline_predicted_sunrise_soc_pct
+  // hold the same value and the counterfactual row would be redundant.
+  // The "controller is doing real work" signal is now the deficit +
+  // charge schedule rows below — when deficit > 0 and a window is
+  // scheduled, smart-charge is actively bridging the gap.
+  const baselineLine = '';
   const extensionBadge = plan.extension_active
     ? '<span class="sc-mode" title="Past planned window, holding ON until target hit">EXTENSION</span>'
     : '';
@@ -3338,6 +3339,11 @@ function connectWs() {
       // user-visible state (online/is_on/error). Re-fetch the cached
       // list so the row flips immediately, no waiting for the 60s poll.
       _onKasaUpdatedPush();
+      // Also refresh the Automation tab dot — its only other refresh
+      // is a 3-min poll, so a Kasa device coming back online (or going
+      // offline) used to leave the dot stale until the next tick. That
+      // produced "lit dot, nothing to act on" when the user clicked in.
+      refreshAutomationDot();
     } else if (msg.type === 'automation_fired') {
       // A rule just edge-triggered. Patch our local cache so last_fired
       // updates without re-fetching, and re-render if the user is on
