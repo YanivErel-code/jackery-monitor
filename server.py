@@ -1717,9 +1717,12 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(connect_device())
     state.poll_task = asyncio.create_task(poll_loop())
     state.smart_charge_task = asyncio.create_task(smart_charge_loop())
-    state.advisor_task = asyncio.create_task(
-        advisor_routes.advisor_loop(state, _advisor_helpers)
-    )
+    # Daily AI-insights auto-run is intentionally NOT started here.
+    # The /api/algorithm/review_now endpoint still works for on-demand
+    # reviews; this commit just removes the background daily trigger.
+    # `advisor_routes.advisor_loop` and `advisor_trigger_hour` are kept
+    # in place so re-enabling is a one-line change once we wire up the
+    # per-device opt-in checkbox.
     state.kasa_reconciler_task = asyncio.create_task(kasa_reconciler_loop())
     state.forecast_recorder_task = asyncio.create_task(forecast_recorder_loop())
     # Backup runs daily at the user-configured local time. The schedule
@@ -1736,8 +1739,6 @@ async def lifespan(app: FastAPI):
         state.poll_task.cancel()
     if getattr(state, "smart_charge_task", None):
         state.smart_charge_task.cancel()
-    if getattr(state, "advisor_task", None):
-        state.advisor_task.cancel()
     if getattr(state, "kasa_reconciler_task", None):
         state.kasa_reconciler_task.cancel()
     if getattr(state, "forecast_recorder_task", None):
