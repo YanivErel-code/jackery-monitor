@@ -4458,6 +4458,9 @@ async function fetchForecast() {
       }
     }
     drawForecastChart(j);
+    // Per-day strip above the chart — 5 compact tiles, one per day
+    // in the forecast window. Same data, no extra fetch.
+    renderForecastDayStrip(j);
     // Today's energy budget breakdown — same data as the chart, but
     // walks the simulator math from now to sunset so the user can
     // verify how SOC_now becomes SOC_sunset. Pure transform of `j`,
@@ -4470,6 +4473,114 @@ async function fetchForecast() {
     renderDailyAccuracy().catch((err) =>
       console.warn('daily accuracy render failed', err));
   } catch (e) { console.warn('forecast fetch failed', e); }
+}
+
+// ============================================================
+// Per-day strip above the forecast chart — one compact tile per
+// day in the ~5-day forecast window. Headline numbers only
+// (start→end SOC + solar kWh), with color + ⚠ marker when SOC
+// bottoms at 0. Pure transform of /api/forecast.
+// ============================================================
+function renderForecastDayStrip(j) {
+  const strip = $('forecast-day-strip');
+  if (!strip) return;
+  const fc = j?.forecast || [];
+  if (!fc.length || !j.ready) {
+    strip.innerHTML = '';
+    strip.hidden = true;
+    return;
+  }
+  // Group hours by local-date string. Browser timezone is what the
+  // user sees on the chart x-axis, so it matches their mental model.
+  const days = [];
+  let currentKey = null;
+  let current = null;
+  for (const h of fc) {
+    const d = new Date(h.ts * 1000);
+    const key = d.toDateString(); // "Wed May 06 2026"
+    if (key !== currentKey) {
+      if (current) days.push(current);
+      currentKey = key;
+      current = {
+        key,
+        date: d,
+        hours: [],
+        solarWh: 0,
+        minSoc: Infinity,
+        maxSoc: -Infinity,
+        depleted: false,
+      };
+    }
+    current.hours.push(h);
+    current.solarWh += Number(h.solar_w ?? 0);
+    if (h.predicted_soc != null) {
+      const s = Number(h.predicted_soc);
+      if (s < current.minSoc) current.minSoc = s;
+      if (s > current.maxSoc) current.maxSoc = s;
+      // The simulator clamps at 0 (hard floor), so any predicted_soc
+      // <= 0.5 means we ran out — flag it.
+      if (s <= 0.5) current.depleted = true;
+    }
+  }
+  if (current) days.push(current);
+
+  // For start_soc on each day: day 0 starts at j.starting_soc_pct
+  // (NOW); subsequent days inherit the previous day's end. End_soc =
+  // last hour's predicted_soc (clamped to 0+).
+  let prevEnd = Number(j.starting_soc_pct ?? 0);
+  for (const d of days) {
+    d.startSoc = prevEnd;
+    const lastSoc = d.hours[d.hours.length - 1]?.predicted_soc;
+    d.endSoc = lastSoc != null ? Number(lastSoc) : prevEnd;
+    prevEnd = d.endSoc;
+  }
+
+  // Cap to the visible 5-day window. The forecaster returns ~5d so
+  // this is usually a no-op; defensive against backend changes.
+  const visible = days.slice(0, 5);
+  if (!visible.length) {
+    strip.innerHTML = '';
+    strip.hidden = true;
+    return;
+  }
+  strip.hidden = false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const labelFor = (d) => {
+    const dayStart = new Date(d.date);
+    dayStart.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((dayStart - today) / 86400000);
+    if (diffDays === 0) return 'Today';
+    if (diffDays === 1) return 'Tomorrow';
+    return d.date.toLocaleDateString([], {weekday: 'short', month: 'numeric', day: 'numeric'});
+  };
+  // Tile color: green when SOC stays >=20 all day, amber when min
+  // dips into 10-19, red+⚠ when depleted. minSoc could be Infinity
+  // if there were zero predicted_soc values — treat as unknown.
+  const classFor = (d) => {
+    if (d.depleted) return 'tile-bad';
+    if (d.minSoc === Infinity) return '';
+    if (d.minSoc < 20) return 'tile-warn';
+    return 'tile-good';
+  };
+
+  strip.innerHTML = visible.map((d) => {
+    const cls = classFor(d);
+    const warnLine = d.depleted
+      ? '<span class="fdt-warn">⚠ depleted</span>'
+      : '';
+    return `<div class="forecast-day-tile ${cls}">
+      <span class="fdt-label">${labelFor(d)}</span>
+      <span class="fdt-soc">
+        ${Math.round(d.startSoc)}<small>%</small>
+        <span class="fdt-arrow">→</span>
+        ${Math.round(d.endSoc)}<small>%</small>
+      </span>
+      <span class="fdt-solar">${(d.solarWh / 1000).toFixed(1)} kWh ↑</span>
+      ${warnLine}
+    </div>`;
+  }).join('');
 }
 
 // ============================================================

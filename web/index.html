@@ -445,6 +445,10 @@
           </div>
         </div>
         <p id="forecast-current-loc" class="hint forecast-current-loc">Loading location…</p>
+        <!-- Per-day strip: 5 compact tiles summarizing each day in the
+             forecast window. Populated by renderForecastDayStrip() from
+             the same /api/forecast response that feeds the chart. -->
+        <div id="forecast-day-strip" class="forecast-day-strip" hidden></div>
         <canvas id="chart-forecast" class="chart chart-tall"></canvas>
         <div class="legend forecast-legend" data-chart="forecast">
           <button type="button" class="legend-item" data-series="soc"><i class="lg-bat"></i> Predicted SOC</button>
