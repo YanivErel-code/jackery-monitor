@@ -29,7 +29,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -178,6 +178,27 @@ class AppState:
         # tested. Rule editor picks from this list instead of asking for an
         # IP each time.
         self.kasa: KasaRegistry = KasaRegistry()
+        # ---------- in-process caches ----------
+        # All four caches below are read/written exclusively from the
+        # FastAPI/asyncio event loop on a single Python process. There's
+        # no second thread or process touching them, so plain dict ops
+        # are atomic and no asyncio.Lock is needed. If the deploy ever
+        # moves to gunicorn-with-workers the caches go from "shared
+        # in-process" to "per-worker" — which would change semantics, not
+        # just safety, so we'd revisit then.
+        # Per-device live-chart history cache for views other than the
+        # bridge-active device. _VIEW_HISTORY_TTL_S TTL.
+        self.view_history_cache: dict[str, tuple[float, list[dict]]] = {}
+        # Auto-probe (model/capacity inference) per device_sn —
+        # populated by the discovery flow and read by the GET endpoint
+        # that exposes them. `auto_probe_in_flight` is the dedup set
+        # so a slow probe doesn't get re-launched if the user clicks
+        # "scan" again before the first one finishes.
+        self.auto_probe_results: dict[str, dict[str, Any]] = {}
+        self.auto_probe_in_flight: set[str] = set()
+        # Anthropic /v1/models response cache so the model picker UI doesn't
+        # round-trip the API on every page load. {ts, models}.
+        self.anthropic_models_cache: dict[str, Any] = {"ts": 0.0, "models": []}
 
     @property
     def backend(self) -> str:
@@ -684,7 +705,6 @@ def _energy_db_row_to_chart_point(p: dict) -> dict:
 
 
 _VIEW_HISTORY_TTL_S = 30
-_view_history_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 def _view_history(device_sn: str | None) -> list[dict]:
@@ -694,7 +714,7 @@ def _view_history(device_sn: str | None) -> list[dict]:
     if not device_sn:
         return []
     now = time.time()
-    cached = _view_history_cache.get(device_sn)
+    cached = state.view_history_cache.get(device_sn)
     if cached and now - cached[0] < _VIEW_HISTORY_TTL_S:
         return cached[1]
     try:
@@ -702,7 +722,7 @@ def _view_history(device_sn: str | None) -> list[dict]:
             device_sn, hours=LIVE_CHART_HOURS, bucket_s=LIVE_CHART_INTERVAL_S,
         )
         out = [_energy_db_row_to_chart_point(p) for p in rows]
-        _view_history_cache[device_sn] = (now, out)
+        state.view_history_cache[device_sn] = (now, out)
         return out
     except Exception as e:
         log.debug("view history hydrate for %s failed: %s", device_sn, e)
@@ -926,13 +946,6 @@ def _sanitize_pack_telemetry(packs: list[dict]) -> list[dict]:
 
 
 _unknown_models_warned: set[int] = set()
-# In-flight + completed auto-probes, keyed by device_sn. Each value
-# carries the raw probe responses + the extracted capacity candidates
-# so the Device tab can render a "we found this in the cloud — use it?"
-# prompt. Lives in process memory; rebuilds on restart by re-probing
-# any unknown devices we still see.
-_auto_probe_results: dict[str, dict[str, Any]] = {}
-_auto_probe_in_flight: set[str] = set()
 
 
 # Plausible Wh range for any "capacity-shaped" number we find. Below
@@ -1007,9 +1020,9 @@ async def _auto_probe_device(device_sn: str, device_id: str,
     extract capacity candidates, and stash results in state for the
     Device tab to render. Idempotent per device_sn so a re-trigger
     while a probe is in flight is a no-op."""
-    if not device_sn or device_sn in _auto_probe_in_flight:
+    if not device_sn or device_sn in state.auto_probe_in_flight:
         return
-    _auto_probe_in_flight.add(device_sn)
+    state.auto_probe_in_flight.add(device_sn)
     try:
         rpc = getattr(state.client, "_rpc", None)
         if rpc is None:
@@ -1024,7 +1037,7 @@ async def _auto_probe_device(device_sn: str, device_id: str,
             )
         except (TimeoutError, Exception) as e:
             log.warning("auto-probe failed for device_sn=%s: %s", device_sn, e)
-            _auto_probe_results[device_sn] = {
+            state.auto_probe_results[device_sn] = {
                 "device_sn": device_sn, "model_code": model_code,
                 "model_name": model_name, "device_id": device_id,
                 "ts": time.time(), "error": str(e)[:200],
@@ -1033,7 +1046,7 @@ async def _auto_probe_device(device_sn: str, device_id: str,
             return
         raw = (result or {}).get("results") or {}
         candidates = _extract_capacity_candidates(raw)
-        _auto_probe_results[device_sn] = {
+        state.auto_probe_results[device_sn] = {
             "device_sn": device_sn, "model_code": model_code,
             "model_name": model_name, "device_id": device_id,
             "ts": time.time(), "error": None,
@@ -1050,7 +1063,7 @@ async def _auto_probe_device(device_sn: str, device_id: str,
                      "override or PR models.json. Probed endpoints: %s",
                      device_sn, list(raw.keys()))
     finally:
-        _auto_probe_in_flight.discard(device_sn)
+        state.auto_probe_in_flight.discard(device_sn)
 
 
 def _flag_unknown_models(cloud_meta: dict | None) -> None:
@@ -2424,7 +2437,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Jackery 5000 Plus Monitor", lifespan=lifespan)
 
 
-api_auth.install(app, WEB_DIR)
+api_auth.install(
+    app, WEB_DIR,
+    # Pre-auth restore: lets a fresh install pull data from backup
+    # before creating an admin account. The endpoint itself verifies
+    # auth.has_user() == False — see _require_no_user().
+    extra_public_prefixes=("/api/backup/setup_restore/",),
+)
 
 
 @app.get("/api/status")
@@ -2567,12 +2586,12 @@ def api_devices_probe_results(device_sn: str | None = None):
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         return {"error": "no device", "found": False}
-    result = _auto_probe_results.get(device_sn)
+    result = state.auto_probe_results.get(device_sn)
     if not result:
         return {"device_sn": device_sn, "found": False,
-                "in_flight": device_sn in _auto_probe_in_flight}
+                "in_flight": device_sn in state.auto_probe_in_flight}
     return {"device_sn": device_sn, "found": True,
-            "in_flight": device_sn in _auto_probe_in_flight, **result}
+            "in_flight": device_sn in state.auto_probe_in_flight, **result}
 
 
 @app.post("/api/devices/probe_now")
@@ -2841,18 +2860,32 @@ async def forecast_recorder_loop() -> None:
     post-deploy predictions to evaluate (advisor anomaly flagged
     2026-05-02)."""
     await asyncio.sleep(FORECAST_RECORDER_INITIAL_DELAY_S)
+    bo = _backoff.LoopBackoff(max_s=4 * 3600)
     while True:
         try:
             await _record_forecasts_for_all_devices()
+            bo.reset()
         except Exception as e:
+            bo.record_failure()
             log.warning("forecast_recorder loop iteration failed: %s", e)
-        await asyncio.sleep(FORECAST_RECORDER_INTERVAL_S)
+        await asyncio.sleep(bo.next_sleep(FORECAST_RECORDER_INTERVAL_S))
 
 
-def _bucket_accuracy(samples: list[dict]) -> dict[str, dict[str, float]]:
+class AccuracyBucket(TypedDict, total=False):
+    """One row of the prediction-accuracy summary table. `n` is the
+    sample count in this lead-time bucket; `mae` is the mean absolute
+    error after summing. `sum_err` is a transient accumulator stripped
+    before return — declared `total=False` so the cleaned shape still
+    type-checks."""
+    n: int
+    mae: float
+    sum_err: float
+
+
+def _bucket_accuracy(samples: list[dict]) -> dict[str, AccuracyBucket]:
     """Aggregate prediction-accuracy rows into MAE-per-lead-bucket. Pure;
     no I/O. Used for both the legacy 14d summary and the post-fix slice."""
-    summary: dict[str, dict[str, float]] = {}
+    summary: dict[str, AccuracyBucket] = {}
     for s in samples:
         h = s["lead_time_h"]
         bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
@@ -3831,10 +3864,10 @@ def api_anthropic_key_clear():
     return {"ok": True}
 
 
-# Server-side model-list cache. Anthropic's /v1/models is cheap, but we
+# Cache TTL for Anthropic's /v1/models response — held on AppState
+# (state.anthropic_models_cache). Anthropic's API is cheap, but we
 # don't want to hammer it on every Settings tab open + we need a
 # graceful fallback when the API key is missing or the network is down.
-_anthropic_models_cache: dict[str, Any] = {"ts": 0.0, "models": []}
 ANTHROPIC_MODELS_CACHE_TTL_S = 5 * 60
 
 # Static fallback list — what the UI offers when no key is configured
@@ -3893,8 +3926,8 @@ async def api_anthropic_models(refresh: bool = False):
     `refresh=true` busts the cache."""
     import anthropic_creds as ac
     now = time.time()
-    if not refresh and (now - _anthropic_models_cache["ts"]) < ANTHROPIC_MODELS_CACHE_TTL_S:
-        cached = _anthropic_models_cache["models"]
+    if not refresh and (now - state.anthropic_models_cache["ts"]) < ANTHROPIC_MODELS_CACHE_TTL_S:
+        cached = state.anthropic_models_cache["models"]
         if cached:
             return {"models": _annotate_models(cached), "source": "cache"}
 
@@ -3927,8 +3960,8 @@ async def api_anthropic_models(refresh: bool = False):
     if not models:
         return {"models": _annotate_models(ANTHROPIC_MODELS_FALLBACK),
                 "source": "fallback_empty"}
-    _anthropic_models_cache["ts"] = now
-    _anthropic_models_cache["models"] = models
+    state.anthropic_models_cache["ts"] = now
+    state.anthropic_models_cache["models"] = models
     return {"models": _annotate_models(models), "source": "live"}
 
 

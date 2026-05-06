@@ -52,12 +52,44 @@ ignore = [
     # but local pytest runs whatever the dev box has (often 3.9). Stick
     # to the broadly-compatible `timezone.utc` form.
     "UP017",
+    # Ambiguous unicode chars in strings/docstrings/comments. We use
+    # `≤`, `≥`, `±`, `×` deliberately in domain comments (forecaster
+    # math, capacity ratios). Replacing them with ASCII makes those
+    # comments harder to read; the false-positive cost outweighs any
+    # actual confusion risk.
+    "RUF001", "RUF002", "RUF003",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests can use private members of modules they're testing.
-"tests/*" = ["F401", "F811"]
+# Tests can use private members of modules they're testing. Tests
+# also frequently set up scenario state with assignments that aren't
+# used in the assertion (a ratio computed for clarity, an unpacked
+# return where only one element is checked) — that's documentary
+# value, not dead code.
+"tests/*" = ["F401", "F811", "F841", "RUF046", "RUF059"]
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+# pytest-cov is opt-in (`pytest --cov`). Default `pytest` stays fast.
+# Branch coverage is on by default — the kind of bug we miss without
+# branch coverage (e.g. a never-taken `else` clause) is exactly the
+# kind worth catching as the codebase grows.
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [
+    "tests/*",
+    "diag_*.py",
+    "backtest.py",
+]
+
+[tool.coverage.report]
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
