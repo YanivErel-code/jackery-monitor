@@ -747,6 +747,17 @@ async function refreshAutomationDot() {
       const k = await kasaHealthR.json();
       kasaOffline = k.offline_count || 0;
     }
+    // Re-check activeTab after the network round-trip — boot races
+    // (queueMicrotask switchTab fires AFTER the IIFE that kicked off
+    // the first refresh) and mid-flight tab switches would otherwise
+    // light the dot back up immediately after switchTab cleared it,
+    // and it'd take a full 3-min poll cycle to clear.
+    if (activeTab === 'automation') {
+      setAutomationDot(false);
+      const dot = $('tab-automation-dot');
+      if (dot) dot.title = 'Automation';
+      return;
+    }
     const dot = $('tab-automation-dot');
     setAutomationDot(actionableInsights > 0 || kasaOffline > 0);
     if (dot) {
