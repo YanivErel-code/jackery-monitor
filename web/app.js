@@ -3527,8 +3527,14 @@ function applyStatus(s) {
   const inW   = Number(t.input_power_w  ?? 0);
   const outW  = Number(t.output_power_w ?? 0);
   const netW  = inW - outW;                      // + charging, - discharging
-  const soc   = Number(t.battery_percent ?? 0);  // 0..100
-  const PACK_KWH = 5.04;                         // Explorer 5000 Plus usable kWh
+  // Use system SOC (capacity-weighted across main + packs) when present —
+  // matches what the user sees on the SOC card. Fall back to main pack
+  // for legacy / single-unit devices.
+  const soc   = Number(t.system_soc_pct ?? t.battery_percent ?? 0);
+  // System capacity from the server's _total_capacity_wh (main + every
+  // expansion pack). Falls back to a single-pack default when the server
+  // doesn't enrich telemetry (mock backend, very old responses).
+  const capacityWh = Number(t.capacity_wh ?? 5040);
   const IDLE_W   = 25;                           // below this we call it idle
   const ttFull  = Number(t.time_to_full_h    ?? 0);
   const ttEmpty = Number(t.time_remaining_h  ?? 0);
@@ -3540,7 +3546,7 @@ function applyStatus(s) {
     if (ttFull > 0) {
       timeLabel = `${fmt(ttFull, 1)} h until full`;
     } else {
-      const wh = ((100 - soc) / 100) * PACK_KWH * 1000;
+      const wh = ((100 - soc) / 100) * capacityWh;
       const eta = wh / netW;
       timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h until full` : 'Charging…';
     }
@@ -3549,7 +3555,7 @@ function applyStatus(s) {
     if (ttEmpty > 0) {
       timeLabel = `${fmt(ttEmpty, 1)} h until empty`;
     } else {
-      const wh = (soc / 100) * PACK_KWH * 1000;
+      const wh = (soc / 100) * capacityWh;
       const eta = wh / Math.abs(netW);
       timeLabel = eta > 0 && isFinite(eta) ? `${fmt(eta, 1)} h until empty` : 'Discharging…';
     }
@@ -3824,6 +3830,23 @@ function renderPowerFlow(t) {
   if (timerEl) {
     const ttFull  = Number(t.time_to_full_h    ?? 0);
     const ttEmpty = Number(t.time_remaining_h  ?? 0);
+    // Same fallback as the hero-card "until full / until empty" label:
+    // when the cloud doesn't fill ttFull/ttEmpty (common during mixed
+    // solar+load operation, where net power is small or fluctuating),
+    // synthesize from current SOC + net W + system capacity. Without
+    // this the flow-timer permanently rendered "—" on rigs that
+    // basically never trigger Jackery's own ETA computation.
+    const inW = Number(t.input_power_w  ?? 0);
+    const outW = Number(t.output_power_w ?? 0);
+    const netW = inW - outW;
+    const soc = Number(t.system_soc_pct ?? t.battery_percent ?? 0);
+    const capacityWh = Number(t.capacity_wh ?? 5040);
+    const synthFull  = netW >  25
+      ? ((100 - soc) / 100 * capacityWh) / netW
+      : 0;
+    const synthEmpty = netW < -25
+      ? (soc / 100 * capacityWh) / Math.abs(netW)
+      : 0;
     let txt = '—';
     let cls = '';
     let title = '';
@@ -3835,6 +3858,14 @@ function renderPowerFlow(t) {
       txt = `↓ ${ttEmpty.toFixed(1)}h`;
       cls = 'discharging';
       title = `${ttEmpty.toFixed(1)} h remaining`;
+    } else if (synthFull > 0 && isFinite(synthFull)) {
+      txt = `↑ ${synthFull.toFixed(1)}h`;
+      cls = 'charging';
+      title = `~${synthFull.toFixed(1)} h until full (synthesized — cloud didn't supply ETA)`;
+    } else if (synthEmpty > 0 && isFinite(synthEmpty)) {
+      txt = `↓ ${synthEmpty.toFixed(1)}h`;
+      cls = 'discharging';
+      title = `~${synthEmpty.toFixed(1)} h until empty (synthesized — cloud didn't supply ETA)`;
     }
     timerEl.textContent = txt;
     timerEl.classList.remove('charging', 'discharging');

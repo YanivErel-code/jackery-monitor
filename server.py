@@ -796,7 +796,16 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
             sys_pct = _system_soc_pct(float(main_pct), view_sn, model_code)
             telemetry = {**telemetry,
                          "main_soc_pct": main_pct,
-                         "system_soc_pct": sys_pct}
+                         "system_soc_pct": sys_pct,
+                         # System capacity (main + every cached expansion pack)
+                         # so the UI can synthesize an ETA from net W + remaining
+                         # Wh without having to hardcode a per-model constant.
+                         # Single-unit devices fall through this branch and get
+                         # capacity_wh from the else below.
+                         "capacity_wh": _total_capacity_wh(view_sn, model_code)}
+    elif telemetry and view_sn:
+        telemetry = {**telemetry,
+                     "capacity_wh": _total_capacity_wh(view_sn, model_code)}
 
     energy = None
     try:
