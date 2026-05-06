@@ -83,6 +83,56 @@ def test_solar_fit_falls_back_when_too_few_pairs():
     assert n == 1
 
 
+def test_solar_fit_prefers_clear_sky_pairs_when_available():
+    # When clear-sky and cloudy hours are mixed, the fit should capture
+    # the clear-sky GHI→W relationship, not the cloud-attenuated mix.
+    # Open-Meteo `shortwave_radiation` is post-cloud, but clouds attenuate
+    # panel output non-linearly: a thick overcast at GHI=750 produces
+    # far less than 0.5 × 750 even though clear-sky truth is k=0.5.
+    # Including those samples drags the LSQ slope below truth.
+    base = 1_700_000_000
+    weather = []
+    energy = []
+    # 6 clear-sky hours: GHI 800-900, cloud ≤30 — drive the fit.
+    for i in range(6):
+        ghi = 800 + i * 20
+        weather.append({"ts": base + i * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 5 + i * 4})
+        energy.append({"ts": base + i * 3600,
+                       "solar_w": int(0.5 * ghi),
+                       "output_w": 100, "battery_pct": 60})
+    # 14 cloudy hours: same GHI band per Open-Meteo, but actual solar
+    # is heavily attenuated (~18% of clear-sky). These would pull a
+    # naive LSQ fit toward 0.25-0.30.
+    for i in range(14):
+        ghi = 700 + i * 5
+        weather.append({"ts": base + (10 + i) * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 80})
+        energy.append({"ts": base + (10 + i) * 3600,
+                       "solar_w": int(0.18 * ghi),
+                       "output_w": 100, "battery_pct": 60})
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    assert n >= forecaster.MIN_FIT_SAMPLES
+    assert abs(k - 0.5) < 0.05, f"got k={k}, expected ~0.5 (clear-sky truth)"
+
+
+def test_solar_fit_falls_back_to_broad_pool_when_no_clear_sky():
+    # Persistently overcast history: no sample meets the clear-sky
+    # filter. Don't return DEFAULT — fall back to the broad GHI>50 pool
+    # so devices in cloudy regions still get a per-user fit.
+    base = 1_700_000_000
+    weather = [{"ts": base + i * 3600, "ghi_w_m2": 400 + i * 10,
+                "cloud_cover_pct": 90}
+               for i in range(10)]
+    energy = [{"ts": w["ts"], "solar_w": int(0.25 * w["ghi_w_m2"]),
+               "output_w": 100, "battery_pct": 60}
+              for w in weather]
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    # No clear-sky pairs (all cloud=90), but 10 broad pairs available.
+    assert n == 10
+    assert abs(k - 0.25) < 0.05
+
+
 def test_simulate_soc_charges_and_discharges():
     # 5kWh battery, 1h windows: +1000W net for 2h, then -1000W net for 2h.
     # Charging now applies CHARGE_EFFICIENCY (0.90); discharge does not.
@@ -1082,6 +1132,51 @@ def test_charge_efficiency_skips_top_balance_regime():
         history.extend(_charge_window(ts, 96, 97, input_wh=1000))
     eff, _n = forecaster.fit_charge_efficiency(history, capacity_wh=30000)
     assert 0.85 <= eff <= 0.95, f"got {eff}, expected ~0.90"
+
+
+def test_charge_efficiency_subtracts_concurrent_loads():
+    # When loads run concurrently with charging (very common — solar
+    # charges battery while home draws ~150W constant baseline), only
+    # `input_wh - output_wh` is the energy actually available to store.
+    # Pre-fix the divisor was raw input_wh, so load passthrough showed
+    # up as fake "charging losses" and pulled efficiency below the
+    # LiFePO4 physical floor. With the fix, eff stays near truth.
+    history = []
+    base = 1_700_000_000
+    # Each window: input_wh=833 (e.g. solar), output_wh=500 (loads),
+    # net_input=333, ΔSOC 1pp on 30000Wh = 300Wh stored, eff=0.90.
+    for i in range(8):
+        ts = base + i * 3600 * 2
+        history.append({"ts": ts, "battery_pct": 50 + i,
+                        "input_wh": 833, "output_wh": 500,
+                        "solar_wh": 833, "ac_input_wh": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 51 + i,
+                        "input_wh": 833, "output_wh": 500,
+                        "solar_wh": 833, "ac_input_wh": 0})
+    eff, n = forecaster.fit_charge_efficiency(history, capacity_wh=30000)
+    assert n >= 5
+    assert 0.85 <= eff <= 0.95, f"got {eff}, expected ~0.90"
+
+
+def test_charge_efficiency_skips_when_loads_exceed_input():
+    # Load > input means the device is net-discharging despite reported
+    # input_wh — usually a mid-window solar drop or sensor lag. Net
+    # input goes negative (clamped to 0), falls below MIN_INPUT_WH,
+    # window skipped. Without this guard a positive ΔSOC paired with
+    # zero/tiny net_input_wh would produce divide-by-zero or absurdly
+    # large efficiency values.
+    history = []
+    base = 1_700_000_000
+    for i in range(8):
+        ts = base + i * 3600 * 2
+        # input 200, output 300 -> net negative -> skipped
+        history.append({"ts": ts, "battery_pct": 50 + i,
+                        "input_wh": 200, "output_wh": 300})
+        history.append({"ts": ts + 3600, "battery_pct": 51 + i,
+                        "input_wh": 200, "output_wh": 300})
+    eff, n = forecaster.fit_charge_efficiency(history, capacity_wh=30000)
+    assert n == 0
+    assert eff == forecaster.DEFAULT_CHARGE_EFFICIENCY
 
 
 def test_charge_efficiency_clamps_implausible_values():
