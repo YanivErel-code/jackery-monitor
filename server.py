@@ -373,33 +373,64 @@ async def poll_loop() -> None:
 
                 threshold = user_settings.get("low_battery_threshold")
                 bp = status_dict["battery_percent"]
-                if bp <= threshold and not state.low_battery_alerted:
+                # Compare the threshold against SYSTEM SOC (capacity-
+                # weighted across main + packs), not the main unit's
+                # reported `battery_percent`. On a 6-pack rig the main
+                # can read 23% while the system is at 16% — alerting on
+                # main means we'd miss the real "battery is critically
+                # low" moment. _system_soc_pct returns main_pct
+                # unchanged on single-unit devices.
+                active_sn = state.device.device_sn if state.device else None
+                active_model_code = getattr(state.device, "model_code", None) if state.device else None
+                bp_system = _system_soc_pct(float(bp), active_sn, active_model_code)
+                if bp_system <= threshold and not state.low_battery_alerted:
                     state.low_battery_alerted = True
                     await broadcast({
                         "type": "alert",
                         "data": {"level": "warning",
-                                 "message": f"Battery low: {bp}%"},
+                                 "message": f"Battery low: {bp_system:.0f}%"},
                     })
-                elif bp > threshold + 5:
+                elif bp_system > threshold + 5:
                     state.low_battery_alerted = False
 
                 # Run automation rules. The bridge polls every Jackery device
                 # so rules can target any of them, not just the active one;
                 # we build a {device_sn: soc} dict from cloud_meta and let
                 # the engine pick each rule's target.
+                #
+                # Use SYSTEM SOC (capacity-weighted across main + every
+                # expansion pack), not the main unit's `battery_percent`.
+                # On a 6-pack rig the main pack runs ~6-7pp ahead of (or
+                # behind) the system during BMS rebalancing, so a "<20%"
+                # rule against main reads 23% while the system is actually
+                # at 16% — rule never fires when it should. Same bug class
+                # as the forecaster slope-fit issue we fixed 2026-05-06,
+                # different consumer.
                 cloud = cloud_meta or {}
                 devs_telemetry = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
+                model_code_by_sn = {
+                    str(d.get("device_sn")): (
+                        int(d.get("model_code")) if d.get("model_code") is not None else None
+                    )
+                    for d in (cloud.get("devices") or [])
+                    if d.get("device_sn") is not None
+                }
                 soc_by_sn: dict[str, float] = {}
                 for sn, entry in devs_telemetry.items():
                     t = (entry or {}).get("telemetry") or {}
                     bp_dev = t.get("battery_percent")
                     if bp_dev is not None:
-                        soc_by_sn[sn] = float(bp_dev)
+                        soc_by_sn[sn] = _system_soc_pct(
+                            float(bp_dev), sn, model_code_by_sn.get(str(sn)),
+                        )
                 # Always include the active device too (for legacy rules
-                # without an explicit jackery_device_sn).
-                active_sn = state.device.device_sn if state.device else None
+                # without an explicit jackery_device_sn). active_sn /
+                # active_model_code already computed in the low-battery
+                # alert block above; reuse.
                 if active_sn and bp is not None and active_sn not in soc_by_sn:
-                    soc_by_sn[active_sn] = float(bp)
+                    soc_by_sn[active_sn] = _system_soc_pct(
+                        float(bp), active_sn, active_model_code,
+                    )
                 if soc_by_sn:
                     try:
                         fired = await state.automation.evaluate(soc_by_sn, active_sn=active_sn)
