@@ -44,3 +44,13 @@ jobs:
 
       - name: Tests (pytest)
         run: pytest -v --tb=short
+
+      # Smokes are end-to-end scripts (not pytest-collected) that spin
+      # up an in-process fake Jackery cloud and verify the cloud client
+      # + bridge boot + handshake. Without this step bridge.py and
+      # large parts of cloud_client.py have zero coverage in CI. Each
+      # script exits non-zero on assertion failure.
+      - name: Smoke (cloud_client)
+        run: python tests/smoke_cloud.py
+      - name: Smoke (bridge)
+        run: python tests/smoke_bridge.py
