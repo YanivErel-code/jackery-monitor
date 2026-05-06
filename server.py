@@ -100,7 +100,7 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778039200")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778075673")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -1392,7 +1392,11 @@ async def _smart_charge_evaluate(record: bool = True,
     # If packs are attached, the forecaster needs the system-wide SOC to
     # match the system-wide capacity it'll be paired with.
     starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
-    energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+    main_wh, pack_wh = _capacity_hints(device_sn)
+    energy_hist = state.energy.history(
+        device_sn, hours=14 * 24, bucket_s=3600,
+        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+    )
     capacity = _total_capacity_wh(device_sn, model_code)
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
@@ -2054,6 +2058,36 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "identify which nights had intervention."
             ),
         },
+        {
+            "ts_iso": "2026-05-06T14:14:33+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Slope-based fits (drain model, charge efficiency, "
+                "inverter overhead) now walk capacity-weighted SYSTEM "
+                "SOC instead of main-pack SOC on multi-pack rigs. "
+                "Root cause flagged by you 2026-05-06T13:47: with "
+                "battery_pct = main pack and capacity_wh = system "
+                "(30240 Wh on a 6-pack rig), the implied drain was "
+                "the real drain × pack_ratio (~6×), inflating "
+                "fitted parasitic_w to 316-370W vs the empirical "
+                "~130W. Implementation: energy_db.history() takes "
+                "optional (main_capacity_wh, pack_capacity_wh) and "
+                "adds `system_soc` per row by joining the closest "
+                "battery_packs snapshot (±30 min) — same logic as "
+                "the prediction-accuracy capacity-weighting. "
+                "forecaster's _row_soc() helper prefers system_soc "
+                "and falls back to battery_pct, so single-unit "
+                "devices and tests without capacity hints keep the "
+                "old behavior. Slope-magnitude thresholds switched "
+                "from pp ('≥2pp drop') to Wh ('≥100 Wh drained') so "
+                "the gate is device-agnostic — same energy floor "
+                "whether walking main or system. Expect parasitic_w "
+                "to drop sharply on multi-pack devices when this "
+                "rebuilds; the 3-8pp under-bias on long-lead "
+                "predictions you flagged in today's INFO anomaly "
+                "should resolve. Single-unit devices unchanged."
+            ),
+        },
     ]
 
 
@@ -2665,8 +2699,12 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
 
     capacity = _total_capacity_wh(device_sn, model_code)
     starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
+    main_wh, pack_wh = _capacity_hints(device_sn)
 
-    energy_hist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+    energy_hist = state.energy.history(
+        device_sn, hours=14 * 24, bucket_s=3600,
+        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+    )
     weather = await weather_client.fetch_irradiance(loc["latitude"], loc["longitude"])
     if weather.get("error"):
         return {"error": f"weather fetch failed: {weather['error']}", "configured": True}
