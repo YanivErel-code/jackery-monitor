@@ -100,7 +100,7 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1777995381")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778039200")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -1317,24 +1317,28 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
 
 
 def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
-    """Return the user's smart-charge target SOC if smart-charge is
-    enabled (mode != off) for this device, else None. The forecaster
-    uses this as a floor in `simulate_soc` so long-lead predictions
-    don't saturate at 0% — in reality the smart-charge controller
-    grid-charges when SOC drops near target. Cheap; safe to call from
-    every forecast path."""
-    if not device_sn:
-        return None
-    try:
-        cfg = smart_charge.get_config(device_sn)
-        if (cfg or {}).get("mode") == "off":
-            return None
-        target = (cfg or {}).get("target_sunrise_soc_pct")
-        if target is None:
-            return None
-        return float(target)
-    except Exception:
-        return None
+    """Always returns None — the displayed/persisted prediction is now
+    the unclamped truth, regardless of smart-charge mode.
+
+    Background: an earlier iteration applied a floor in the simulator
+    matching `target_sunrise_soc_pct` so that long-lead predictions
+    didn't saturate at 0% (the controller would grid-charge in active
+    mode, holding SOC at target). The user pushed back 2026-05-06: the
+    prediction should show the TRUTH — what the battery will actually
+    do without intervention. The controller's intervention is a separate
+    concept, surfaced via the smart-charge plan (predicted vs target +
+    deficit + charge schedule). Conflating them was a feedback loop
+    where the forecast lied to make the controller's behavior look
+    prettier, and it hid real model bias from the AI advisor (anomaly
+    2026-05-06T03:42 explicitly recommended exposing the unclamped
+    forecast).
+
+    The function is kept (returning None) rather than ripped out so the
+    git blame / rollback path is obvious. compute_plan still computes a
+    deficit against the baseline; with floor=None for everyone, the
+    `forecast` and `baseline_forecast` arguments to compute_plan are
+    identical, which the deficit math handles correctly."""
+    return None
 
 
 async def _smart_charge_evaluate(record: bool = True,
@@ -2014,6 +2018,40 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "80-100W on this device per your reconciliation "
                 "(advisor said true value ≈ 84W after subtracting "
                 "the 10% pinned overhead from 130W total)."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-06T04:14:26+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Smart-charge floor (target_sunrise_soc_pct) is "
+                "REMOVED from the displayed/persisted forecast in "
+                "every mode. Previously the simulator clamped SOC at "
+                "the target in active mode (and originally in test "
+                "mode too) so the prediction reflected what the user "
+                "would observe given controller intervention. User "
+                "explicitly rejected this 2026-05-06: the prediction "
+                "should show the TRUTH — what the battery will do "
+                "without intervention — and the controller's effect "
+                "is shown separately via the Plan (predicted vs "
+                "target + deficit + charge schedule). Conflating "
+                "them was a feedback loop and was hiding real model "
+                "bias (advisor's 03:42 anomaly directly asked for "
+                "the unclamped forecast). Post-fix: /api/forecast "
+                "and forecast_predictions are baseline. compute_plan "
+                "still uses baseline_predicted for deficit math "
+                "(unchanged); with floor=None the `forecast` and "
+                "`baseline_forecast` arguments are now identical, "
+                "and Plan.predicted_sunrise_soc_pct == "
+                "Plan.baseline_predicted_sunrise_soc_pct (both = "
+                "truth). Predictions made BEFORE this timestamp in "
+                "active mode show the floor clamp at target; those "
+                "at or after are baseline. When evaluating accuracy "
+                "for active-mode nights, expect persisted predictions "
+                "to be lower than actuals by ~target-actual_unclamped "
+                "— that's the controller's grid-charge work, not "
+                "model bias. Use the smart_charge_decisions table to "
+                "identify which nights had intervention."
             ),
         },
     ]
