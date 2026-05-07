@@ -1449,3 +1449,48 @@ def test_max_charge_w_tz_offset_shifts_night_band():
     w_pst, n_pst = forecaster.fit_max_charge_w(history, tz_offset_seconds=-28800)
     assert n_pst == 15  # 00 PST is night → all included
     assert 1150 <= w_pst <= 1250
+
+
+def test_row_soc_telemetry_distinguishes_system_soc_from_battery_pct():
+    """Sanity check on the _row_soc fallback counters: a fit fed rows
+    with `system_soc` should record only system_soc hits in the last
+    fit window; a fit fed rows with only `battery_pct` should record
+    only fallbacks. This is the diagnostic surface the user reads via
+    /api/diagnostics/row_soc to confirm whether multi-pack rigs are
+    actually walking system_soc end-to-end."""
+    base = 1_700_000_000
+
+    # Build clean-discharge history twice — once with system_soc only,
+    # once with battery_pct only. Numbers don't matter for telemetry,
+    # only that the rows trigger _row_soc() inside the fit.
+    def _build(soc_field: str) -> list[dict]:
+        rows = []
+        for i, load_w in enumerate([200, 400, 600, 800, 1000, 1200,
+                                     200, 500, 700, 900, 1100, 1300]):
+            true_drain = 300 + load_w * 1.10
+            pp_drop = true_drain / 30000 * 100
+            soc0 = 80 - i * 6
+            soc1 = round(soc0 - pp_drop, 0)
+            rows.append({"ts": base + i * 3 * 3600,
+                         soc_field: soc0,
+                         "output_wh": load_w,
+                         "solar_wh": 0, "ac_input_wh": 0})
+            rows.append({"ts": base + i * 3 * 3600 + 3600,
+                         soc_field: int(soc1),
+                         "output_wh": load_w,
+                         "solar_wh": 0, "ac_input_wh": 0})
+        return rows
+
+    forecaster.fit_drain_model(_build("system_soc"), capacity_wh=30000)
+    stats = forecaster.get_row_soc_stats()
+    win = stats["last_fit_window"]
+    assert stats["last_fit_caller"] == "fit_drain_model"
+    assert win["system_soc_hits"] > 0, win
+    assert win["battery_pct_fallbacks"] == 0, win
+
+    forecaster.fit_drain_model(_build("battery_pct"), capacity_wh=30000)
+    stats = forecaster.get_row_soc_stats()
+    win = stats["last_fit_window"]
+    assert stats["last_fit_caller"] == "fit_drain_model"
+    assert win["battery_pct_fallbacks"] > 0, win
+    assert win["system_soc_hits"] == 0, win
