@@ -112,22 +112,27 @@ def test_charges_when_predicted_sunrise_below_target(tmp_path, monkeypatch):
     assert plan.deficit_kwh < 1.0
 
 
-def test_already_at_target_coasts_outside_planned_hours(tmp_path, monkeypatch):
-    """SOC well above target and we're not in a planned charging hour →
-    coast (off). The planned hour stays scheduled in case SOC drifts —
-    if it does, the next tick re-enters CHARGING (Q5)."""
+def test_above_target_with_deficit_defers_to_planned_hour(tmp_path, monkeypatch):
+    """SOC above target now, but baseline predicts sunrise < target →
+    plan exists, action is "off" outside the planned hour, reason text
+    says "deferred" (not "coasting"). "Coasting" used to mislead the
+    user into thinking the controller had missed the deficit; the
+    planned hour stays scheduled and the next tick will flip to "on"
+    once we're inside the cheap window."""
     sc = _fresh(monkeypatch, tmp_path)
     now = int(time.time())
     fc = _build_forecast(now_ts=now, sunset_h=0, night_h=8,
                          night_predicted_soc=10.0)
     plan = sc.compute_plan(
         config={"mode": "active", "target_sunrise_soc_pct": 25},
-        current_soc_pct=80,  # already way above target
+        current_soc_pct=80,  # above target now
         forecast=fc, cost_plan=_flat_plan(), capacity_wh=5040,
     )
     assert plan.action == "off"
-    assert "coasting" in plan.reason
-    # A plan still exists in case SOC drifts mid-night.
+    assert "deferred" in plan.reason
+    assert "coasting" not in plan.reason
+    # A plan still exists for when SOC drifts mid-night into the
+    # planned hour.
     assert plan.planned_hours
 
 
