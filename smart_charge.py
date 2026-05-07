@@ -434,7 +434,47 @@ def compute_plan(
     deficit_kwh = round((deficit_pct / 100.0) * capacity_wh / 1000.0, 3)
     max_charge_w = float(config.get("max_charge_w") or 800)
     import math
-    needed_hours = max(1, math.ceil(deficit_kwh * 1000.0 / max_charge_w))
+    # `needed_hours` originally divided deficit_wh by raw max_charge_w —
+    # i.e., assumed 100% of AC input ends up stored, with no inverter
+    # losses and no concurrent loads. Two corrections, both real:
+    #
+    #   1. Charge efficiency: the inverter + LiFePO4 charging path
+    #      loses ~10% (per device, fitted by fit_charge_efficiency).
+    #      Only `max_charge_w * charge_eff` actually lands in storage.
+    #
+    #   2. Concurrent loads + parasitic: while AC is on, loads are
+    #      served from the AC supply (free), so the battery isn't
+    #      draining. The DELTA per charging hour vs the baseline
+    #      (battery-drains-at-load_w) is therefore:
+    #          (max_charge_w − load_w) * charge_eff + load_w
+    #        = max_charge_w * charge_eff + load_w * (1 − charge_eff)
+    #      The `+ load_w` term reflects drain that DIDN'T happen
+    #      because AC carried the load.
+    #
+    # When AC can't fully cover loads (max < load), DELTA collapses to
+    # max_charge_w (no net charging — battery just drains less). The
+    # branch below handles that case.
+    #
+    # On the user's flagged 1.18 kWh deficit the two formulas both
+    # round up to 1 hour; the difference bites on bigger deficits where
+    # under-counting can leave 1-2 hours short of target.
+    charge_eff = float((baseline_forecast or forecast).get("charge_efficiency")
+                       or 0.90)
+    fc_hours_for_load = (baseline_forecast or forecast).get("forecast") or []
+    margin_end_for_avg = sunrise_ts - SUNRISE_MARGIN_S
+    window_loads = [
+        float(h.get("load_w") or 0)
+        for h in fc_hours_for_load
+        if h.get("ts") is not None and now <= h["ts"] < margin_end_for_avg
+    ]
+    avg_load_w = ((sum(window_loads) / len(window_loads))
+                  if window_loads else 300.0)
+    if max_charge_w > avg_load_w:
+        hourly_gain_wh = (max_charge_w - avg_load_w) * charge_eff + avg_load_w
+    else:
+        hourly_gain_wh = max_charge_w
+    hourly_gain_wh = max(hourly_gain_wh, 100.0)
+    needed_hours = max(1, math.ceil(deficit_kwh * 1000.0 / hourly_gain_wh))
 
     # Build the planned-hours set. Window: [now_floor, sunrise - margin).
     # The hour ENDING at (sunrise - margin) — i.e., starting at
