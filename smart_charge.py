@@ -479,10 +479,25 @@ def compute_plan(
     # — overshooting now is fine (Q5: "we can overshoot, but not
     # undershoot"). The check is simpler than it sounds: if soc ≥
     # target right now AND we're not in a planned hour, off.
+    #
+    # Reason text distinguishes two flavors of "off":
+    #   • coasting — no deficit, nothing scheduled (dead branch by
+    #     here since baseline_predicted ≥ target returns earlier at
+    #     line 418, kept as a defensive default).
+    #   • deferred — baseline forecast undershoots target, planned
+    #     cheap hour exists but hasn't arrived; UI renders the time
+    #     from `window_start`. Saying "coasting" here misled the user
+    #     into thinking the controller had missed the deficit.
     if soc_now >= target and not in_planned and not extension_active:
+        if planned_hours:
+            reason = (f"deferred: SOC {soc_now:.0f}% ≥ target now, but "
+                      f"sunrise {baseline_predicted:.0f}% < target "
+                      f"{target:.0f}% — charging in scheduled cheap hour")
+        else:
+            reason = f"SOC {soc_now:.0f}% ≥ target {target:.0f}%; coasting"
         return Plan(
             action="off",
-            reason=f"SOC {soc_now:.0f}% ≥ target {target:.0f}%; coasting",
+            reason=reason,
             mode=mode, decided_at=now,
             current_soc_pct=soc_now,
             predicted_sunrise_soc_pct=predicted,
