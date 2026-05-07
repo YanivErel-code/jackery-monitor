@@ -480,19 +480,35 @@ def compute_plan(
     # undershoot"). The check is simpler than it sounds: if soc ≥
     # target right now AND we're not in a planned hour, off.
     #
-    # Reason text distinguishes two flavors of "off":
+    # Reason text distinguishes three flavors of "off":
     #   • coasting — no deficit, nothing scheduled (dead branch by
     #     here since baseline_predicted ≥ target returns earlier at
     #     line 418, kept as a defensive default).
-    #   • deferred — baseline forecast undershoots target, planned
-    #     cheap hour exists but hasn't arrived; UI renders the time
-    #     from `window_start`. Saying "coasting" here misled the user
-    #     into thinking the controller had missed the deficit.
+    #   • deferred to cheaper window — current hour costs strictly
+    #     more than the planned hour. Charging now would be wasteful.
+    #   • deferred to deadline anchor — rates are tied (e.g., flat
+    #     plan). The controller picked the latest eligible hour to
+    #     "hug the deadline" and minimize drain between charge end
+    #     and sunrise. Saying "cheap hour" here was misleading —
+    #     no cheaper hour exists, just a deferral to reduce redrain.
     if soc_now >= target and not in_planned and not extension_active:
         if planned_hours:
-            reason = (f"deferred: SOC {soc_now:.0f}% ≥ target now, but "
+            current_rate = rate_at(cost_plan, now_hour, tz_offset_seconds)
+            from datetime import datetime, timedelta, timezone
+            tz = timezone(timedelta(seconds=tz_offset_seconds or 0))
+            hh_mm = datetime.fromtimestamp(planned_hours[0],
+                                            tz=tz).strftime("%H:%M")
+            saving_money = (
+                current_rate is not None and cheapest_rate is not None
+                and current_rate > cheapest_rate + 1e-6
+            )
+            if saving_money:
+                why = f"cheaper window @ ${cheapest_rate:.2f}/kWh"
+            else:
+                why = "near sunrise to minimize drain"
+            reason = (f"deferred: SOC {soc_now:.0f}% ≥ target now, "
                       f"sunrise {baseline_predicted:.0f}% < target "
-                      f"{target:.0f}% — charging in scheduled cheap hour")
+                      f"{target:.0f}% — charging at {hh_mm} ({why})")
         else:
             reason = f"SOC {soc_now:.0f}% ≥ target {target:.0f}%; coasting"
         return Plan(
