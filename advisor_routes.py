@@ -89,22 +89,47 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
     main_wh = forecaster.battery_capacity_wh(model_code)
     pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
 
+    # Compute both legacy 14d-all and a post-fix slice gated on the
+    # forecaster's last breaking-change cutoff, mirroring
+    # /api/forecast/accuracy. The post-fix slice is what the advisor
+    # should reason from; the legacy summary is kept for continuity.
+    try:
+        from server import FORECASTER_BREAKING_CHANGE_TS  # type: ignore
+    except Exception:
+        # Deferred / fallback path — server.py imports this module at
+        # load time, so a top-level import would cycle. Read the same
+        # env var with the same default as server.py:103.
+        import os as _os
+        FORECASTER_BREAKING_CHANGE_TS = int(
+            _os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778099869")
+        )
+
+    def _bucket(samples) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for s in samples:
+            h = s["lead_time_h"]
+            bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
+            b = out.setdefault(bucket, {"n": 0, "sum_err": 0.0})
+            b["n"] += 1
+            b["sum_err"] += s["error"]
+        for b in out.values():
+            b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
+            del b["sum_err"]
+        return out
+
     accuracy_summary: dict[str, dict[str, float]] = {}
+    accuracy_summary_post_fix: dict[str, dict[str, float]] = {}
     try:
         samples_acc = state.energy.prediction_accuracy(
             device_sn,
             main_capacity_wh=main_wh,
             pack_capacity_wh=pack_wh,
         )
-        for s in samples_acc:
-            h = s["lead_time_h"]
-            bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
-            b = accuracy_summary.setdefault(bucket, {"n": 0, "sum_err": 0.0})
-            b["n"] += 1
-            b["sum_err"] += s["error"]
-        for b in accuracy_summary.values():
-            b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
-            del b["sum_err"]
+        accuracy_summary = _bucket(samples_acc)
+        accuracy_summary_post_fix = _bucket(
+            [s for s in samples_acc
+             if (s.get("made_at") or 0) >= FORECASTER_BREAKING_CHANGE_TS]
+        )
     except Exception as e:
         log.debug("advisor: accuracy summary failed: %s", e)
 
@@ -188,6 +213,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
                 "action": d.get("action"),
                 "mode": d.get("mode"),
                 "predicted_sunrise_soc_pct": d.get("predicted_sunrise_soc_pct"),
+                "baseline_predicted_sunrise_soc_pct": d.get("baseline_predicted_sunrise_soc_pct"),
                 "actual_sunrise_soc_pct": d.get("actual_sunrise_soc_pct"),
                 "target_sunrise_soc_pct": d.get("target_sunrise_soc_pct"),
                 "reason": d.get("reason"),
@@ -218,6 +244,9 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
                                    if fitted_parasitic_w is not None else None),
         "fitted_idle_overhead_n_windows": fitted_drain_n,
         "forecast_accuracy_summary": accuracy_summary,
+        "forecast_accuracy_summary_post_fix": accuracy_summary_post_fix,
+        "forecaster_cutoff_ts": FORECASTER_BREAKING_CHANGE_TS,
+        "forecaster_cutoff_iso": _iso(FORECASTER_BREAKING_CHANGE_TS),
         "recent_samples": recent_samples,
         "recent_weather": recent_weather,
         "recent_predictions": recent_predictions,
