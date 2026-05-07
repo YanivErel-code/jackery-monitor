@@ -179,6 +179,10 @@ def test_smart_charge_analytics_includes_mode_and_reason(db):
             "predicted_sunrise_soc_pct": 60.0,
             "target_sunrise_soc_pct": 35.0,
             "sunrise_ts": sunrise,
+            # Baseline (counterfactual no-AC) sunrise SOC must round-trip
+            # through the DB so the advisor can distinguish floor-clamp
+            # from structural pessimism on historic rows.
+            "baseline_predicted_sunrise_soc_pct": 42.5,
         },
         executed=False,
     )
@@ -195,6 +199,13 @@ def test_smart_charge_analytics_includes_mode_and_reason(db):
     assert row["mode"] == "test"
     assert row["action"] == "off"
     assert "coasting" in row["reason"]
+    assert row["baseline_predicted_sunrise_soc_pct"] == 42.5
+
+    # Also round-trips through list_smart_charge_decisions (the path the
+    # advisor bundle reads from).
+    listed = db.list_smart_charge_decisions(sn, limit=10)
+    assert len(listed) == 1
+    assert listed[0]["baseline_predicted_sunrise_soc_pct"] == 42.5
 
 
 def test_prediction_accuracy_capacity_weights_actual_soc(db):
@@ -303,3 +314,26 @@ def test_prediction_accuracy_filters_by_made_at_cutoff(db):
     filtered = db.prediction_accuracy(sn, since_made_at_ts=cutoff)
     assert len(filtered) == 1
     assert filtered[0]["predicted_soc"] == 70.0
+
+
+def test_bucket_accuracy_returns_signed_bias_alongside_mae():
+    """`_bucket_accuracy` must return BOTH `mae` (unsigned) and `bias_pp`
+    (signed mean of predicted - actual). Two predictions in the ≤6h
+    bucket: one over by 4pp, one under by 2pp. MAE = 3.0, bias = +1.0.
+    Bias surfaces systematic skew that MAE collapses to its absolute
+    value and hides."""
+    pytest.importorskip("Crypto", reason="server.py needs pycryptodome")
+    from server import _bucket_accuracy
+    samples = [
+        # over-prediction: predicted 70, actual 66  → err=4, signed=+4
+        {"lead_time_h": 2, "predicted_soc": 70.0, "actual_soc": 66.0,
+         "error": 4.0},
+        # under-prediction: predicted 50, actual 52 → err=2, signed=-2
+        {"lead_time_h": 5, "predicted_soc": 50.0, "actual_soc": 52.0,
+         "error": 2.0},
+    ]
+    out = _bucket_accuracy(samples)
+    bucket = out["≤6h"]
+    assert bucket["n"] == 2
+    assert bucket["mae"] == 3.0
+    assert bucket["bias_pp"] == 1.0  # (+4 + -2) / 2 = +1.0

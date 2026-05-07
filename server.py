@@ -2222,27 +2222,36 @@ async def forecast_recorder_loop() -> None:
 class AccuracyBucket(TypedDict, total=False):
     """One row of the prediction-accuracy summary table. `n` is the
     sample count in this lead-time bucket; `mae` is the mean absolute
-    error after summing. `sum_err` is a transient accumulator stripped
-    before return — declared `total=False` so the cleaned shape still
-    type-checks."""
+    error after summing; `bias` is the signed mean of (predicted -
+    actual), so a negative bias = under-prediction. `sum_err` and
+    `sum_signed` are transient accumulators stripped before return —
+    declared `total=False` so the cleaned shape still type-checks."""
     n: int
     mae: float
+    bias: float
     sum_err: float
+    sum_signed: float
 
 
 def _bucket_accuracy(samples: list[dict]) -> dict[str, AccuracyBucket]:
-    """Aggregate prediction-accuracy rows into MAE-per-lead-bucket. Pure;
-    no I/O. Used for both the legacy 14d summary and the post-fix slice."""
+    """Aggregate prediction-accuracy rows into MAE+bias-per-lead-bucket.
+    Pure; no I/O. Used for both the legacy 14d summary and the post-fix
+    slice. `bias` is the signed mean of (predicted - actual): negative
+    means the model systematically under-predicts SOC, which MAE alone
+    would hide if errors are roughly symmetric in magnitude."""
     summary: dict[str, AccuracyBucket] = {}
     for s in samples:
         h = s["lead_time_h"]
         bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
-        b = summary.setdefault(bucket, {"n": 0, "sum_err": 0.0})
+        b = summary.setdefault(bucket, {"n": 0, "sum_err": 0.0, "sum_signed": 0.0})
         b["n"] += 1
         b["sum_err"] += s["error"]
+        b["sum_signed"] += float(s["predicted_soc"]) - float(s["actual_soc"])
     for b in summary.values():
         b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
+        b["bias_pp"] = round(b["sum_signed"] / b["n"], 2) if b["n"] else 0
         del b["sum_err"]
+        del b["sum_signed"]
     return summary
 
 
