@@ -617,6 +617,35 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             )
         return len(prepared)
 
+    def pack_snapshot_summary(self, parent_sn: str,
+                              since_ts: int) -> dict[str, Any]:
+        """Cheap health-check on the battery_packs join used to compute
+        system_soc. Returns counts since `since_ts`:
+          - n_pack_snapshots: number of rows in battery_packs
+          - distinct_packs_seen: number of distinct pack_sns
+          - distinct_orders_seen: number of distinct device_orders
+          - latest_ts: most recent snapshot epoch (None if no rows)
+        Used by /api/diagnostics/row_soc to show per-device pack health."""
+        if not parent_sn:
+            return {"n_pack_snapshots": 0, "distinct_packs_seen": 0,
+                    "distinct_orders_seen": 0, "latest_ts": None}
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT COUNT(*) AS n,
+                          COUNT(DISTINCT pack_sn) AS d_packs,
+                          COUNT(DISTINCT device_order) AS d_orders,
+                          MAX(ts) AS latest
+                     FROM battery_packs
+                    WHERE parent_sn = ? AND ts >= ?""",
+                (parent_sn, int(since_ts)),
+            ).fetchone()
+        return {
+            "n_pack_snapshots": int(row[0] or 0),
+            "distinct_packs_seen": int(row[1] or 0),
+            "distinct_orders_seen": int(row[2] or 0),
+            "latest_ts": int(row[3]) if row[3] is not None else None,
+        }
+
     def latest_battery_packs(self, parent_sn: str) -> list[dict]:
         """Most recent snapshot of all packs for a given main device. Returns
         rows ordered by device_order so the UI renders them in app order."""

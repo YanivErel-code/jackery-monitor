@@ -23,14 +23,98 @@ models fall back to 3024 Wh (HomePower 3000 size).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("forecaster")
+
+
+# ---------- _row_soc telemetry ----------
+# Lifetime counters tracking which SOC field _row_soc() actually walked
+# on each call. Used by /api/diagnostics/row_soc to confirm whether
+# multi-pack rigs are walking system_soc or silently falling back to
+# main-pack battery_pct (the failure mode advisor flagged 2026-05-06).
+_ROW_SOC_STATS: dict[str, Any] = {
+    "system_soc_hits": 0,
+    "battery_pct_fallbacks": 0,
+    "none_returns": 0,
+    "last_fit_at": None,
+    "last_fit_caller": None,
+    "last_fit_window": {
+        "system_soc_hits": 0,
+        "battery_pct_fallbacks": 0,
+        "none_returns": 0,
+    },
+    "since_ts": int(time.time()),
+}
+_ROW_SOC_STATS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _row_soc_fit_window(caller_name: str):
+    """Bracket a fit invocation so we can capture the per-fit deltas of
+    _row_soc's system_soc vs battery_pct usage. Counters are global; we
+    snapshot before/after under the lock to compute the window."""
+    with _ROW_SOC_STATS_LOCK:
+        before = {
+            "system_soc_hits": _ROW_SOC_STATS["system_soc_hits"],
+            "battery_pct_fallbacks": _ROW_SOC_STATS["battery_pct_fallbacks"],
+            "none_returns": _ROW_SOC_STATS["none_returns"],
+        }
+    try:
+        yield
+    finally:
+        with _ROW_SOC_STATS_LOCK:
+            _ROW_SOC_STATS["last_fit_at"] = int(time.time())
+            _ROW_SOC_STATS["last_fit_caller"] = caller_name
+            _ROW_SOC_STATS["last_fit_window"] = {
+                "system_soc_hits": (
+                    _ROW_SOC_STATS["system_soc_hits"] - before["system_soc_hits"]
+                ),
+                "battery_pct_fallbacks": (
+                    _ROW_SOC_STATS["battery_pct_fallbacks"]
+                    - before["battery_pct_fallbacks"]
+                ),
+                "none_returns": (
+                    _ROW_SOC_STATS["none_returns"] - before["none_returns"]
+                ),
+            }
+
+
+def get_row_soc_stats() -> dict[str, Any]:
+    """Snapshot of the _row_soc telemetry counters. Returned dict is a
+    copy; the caller can mutate freely."""
+    with _ROW_SOC_STATS_LOCK:
+        return {
+            "system_soc_hits": _ROW_SOC_STATS["system_soc_hits"],
+            "battery_pct_fallbacks": _ROW_SOC_STATS["battery_pct_fallbacks"],
+            "none_returns": _ROW_SOC_STATS["none_returns"],
+            "last_fit_at": _ROW_SOC_STATS["last_fit_at"],
+            "last_fit_caller": _ROW_SOC_STATS["last_fit_caller"],
+            "last_fit_window": dict(_ROW_SOC_STATS["last_fit_window"]),
+            "since_ts": _ROW_SOC_STATS["since_ts"],
+        }
+
+
+def _track_row_soc(caller_name: str):
+    """Decorator for fit functions that call _row_soc(): captures the
+    per-call delta of system_soc-vs-battery_pct usage so the diagnostics
+    endpoint can show whether the most recent fit walked system SOC."""
+    def deco(fn):
+        def wrapper(*args, **kwargs):
+            with _row_soc_fit_window(caller_name):
+                return fn(*args, **kwargs)
+        wrapper.__wrapped__ = fn
+        wrapper.__name__ = fn.__name__
+        wrapper.__doc__ = fn.__doc__
+        return wrapper
+    return deco
 
 # Battery capacity (Wh) by Jackery cloud model_code, loaded from
 # `models.json` at module import. Keeping this catalog in a JSON file
@@ -339,11 +423,20 @@ def _row_soc(row: dict[str, Any]) -> float | None:
     ~130W on the 30240 Wh / 6-pack rig 2026-05-06."""
     s = row.get("system_soc")
     if s is not None:
+        with _ROW_SOC_STATS_LOCK:
+            _ROW_SOC_STATS["system_soc_hits"] += 1
         return float(s)
     p = row.get("battery_pct")
-    return float(p) if p is not None else None
+    if p is not None:
+        with _ROW_SOC_STATS_LOCK:
+            _ROW_SOC_STATS["battery_pct_fallbacks"] += 1
+        return float(p)
+    with _ROW_SOC_STATS_LOCK:
+        _ROW_SOC_STATS["none_returns"] += 1
+    return None
 
 
+@_track_row_soc("fit_inverter_overhead_pct")
 def fit_inverter_overhead_pct(
     energy_history: list[dict[str, Any]],
     capacity_wh: int,
@@ -442,6 +535,7 @@ def fit_inverter_overhead_pct(
     return float(median), len(pcts)
 
 
+@_track_row_soc("fit_drain_model")
 def fit_drain_model(
     energy_history: list[dict[str, Any]],
     capacity_wh: int,
@@ -890,6 +984,7 @@ def fit_max_charge_w(
 
 
 # ---------- charge efficiency ----------
+@_track_row_soc("fit_charge_efficiency")
 def fit_charge_efficiency(
     energy_history: list[dict[str, Any]],
     capacity_wh: int,

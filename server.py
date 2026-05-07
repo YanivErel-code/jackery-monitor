@@ -2289,6 +2289,87 @@ def api_forecast_accuracy(device_sn: str | None = None,
     }
 
 
+@app.get("/api/diagnostics/row_soc")
+def api_diagnostics_row_soc():
+    """Telemetry on whether forecaster._row_soc() is walking system_soc
+    (capacity-weighted across packs) or silently falling back to
+    main-pack battery_pct on multi-pack rigs. The latter is the failure
+    mode advisor flagged 2026-05-06: _cached_history() and the advisor
+    bundle drop the capacity-hint kwargs into history(), so system_soc
+    is never attached to the rows the resolver fits consume.
+
+    Lifetime counters track _row_soc's selection across every call;
+    last_fit_window is the delta captured during the most recent fit
+    (whichever of fit_drain_model / fit_inverter_overhead_pct /
+    fit_charge_efficiency ran last). For each known device we also
+    surface capacity hints + a count of pack snapshots in the last
+    14 days, since "no system_soc" can be either a missing-kwarg bug
+    or a missing-pack-snapshots data gap."""
+    stats = forecaster.get_row_soc_stats()
+    last_at = stats.get("last_fit_at")
+    stats["last_fit_at_iso"] = (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(last_at)))
+        if last_at else None
+    )
+    win = stats.get("last_fit_window") or {}
+    win_total = (
+        int(win.get("system_soc_hits", 0))
+        + int(win.get("battery_pct_fallbacks", 0))
+        + int(win.get("none_returns", 0))
+    )
+    life_total = (
+        int(stats.get("system_soc_hits", 0))
+        + int(stats.get("battery_pct_fallbacks", 0))
+        + int(stats.get("none_returns", 0))
+    )
+    fallback_ratio_lifetime = (
+        round(stats["battery_pct_fallbacks"] / life_total, 4)
+        if life_total else None
+    )
+    fallback_ratio_last_fit = (
+        round(int(win.get("battery_pct_fallbacks", 0)) / win_total, 4)
+        if win_total else None
+    )
+    if win_total == 0:
+        verdict = "no_data"
+    elif int(win.get("system_soc_hits", 0)) / win_total >= 0.9:
+        verdict = "system_soc_dominant"
+    elif int(win.get("battery_pct_fallbacks", 0)) / win_total >= 0.9:
+        verdict = "fallback_dominant"
+    else:
+        verdict = "mixed"
+
+    since_ts = int(time.time()) - 14 * 86400
+    devices: list[dict] = []
+    for d in state.energy.list_devices():
+        sn = d.get("device_sn")
+        if not sn:
+            continue
+        main_wh, pack_wh = _capacity_hints(sn)
+        pack_health = state.energy.pack_snapshot_summary(sn, since_ts)
+        devices.append({
+            "device_sn": sn,
+            "model_code": d.get("model_code"),
+            "model_name": d.get("model_name"),
+            "main_capacity_wh": main_wh,
+            "pack_capacity_wh": pack_wh,
+            "n_pack_snapshots_14d": pack_health["n_pack_snapshots"],
+            "distinct_packs_seen": pack_health["distinct_packs_seen"],
+            "distinct_orders_seen": pack_health["distinct_orders_seen"],
+            "latest_pack_snapshot_ts": pack_health["latest_ts"],
+        })
+
+    return {
+        "stats": stats,
+        "interpretation": {
+            "fallback_ratio_lifetime": fallback_ratio_lifetime,
+            "fallback_ratio_last_fit": fallback_ratio_last_fit,
+            "verdict": verdict,
+        },
+        "devices": devices,
+    }
+
+
 @app.get("/api/daily_summary")
 def api_daily_summary(device_sn: str | None = None, days: int = 7):
     """Daily sunset/sunrise predicted vs actual SOC rows. Sourced from
