@@ -109,12 +109,15 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         for s in samples:
             h = s["lead_time_h"]
             bucket = "≤6h" if h <= 6 else "≤24h" if h <= 24 else "≤72h" if h <= 72 else ">72h"
-            b = out.setdefault(bucket, {"n": 0, "sum_err": 0.0})
+            b = out.setdefault(bucket, {"n": 0, "sum_err": 0.0, "sum_signed": 0.0})
             b["n"] += 1
             b["sum_err"] += s["error"]
+            b["sum_signed"] += float(s["predicted_soc"]) - float(s["actual_soc"])
         for b in out.values():
             b["mae"] = round(b["sum_err"] / b["n"], 2) if b["n"] else 0
+            b["bias_pp"] = round(b["sum_signed"] / b["n"], 2) if b["n"] else 0
             del b["sum_err"]
+            del b["sum_signed"]
         return out
 
     accuracy_summary: dict[str, dict[str, float]] = {}

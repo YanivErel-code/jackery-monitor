@@ -2157,14 +2157,16 @@ $('dbg-forecast-buckets')?.addEventListener('click', async () => {
     : '—';
   const buckets = ['≤6h', '≤24h', '≤72h', '>72h'];
   const rows = buckets.map(bucket => {
-    const a = all[bucket] || { n: 0, mae: null };
-    const p = postFix[bucket] || { n: 0, mae: null };
+    const a = all[bucket] || { n: 0, mae: null, bias_pp: null };
+    const p = postFix[bucket] || { n: 0, mae: null, bias_pp: null };
     return {
       lead_time: bucket,
       all_samples: a.n,
       all_mae_pp: a.mae,
+      all_bias_pp: a.bias_pp,
       post_fix_samples: p.n,
       post_fix_mae_pp: p.mae,
+      post_fix_bias_pp: p.bias_pp,
     };
   });
   _dbgSummary(

@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS smart_charge_decisions (
     sunrise_ts                INTEGER,
     cheapest_rate             REAL,
     narration                 TEXT,
+    baseline_predicted_sunrise_soc_pct REAL,
     PRIMARY KEY (decided_at, device_sn)
 );
 CREATE INDEX IF NOT EXISTS idx_sc_decided ON smart_charge_decisions(decided_at);
@@ -361,6 +362,17 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 "PRAGMA table_info(devices)").fetchall()}
             if "capacity_wh_override" not in existing_dev:
                 c.execute("ALTER TABLE devices ADD COLUMN capacity_wh_override INTEGER")
+            # smart_charge_decisions: baseline_predicted_sunrise_soc_pct added
+            # so we can distinguish floor-clamp (predicted == target) from
+            # structural pessimism (baseline well under target) on historic
+            # rows. Pre-existing rows stay NULL — only new ticks fill it.
+            existing_sc = {row[1] for row in c.execute(
+                "PRAGMA table_info(smart_charge_decisions)").fetchall()}
+            if "baseline_predicted_sunrise_soc_pct" not in existing_sc:
+                c.execute(
+                    "ALTER TABLE smart_charge_decisions "
+                    "ADD COLUMN baseline_predicted_sunrise_soc_pct REAL"
+                )
 
     # ---------- ingestion ----------
     def upsert_device(self, device_sn: str, name: str | None,

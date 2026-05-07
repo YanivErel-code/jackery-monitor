@@ -45,6 +45,7 @@ class AutomationTablesMixin:
             plan.get("sunrise_ts"),
             plan.get("cheapest_rate"),
             (narration or "")[:512],
+            plan.get("baseline_predicted_sunrise_soc_pct"),
         )
         with self._conn() as c:
             c.execute(
@@ -53,8 +54,8 @@ class AutomationTablesMixin:
                         current_soc_pct, predicted_sunrise_soc_pct,
                         target_sunrise_soc_pct, deficit_kwh,
                         window_start, window_end, sunrise_ts, cheapest_rate,
-                        narration)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        narration, baseline_predicted_sunrise_soc_pct)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 row,
             )
 
@@ -67,7 +68,7 @@ class AutomationTablesMixin:
                         current_soc_pct, predicted_sunrise_soc_pct,
                         target_sunrise_soc_pct, deficit_kwh,
                         window_start, window_end, sunrise_ts, cheapest_rate,
-                        narration
+                        narration, baseline_predicted_sunrise_soc_pct
                  FROM smart_charge_decisions"""
         clauses = []
         if device_sn:
@@ -89,7 +90,8 @@ class AutomationTablesMixin:
              "target_sunrise_soc_pct": r[8], "deficit_kwh": r[9],
              "window_start": r[10], "window_end": r[11],
              "sunrise_ts": r[12], "cheapest_rate": r[13],
-             "narration": r[14]}
+             "narration": r[14],
+             "baseline_predicted_sunrise_soc_pct": r[15]}
             for r in rows
         ]
 
@@ -118,7 +120,8 @@ class AutomationTablesMixin:
                             WHERE s.device_sn = d.device_sn
                               AND s.bucket >= d.sunrise_ts - 1800
                               AND s.bucket <  d.sunrise_ts + 1800
-                              AND s.last_battery_pct IS NOT NULL) AS main_soc
+                              AND s.last_battery_pct IS NOT NULL) AS main_soc,
+                          d.baseline_predicted_sunrise_soc_pct
                      FROM smart_charge_decisions d
                     WHERE d.device_sn = ?
                       AND d.decided_at >= ?
@@ -155,6 +158,7 @@ class AutomationTablesMixin:
                                         if r[3] is not None else None,
                 "target_hit": (actual >= float(r[4]))
                               if r[4] is not None else None,
+                "baseline_predicted_sunrise_soc_pct": r[9],
             })
         return out
 
