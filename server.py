@@ -2422,7 +2422,17 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
     SOLAR_NOISE_WH = 50.0
     AC_NOISE_WH = 50.0
     MIN_OUT_W = 50.0
-    capacity = _total_capacity_wh(device_sn, None)
+    # Resolve the device's actual model_code so we use the right
+    # system capacity. Passing None defaulted to the 1500-class
+    # 18144 Wh capacity and made every drain calc 1.667× too low.
+    cloud = state.last_cloud_meta or {}
+    model_code = None
+    for d in (cloud.get("devices") or []):
+        if str(d.get("device_sn")) == str(device_sn):
+            mc = d.get("model_code")
+            model_code = int(mc) if mc is not None else None
+            break
+    capacity = _total_capacity_wh(device_sn, model_code)
     overhead = forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
     windows: list[dict[str, Any]] = []
@@ -2498,6 +2508,21 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
     implied_sys = [w["implied_parasitic_w_system"] for w in windows
                    if w["implied_parasitic_w_system"] is not None]
 
+    # Also expose the multi-hour clean-discharge runs that
+    # fit_drain_model's narrow-load fallback uses for the parasitic
+    # median. These are the actual inputs to the fit when load
+    # distribution is narrow (which it is on this device).
+    run_pairs = forecaster._clean_discharge_runs(rows, capacity)
+    runs_detail = []
+    for load_w, drain_w in run_pairs:
+        implied = drain_w - load_w * (1 + overhead)
+        runs_detail.append({
+            "load_w": round(load_w, 1),
+            "drain_w": round(drain_w, 1),
+            "implied_parasitic_w": round(implied, 1),
+        })
+    runs_implied = [r["implied_parasitic_w"] for r in runs_detail]
+
     return {
         "device_sn": device_sn,
         "hours": hours,
@@ -2506,6 +2531,9 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
         "n_windows": len(windows),
         "median_implied_parasitic_w_main": _median(implied_main),
         "median_implied_parasitic_w_system": _median(implied_sys),
+        "n_runs": len(runs_detail),
+        "median_implied_parasitic_w_runs": _median(runs_implied),
+        "runs": runs_detail,
         "windows": windows,
     }
 
