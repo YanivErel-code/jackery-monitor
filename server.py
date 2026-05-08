@@ -102,7 +102,7 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778281000")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778312000")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -2509,19 +2509,25 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
                    if w["implied_parasitic_w_system"] is not None]
 
     # Also expose the multi-hour clean-discharge runs that
-    # fit_drain_model's narrow-load fallback uses for the parasitic
-    # median. These are the actual inputs to the fit when load
-    # distribution is narrow (which it is on this device).
-    run_pairs = forecaster._clean_discharge_runs(rows, capacity)
+    # fit_drain_model's narrow-load fallback uses. These are the
+    # actual inputs to the fit when load distribution is narrow
+    # (which it is on this device). Surface each run's dt_h plus the
+    # dt²-weighted median so the user can see the headline number the
+    # fit actually produces (matching what server-side surfaces).
+    run_triples = forecaster._clean_discharge_runs(rows, capacity)
     runs_detail = []
-    for load_w, drain_w in run_pairs:
+    weighted_pairs: list[tuple[float, float]] = []
+    for load_w, drain_w, dt_h in run_triples:
         implied = drain_w - load_w * (1 + overhead)
         runs_detail.append({
+            "dt_h": round(dt_h, 2),
             "load_w": round(load_w, 1),
             "drain_w": round(drain_w, 1),
             "implied_parasitic_w": round(implied, 1),
         })
+        weighted_pairs.append((implied, dt_h * dt_h))
     runs_implied = [r["implied_parasitic_w"] for r in runs_detail]
+    weighted_median = forecaster._length_weighted_median(weighted_pairs)
 
     return {
         "device_sn": device_sn,
@@ -2533,6 +2539,9 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
         "median_implied_parasitic_w_system": _median(implied_sys),
         "n_runs": len(runs_detail),
         "median_implied_parasitic_w_runs": _median(runs_implied),
+        "weighted_median_implied_parasitic_w_runs": (
+            round(weighted_median, 1) if weighted_median is not None else None
+        ),
         "runs": runs_detail,
         "windows": windows,
     }

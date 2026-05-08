@@ -598,6 +598,29 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "fix."
             ),
         },
+        {
+            "ts_iso": "2026-05-09T03:30:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "fit_drain_model's narrow-load fallback now uses a "
+                "dt²-weighted median over clean-discharge runs instead "
+                "of a plain median. Long runs (e.g. 9h overnight) carry "
+                "far more signal than short 2-3h runs because "
+                "quantization noise on system_soc scales as ~151/dt_h W "
+                "of drain noise per run; weighting by dt² is the "
+                "Bayesian-optimal combiner. User's 5/8 diagnostic dump "
+                "showed a 9h run implying 321W parasitic alongside "
+                "several short 2-3h runs implying 43-150W; plain "
+                "median landed at 225W. Weighted median pulls toward "
+                "the long run's ~300W, matching the 9h reconciliation. "
+                "Don't re-flag the 'parasitic too low' anomaly until "
+                "the post-fix value lands. Note: the advisor's "
+                "previous 1172W reconciliation used `main SOC × system "
+                "capacity` which re-introduces the pack-ratio bias "
+                "fixed in eee1228; system-soc-based reconciliation on "
+                "the same window gives ~840W → ~320W parasitic."
+            ),
+        },
     ]
 
 

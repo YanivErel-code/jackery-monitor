@@ -687,14 +687,25 @@ def fit_drain_model(
     # signal. Advisor flagged this 2026-05-05T18:57 — fitted parasitic
     # was 103.8 W vs the reconciled-truth ~385 W.
     if load_range_ratio < MIN_LOAD_RANGE_FOR_JOINT_FIT:
-        run_pairs = _clean_discharge_runs(rows, capacity_wh)
-        if len(run_pairs) >= 2:
-            implied = sorted(
-                d - load * (1.0 + default_overhead_pct) for load, d in run_pairs
-            )
-            parasitic_w = implied[len(implied) // 2]
-            if 0 <= parasitic_w <= 1000:
-                return float(parasitic_w), float(default_overhead_pct), len(run_pairs)
+        run_triples = _clean_discharge_runs(rows, capacity_wh)
+        if len(run_triples) >= 2:
+            # Length-weighted median: weight each run's implied
+            # parasitic by dt² (variance ~ 1/dt² for fixed pp
+            # quantization noise on system_soc, so optimal weight is
+            # dt²). Long runs (e.g. 9h overnight) carry far more
+            # signal than short 2h runs and should dominate. Plain
+            # median pulled the estimate toward noisy short runs:
+            # the user's 5/8 9h overnight implied 321W parasitic but
+            # the unweighted median across 10 mixed-length runs
+            # landed at 225W, so the simulator under-predicted
+            # overnight drain by ~100W.
+            weighted = [
+                (d - load * (1.0 + default_overhead_pct), dt_h * dt_h)
+                for load, d, dt_h in run_triples
+            ]
+            parasitic_w = _length_weighted_median(weighted)
+            if parasitic_w is not None and 0 <= parasitic_w <= 1000:
+                return float(parasitic_w), float(default_overhead_pct), len(run_triples)
         # Run-based fit didn't produce enough samples — last-resort
         # fallback to the per-pair median (noisier but better than
         # leaving the user on cold-start defaults indefinitely).
@@ -738,12 +749,22 @@ def fit_drain_model(
 def _clean_discharge_runs(
     sorted_rows: list[dict[str, Any]],
     capacity_wh: int,
-) -> list[tuple[float, float]]:
+) -> list[tuple[float, float, float]]:
     """Walk consecutive clean-discharge buckets (no solar, no AC charge,
-    SOC available) and emit one `(avg_load_w, observed_drain_w)` pair
-    per run. Only runs that span ≥ MIN_RUN_HOURS with ≥ MIN_RUN_SOC_DROP
-    qualify, so quantization noise (±1pp on each end of the run) is
-    small relative to the observed drop.
+    SOC available) and emit one `(avg_load_w, observed_drain_w, dt_h)`
+    triple per run. Only runs that span ≥ MIN_RUN_HOURS with
+    ≥ MIN_RUN_SOC_DROP qualify, so quantization noise (±1pp on each
+    end of the run) is small relative to the observed drop.
+
+    Returns dt_h alongside the load+drain pair so callers can
+    length-weight the run when computing a parasitic estimate. Long
+    runs (e.g. 9h overnight) have far less quantization noise than
+    short 2h runs — quantization noise on system_soc is ~0.5pp, which
+    translates to ~151/dt_h W of drain noise per run. Variance scales
+    as 1/dt², so the optimal Bayesian weight when combining estimates
+    is dt² (or simply favoring longer runs). Without this, the median
+    gives equal weight to noisy short runs and pulls the parasitic
+    estimate below the truth that long runs reveal.
 
     Used by `fit_drain_model`'s narrow-load fallback when the per-pair
     median was biased low by short-window quantization rounding.
@@ -787,7 +808,7 @@ def _clean_discharge_runs(
     if current:
         runs.append(current)
 
-    out: list[tuple[float, float]] = []
+    out: list[tuple[float, float, float]] = []
     for run in runs:
         if len(run) < 2:
             continue
@@ -811,8 +832,33 @@ def _clean_discharge_runs(
         avg_load_w = total_out_wh / dt_h
         if avg_load_w < MIN_RUN_AVG_LOAD_W:
             continue
-        out.append((avg_load_w, observed_drain_w))
+        out.append((avg_load_w, observed_drain_w, dt_h))
     return out
+
+
+def _length_weighted_median(
+    items: list[tuple[float, float]],
+) -> float | None:
+    """Weighted median where each item is `(value, weight)`. Returns the
+    value at which the cumulative weight crosses half the total. Used
+    by fit_drain_model's narrow-load fallback to weight clean-discharge
+    runs by dt² — long runs have far less quantization noise than
+    short ones, so the median should reflect their higher confidence
+    rather than treating all runs as equally informative.
+    """
+    if not items:
+        return None
+    sorted_items = sorted(items, key=lambda x: x[0])
+    total_w = sum(w for _, w in sorted_items)
+    if total_w <= 0:
+        return None
+    half = total_w / 2.0
+    cum = 0.0
+    for v, w in sorted_items:
+        cum += w
+        if cum >= half:
+            return v
+    return sorted_items[-1][0]
 
 
 def diagnose_idle_windows(
