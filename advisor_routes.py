@@ -573,6 +573,31 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "old 0.583 as a separate defect."
             ),
         },
+        {
+            "ts_iso": "2026-05-08T22:55:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "fit_solar_coefficient now adds an SOC-headroom +"
+                "no-AC-charging filter on top of the clear-sky filter. "
+                "Three-tier preference: (1) clear-sky AND SOC <80% AND "
+                "no AC input; (2) clear-sky only; (3) any GHI > 50. "
+                "Reason: the BMS tapers charge current near full SOC, "
+                "so the reported `solar_w` understates panel capability "
+                "on hours where SOC was already 90%+. AC charging "
+                "competes for the same headroom and curtails solar "
+                "similarly. Including either kind of hour in the "
+                "least-squares fit back-solves a lower k than the "
+                "panels can actually deliver. User's 5000+ on 2026-05-08 "
+                "was fitting k=3.29 despite advisor reconciling actual "
+                "k=4.0-4.2 from clear-sky moments at 900+ W/m² GHI; "
+                "the post-fix should drift toward 3.7-4.0. Residual "
+                "under-bias may still come from parasitic_w fit "
+                "(advisor flagged 397W vs ~650W empirical), addressed "
+                "separately. Don't re-flag the 17-19pp under-prediction "
+                "on 5/8 18:00-21:00 UTC targets — this commit IS the "
+                "fix."
+            ),
+        },
     ]
 
 
