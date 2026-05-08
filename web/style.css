@@ -150,6 +150,43 @@ a.brand:hover .logo-dot { transform: scale(1.15); transition: transform .15s; }
 }
 .btn-primary:hover { background: #6ee69a; border-color: #6ee69a; }
 .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.btn-warn {
+  background: #5a3a08;
+  color: #ffd483;
+  border-color: #8a5a10;
+  font-weight: 600;
+}
+.btn-warn:hover { background: #6e4a10; border-color: #b07820; }
+.btn-warn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Conflict banner — surfaces battery rules that fight smart-charge
+   when mode flips to active. Amber tone (warn, not error) since the
+   rules still work; we just don't want them on the same plug. */
+.conflict-banner {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  margin: 0 0 12px;
+  border: 1px solid #8a5a10;
+  border-radius: 10px;
+  background: #2a1d08;
+  color: #ffd483;
+}
+.conflict-banner-body { flex: 1; min-width: 0; }
+.conflict-banner-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.conflict-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #e8c98a;
+}
+.conflict-list li { margin: 2px 0; }
 
 /* ============== Device picker ============== */
 .device-picker {

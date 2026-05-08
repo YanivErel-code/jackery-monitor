@@ -52,6 +52,38 @@ VALID_ACTIONS = ("on", "off")
 VALID_TRIGGERS = ("battery_percent",)
 
 
+def find_conflicting_rules(rules: list[dict], *,
+                           smart_charge_kasa_host: str | None,
+                           smart_charge_device_sn: str | None,
+                           ) -> list[dict]:
+    """Return enabled rules that would conflict with smart-charge.
+
+    A rule conflicts when:
+      • It targets the SAME Kasa plug smart-charge controls (matching
+        `kasa_host`), AND
+      • It applies to the smart-charge Jackery (matching device sn, or
+        `jackery_device_sn=None` which means "any active device").
+
+    Disabled rules are skipped — they can't fire and won't interfere.
+    Returns the rule dicts as-is so callers can show them to the user
+    or pass the IDs to a bulk-disable endpoint."""
+    if not smart_charge_kasa_host:
+        return []
+    target_host = smart_charge_kasa_host.strip().lower()
+    out: list[dict] = []
+    for r in rules or []:
+        if not r.get("enabled", True):
+            continue
+        rule_host = (r.get("kasa_host") or "").strip().lower()
+        if rule_host != target_host:
+            continue
+        rule_sn = r.get("jackery_device_sn") or None
+        if rule_sn and smart_charge_device_sn and rule_sn != smart_charge_device_sn:
+            continue
+        out.append(r)
+    return out
+
+
 class AutomationError(ConfigError, ValueError):
     """Invalid automation rule (bad operator, missing host, etc.).
     Multiple inheritance preserves `except ValueError` callers."""
@@ -178,6 +210,29 @@ class AutomationEngine:
         if changed:
             self._save()
         return changed
+
+    def disable_many(self, rule_ids: list[str]) -> list[str]:
+        """Set `enabled=false` on the listed rule IDs in one save. Returns
+        the IDs that were actually disabled (skips IDs that don't exist
+        or were already disabled). Used by the smart-charge "Disable
+        conflicting rules" prompt — one round-trip rather than N
+        upserts."""
+        wanted = set(rule_ids or [])
+        if not wanted:
+            return []
+        disabled: list[str] = []
+        for r in self.rules:
+            if r.get("id") in wanted and r.get("enabled", True):
+                r["enabled"] = False
+                # Reset edge state — when re-enabled later, the rule
+                # should re-evaluate from scratch rather than carry a
+                # stale `last_state` that could suppress an immediate
+                # fire.
+                r["last_state"] = None
+                disabled.append(r["id"])
+        if disabled:
+            self._save()
+        return disabled
 
     # ---- evaluation ----
     async def evaluate(self, soc_by_sn: dict, active_sn: str | None = None) -> list[dict]:
