@@ -849,6 +849,67 @@ def test_fit_drain_model_recovers_parasitic_via_multi_hour_runs():
     )
 
 
+def test_fit_drain_model_length_weights_clean_discharge_runs():
+    """Verify dt²-weighted median: a single long high-quality run
+    should dominate over many short noisy runs that imply a different
+    parasitic. User's 5/8 data showed a 9h overnight implying 321W
+    parasitic mixed with several short 2-3h runs implying 43-150W;
+    plain median landed at 225W (averaged across all). Length-weighted
+    median should track the long run because its variance is far lower
+    (quantization noise scales as 1/dt for fixed pp resolution → 1/dt²
+    weight). The truth on this device is closer to the 9h run."""
+    base = 1_700_000_000
+    history = []
+    # Long 9h run: load 462W, true parasitic 320W (drain ~828W).
+    # ΔSOC = 828 × 9 / 30240 × 100 = 24.6pp → quantize to 25pp.
+    soc = 95
+    for h in range(10):
+        history.append({
+            "ts": base + h * 3600,
+            "battery_pct": soc,
+            "output_wh": 462,
+            "solar_wh": 0, "ac_input_wh": 0,
+        })
+        soc -= 25 // 9 if h < 6 else (25 - 6 * (25 // 9)) // 4
+    # Adjust last bucket so total drop is exactly 25pp.
+    history[-1]["battery_pct"] = history[0]["battery_pct"] - 25
+    # 4 short 2h runs: load 462W, but drain quantized low (4pp drop in
+    # 2h instead of true 5.5pp). Implies parasitic ~100W — far below
+    # the long run's 320W.
+    for i in range(4):
+        ts = base + (12 + i * 4) * 3600
+        history.append({"ts": ts, "battery_pct": 70,
+                        "output_wh": 462, "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": ts + 3600, "battery_pct": 68,
+                        "output_wh": 462, "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": ts + 2 * 3600, "battery_pct": 66,
+                        "output_wh": 462, "solar_wh": 0, "ac_input_wh": 0})
+    parasitic_w, overhead_pct, _n = forecaster.fit_drain_model(
+        history, capacity_wh=30240,
+    )
+    assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
+    # Long 9h run (weight 81) should dominate over four 2h runs
+    # (weight 4 each, total 16) — fit should pull toward ~300W, not
+    # collapse to the short-run cluster ~100W. Plain median across
+    # 5 runs would land at the 3rd value sorted = mid-range ~150-200W.
+    assert parasitic_w >= 270, (
+        f"got parasitic_w={parasitic_w}; length-weighted median must "
+        "favor the 9h run (~320W truth) over noisy short runs (~100W)"
+    )
+
+
+def test_length_weighted_median_basics():
+    from forecaster import _length_weighted_median
+    # Equal weights → plain median.
+    assert _length_weighted_median([(10, 1), (20, 1), (30, 1)]) == 20
+    # Long run dominates: value 100 has weight 81, two values at 10
+    # have weight 1 each. Cumulative weight crosses half at 100.
+    assert _length_weighted_median([(10, 1), (10, 1), (100, 81)]) == 100
+    # Empty / zero-weight inputs.
+    assert _length_weighted_median([]) is None
+    assert _length_weighted_median([(50, 0)]) is None
+
+
 def test_fit_drain_model_uses_parasitic_only_fallback_for_narrow_loads():
     """Replicates the user's overnight pattern flagged by the advisor on
     2026-05-05: steady ~470W load, true parasitic ~415W. With loads
