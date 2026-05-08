@@ -2704,7 +2704,9 @@ async function loadSmartCharge() {
       fetch(`/api/smart_charge/status${q}`),
       fetch(`/api/smart_charge/analytics?days=14&device_sn=${encodeURIComponent(deviceSn)}`),
     ]);
-    const cfg = cfgRes.ok ? (await cfgRes.json()).config || {} : {};
+    const cfgPayload = cfgRes.ok ? await cfgRes.json() : {};
+    const cfg = cfgPayload.config || {};
+    const conflicts = cfgPayload.conflicting_rules || [];
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
     const ana = anaRes.ok ? await anaRes.json() : { summary: {} };
@@ -2780,10 +2782,93 @@ async function loadSmartCharge() {
 
     renderSmartChargeHistory(status.history || []);
     renderSmartChargeAnalytics(ana);
+    renderSmartChargeConflicts(conflicts, cfg.mode);
   } catch (e) {
     console.warn('smart_charge load failed', e);
   }
 }
+
+// Battery-rule conflict banner. Shown when smart-charge mode is
+// "active" AND there are enabled rules controlling the same plug —
+// those rules can fire on battery thresholds and undo what the
+// controller just did. Hidden in any other state. The "Disable them"
+// button hits POST /api/automation/rules/disable to flip enabled=false
+// on every conflicting rule in one round-trip; "Ignore" hides the
+// banner for this session (no persistence — it'll come back on next
+// load if conflicts still exist).
+function renderSmartChargeConflicts(conflicts, mode) {
+  const banner = $('sc-conflict-banner');
+  if (!banner) return;
+  const list = conflicts || [];
+  const shouldShow = mode === 'active' && list.length > 0;
+  if (!shouldShow) {
+    banner.hidden = true;
+    return;
+  }
+  const text = $('sc-conflict-text');
+  const ul = $('sc-conflict-list');
+  if (text) {
+    text.textContent = list.length === 1
+      ? '1 enabled battery rule controls the same Kasa plug as smart-charge. '
+        + 'It will fire on SOC thresholds and can undo charging decisions.'
+      : `${list.length} enabled battery rules control the same Kasa plug as smart-charge. `
+        + 'They will fire on SOC thresholds and can undo charging decisions.';
+  }
+  if (ul) {
+    ul.innerHTML = list.map((r) => {
+      const op = r.operator || '?';
+      const val = r.value ?? '?';
+      const action = (r.action || '').toUpperCase();
+      const name = r.name || 'Unnamed rule';
+      return `<li><strong>${escapeHtml(name)}</strong>: SOC ${escapeHtml(op)} ${escapeHtml(String(val))}% → ${escapeHtml(action)}</li>`;
+    }).join('');
+  }
+  // Stash IDs on the button so the click handler doesn't re-fetch.
+  const btn = $('sc-conflict-disable');
+  if (btn) btn.dataset.ruleIds = JSON.stringify(list.map(r => r.id));
+  banner.hidden = false;
+}
+
+// Minimal HTML escape — rule names are user-typed and we render them
+// inside <strong>, so guard against injection.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+document.getElementById('sc-conflict-disable')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  let ids = [];
+  try { ids = JSON.parse(btn.dataset.ruleIds || '[]'); } catch { ids = []; }
+  if (!ids.length) return;
+  btn.disabled = true;
+  btn.textContent = 'Disabling…';
+  try {
+    const r = await fetch('/api/automation/rules/disable', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rule_ids: ids }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    // Reload the smart-charge panel so the banner clears + rule list
+    // reflects the new disabled state.
+    await loadSmartCharge();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Disable them';
+    const status = $('sc-status');
+    if (status) {
+      status.hidden = false;
+      status.textContent = `Disable failed: ${err.message || err}`;
+    }
+  }
+});
+
+document.getElementById('sc-conflict-dismiss')?.addEventListener('click', () => {
+  const banner = $('sc-conflict-banner');
+  if (banner) banner.hidden = true;
+});
 
 function renderSmartChargeAnalytics(j) {
   const el = $('sc-analytics');
@@ -3142,7 +3227,13 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || `HTTP ${r.status}`);
     }
+    const saved = await r.json().catch(() => ({}));
     status.textContent = 'Saved.';
+    // The POST response includes `conflicting_rules` keyed off the
+    // saved config — render it immediately so flipping mode → active
+    // surfaces the banner without a second round-trip.
+    renderSmartChargeConflicts(saved.conflicting_rules || [],
+                                saved.config?.mode || cfg.mode);
     setTimeout(() => { status.hidden = true; }, 2500);
   } catch (err) {
     status.textContent = `Save failed: ${err.message || err}`;

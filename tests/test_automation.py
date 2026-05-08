@@ -325,3 +325,121 @@ async def test_engine_calls_firing_recorder_on_successful_fire(
     fail_next.append(RuntimeError("boom"))
     await eng.evaluate({"SN-A": 10}, active_sn="SN-A")
     assert len(recorded) == 2  # unchanged — failed toggle isn't logged
+
+
+# ---------- find_conflicting_rules ----------
+def _rule(**overrides):
+    base = {
+        "id": "r1", "name": "rule", "enabled": True,
+        "trigger": "battery_percent", "operator": "<", "value": 20,
+        "action": "off", "kasa_host": "1.1.1.1", "kasa_alias": "plug",
+        "jackery_device_sn": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_find_conflicting_rules_matches_same_host():
+    from automation import find_conflicting_rules
+    rules = [
+        _rule(id="a", kasa_host="1.1.1.1"),
+        _rule(id="b", kasa_host="2.2.2.2"),  # different host — no conflict
+    ]
+    out = find_conflicting_rules(
+        rules, smart_charge_kasa_host="1.1.1.1",
+        smart_charge_device_sn="SN-A",
+    )
+    assert [r["id"] for r in out] == ["a"]
+
+
+def test_find_conflicting_rules_skips_disabled():
+    from automation import find_conflicting_rules
+    rules = [
+        _rule(id="a", kasa_host="1.1.1.1", enabled=False),
+        _rule(id="b", kasa_host="1.1.1.1", enabled=True),
+    ]
+    out = find_conflicting_rules(
+        rules, smart_charge_kasa_host="1.1.1.1",
+        smart_charge_device_sn="SN-A",
+    )
+    assert [r["id"] for r in out] == ["b"]
+
+
+def test_find_conflicting_rules_filters_by_device_sn():
+    from automation import find_conflicting_rules
+    rules = [
+        _rule(id="a", kasa_host="1.1.1.1", jackery_device_sn="SN-A"),
+        _rule(id="b", kasa_host="1.1.1.1", jackery_device_sn="SN-B"),
+        # Null sn means "any active device" — counts as conflict.
+        _rule(id="c", kasa_host="1.1.1.1", jackery_device_sn=None),
+    ]
+    out = find_conflicting_rules(
+        rules, smart_charge_kasa_host="1.1.1.1",
+        smart_charge_device_sn="SN-A",
+    )
+    assert sorted(r["id"] for r in out) == ["a", "c"]
+
+
+def test_find_conflicting_rules_empty_when_host_unset():
+    from automation import find_conflicting_rules
+    rules = [_rule(kasa_host="1.1.1.1")]
+    # No smart-charge plug configured → no possible conflict.
+    assert find_conflicting_rules(
+        rules, smart_charge_kasa_host=None, smart_charge_device_sn="SN-A",
+    ) == []
+    assert find_conflicting_rules(
+        rules, smart_charge_kasa_host="", smart_charge_device_sn="SN-A",
+    ) == []
+
+
+def test_find_conflicting_rules_case_insensitive_host():
+    from automation import find_conflicting_rules
+    rules = [_rule(id="a", kasa_host="HostA")]
+    out = find_conflicting_rules(
+        rules, smart_charge_kasa_host="hosta",
+        smart_charge_device_sn="SN-A",
+    )
+    assert [r["id"] for r in out] == ["a"]
+
+
+# ---------- disable_many ----------
+def test_disable_many_flips_enabled_and_resets_edge_state(isolated_data):
+    import automation
+    importlib.reload(automation)
+    eng = automation.AutomationEngine()
+    a = eng.upsert(_rule(id="a", kasa_host="1.1.1.1", enabled=True))
+    b = eng.upsert(_rule(id="b", kasa_host="2.2.2.2", enabled=True))
+    # Simulate a previous fire so last_state is set; disable_many must
+    # reset it so a re-enable later doesn't suppress the next edge.
+    eng.rules[0]["last_state"] = True
+
+    disabled = eng.disable_many([a["id"], b["id"]])
+    assert sorted(disabled) == sorted([a["id"], b["id"]])
+    rules_by_id = {r["id"]: r for r in eng.list_rules()}
+    assert rules_by_id[a["id"]]["enabled"] is False
+    assert rules_by_id[a["id"]]["last_state"] is None
+    assert rules_by_id[b["id"]]["enabled"] is False
+
+
+def test_disable_many_skips_already_disabled_and_unknown(isolated_data):
+    import automation
+    importlib.reload(automation)
+    eng = automation.AutomationEngine()
+    a = eng.upsert(_rule(id="a", kasa_host="1.1.1.1", enabled=False))
+    b = eng.upsert(_rule(id="b", kasa_host="2.2.2.2", enabled=True))
+
+    # `a` is already disabled; "ghost" doesn't exist. Only `b` should
+    # appear in the returned list.
+    disabled = eng.disable_many([a["id"], "ghost", b["id"]])
+    assert disabled == [b["id"]]
+
+
+def test_disable_many_empty_input_returns_empty(isolated_data):
+    import automation
+    importlib.reload(automation)
+    eng = automation.AutomationEngine()
+    eng.upsert(_rule(id="a", kasa_host="1.1.1.1", enabled=True))
+    assert eng.disable_many([]) == []
+    assert eng.disable_many(None) == []  # type: ignore[arg-type]
+    # And the rule remained enabled.
+    assert eng.list_rules()[0]["enabled"] is True

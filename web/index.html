@@ -787,6 +787,21 @@
         <p class="hint" style="margin:6px 0 12px">
           On cloudy days when the forecast says SOC won't last to sunrise, this turns on a Kasa smart plug just enough to make it through. Configured <strong>per device</strong> — switch the active device using the picker at the top to edit a different one. <strong>Test mode logs decisions but doesn't toggle the plug</strong>; use it to verify the plan is sane before going active.
         </p>
+        <div id="sc-conflict-banner" class="conflict-banner" hidden role="alert">
+          <div class="conflict-banner-body">
+            <strong>Conflicting battery rules detected.</strong>
+            <p id="sc-conflict-text" class="hint" style="margin:4px 0"></p>
+            <ul id="sc-conflict-list" class="conflict-list"></ul>
+          </div>
+          <div class="conflict-banner-actions">
+            <button id="sc-conflict-disable" type="button" class="btn btn-warn">
+              Disable them
+            </button>
+            <button id="sc-conflict-dismiss" type="button" class="btn btn-ghost">
+              Ignore
+            </button>
+          </div>
+        </div>
         <form id="sc-form">
           <div class="settings-row">
             <label class="settings-label" for="sc-mode">

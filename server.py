@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 import advisor_routes
 import api_auth
 import auth
+import automation
 import backoff as _backoff
 import backup
 import backup_creds
@@ -2393,16 +2394,37 @@ def api_daily_summary(device_sn: str | None = None, days: int = 7):
             "rows": state.energy.list_daily_summary(device_sn, days=days)}
 
 
+def _smart_charge_rule_conflicts(cfg: dict, device_sn: str | None) -> list[dict]:
+    """Battery rules that target the same plug smart-charge controls.
+    Surfaced on every smart-charge config GET/POST so the UI can show a
+    warning when mode is set to "active" and a rule could fight the
+    controller (e.g. "<20% turn ON" would re-enable the plug right after
+    smart-charge turns it OFF, draining the budget). Empty list when no
+    plug is configured or no rule matches."""
+    return automation.find_conflicting_rules(
+        state.automation.list_rules(),
+        smart_charge_kasa_host=cfg.get("kasa_device_host"),
+        smart_charge_device_sn=device_sn,
+    )
+
+
 @app.get("/api/smart_charge/config")
 def api_smart_charge_get(device_sn: str | None = None):
     """Per-device smart-charge config. Defaults to the active device
     when device_sn is omitted. Kasa devices are fetched separately via
-    /api/kasa/saved so the UI can filter by Jackery assignment."""
+    /api/kasa/saved so the UI can filter by Jackery assignment.
+
+    `conflicting_rules` lists enabled battery-driven rules that target
+    the same Kasa plug as smart-charge. The UI shows a warning when
+    mode is `active` and this list is non-empty, with a one-click
+    "Disable" prompt that hits POST /api/automation/rules/disable."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
+    cfg = smart_charge.get_config(device_sn)
     return {
         "device_sn": device_sn,
-        "config": smart_charge.get_config(device_sn),
+        "config": cfg,
+        "conflicting_rules": _smart_charge_rule_conflicts(cfg, device_sn),
     }
 
 
@@ -2419,7 +2441,30 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
                             detail="no active device — pass device_sn explicitly")
     saved = smart_charge.set_config(body if isinstance(body, dict) else {},
                                     device_sn=device_sn)
-    return {"device_sn": device_sn, "config": saved}
+    return {
+        "device_sn": device_sn,
+        "config": saved,
+        "conflicting_rules": _smart_charge_rule_conflicts(saved, device_sn),
+    }
+
+
+@app.post("/api/automation/rules/disable")
+async def api_automation_rules_disable(req: Request):
+    """Bulk-disable a list of automation rule IDs in one call. Body:
+    {"rule_ids": ["abc123", "def456"]}. Returns the IDs that were
+    actually disabled (skips ones that didn't exist or were already
+    disabled). Used by the smart-charge conflict-resolution prompt so
+    the user can disable N rules with one click instead of N round-
+    trips."""
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+    rule_ids = body.get("rule_ids") if isinstance(body, dict) else None
+    if not isinstance(rule_ids, list):
+        raise HTTPException(400, "rule_ids must be a list")
+    disabled = state.automation.disable_many([str(r) for r in rule_ids])
+    return {"ok": True, "disabled": disabled}
 
 
 @app.get("/api/smart_charge/decision_details")
