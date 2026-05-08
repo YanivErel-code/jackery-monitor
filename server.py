@@ -2380,6 +2380,136 @@ def api_diagnostics_row_soc():
     }
 
 
+@app.get("/api/diagnostics/parasitic_fit_windows")
+def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
+                                            hours: int = 14 * 24):
+    """Walk the windows that fit_drain_model uses and emit per-window
+    diagnostics. Surfaces the actual data behind the parasitic_w fit
+    so we can verify whether system_soc is correctly tracking energy
+    drain or if main_soc and system_soc diverge due to pack-rebalance
+    lag.
+
+    For each clean-discharge bucket pair (no solar, no AC, ≥pp gate),
+    returns:
+      - main_soc start/end + drop
+      - system_soc start/end + drop (if available)
+      - output_wh sum (load energy)
+      - dt_h
+      - observed_drain_w_main (= main drop × system_capacity / dt) —
+        the OLD biased calc, still useful for diagnosis
+      - observed_drain_w_system (= system drop × system_capacity / dt) —
+        the CURRENT correct calc
+      - implied_parasitic_main / _system (drain - load × 1.10 each way)
+
+    If main and system diverge significantly (e.g. main drops 3pp/h
+    but system only drops 0.5pp/h), pack rebalancing is lagging and
+    the true mid-window drain is in between.
+    """
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    hours = max(1, min(int(hours), 30 * 24))
+    main_wh, pack_wh = _capacity_hints(device_sn)
+    rows = state.energy.history(
+        device_sn, hours=hours, bucket_s=3600,
+        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+    )
+    rows = sorted(
+        (r for r in rows if r.get("ts") is not None), key=lambda r: r["ts"],
+    )
+
+    SOLAR_NOISE_WH = 50.0
+    AC_NOISE_WH = 50.0
+    MIN_OUT_W = 50.0
+    capacity = _total_capacity_wh(device_sn, None)
+    overhead = forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
+
+    windows: list[dict[str, Any]] = []
+    for i in range(len(rows) - 1):
+        a, b = rows[i], rows[i + 1]
+        if (a.get("solar_wh") or 0) > SOLAR_NOISE_WH:
+            continue
+        if (a.get("ac_input_wh") or 0) > AC_NOISE_WH:
+            continue
+        dt_h = (b["ts"] - a["ts"]) / 3600.0
+        if dt_h < 0.5 or dt_h > 6.0:
+            continue
+        out_wh = a.get("output_wh") or 0
+        if out_wh / max(dt_h, 1e-6) < MIN_OUT_W:
+            continue
+        main_a = a.get("battery_pct")
+        main_b = b.get("battery_pct")
+        sys_a = a.get("system_soc")
+        sys_b = b.get("system_soc")
+        if main_a is None or main_b is None:
+            continue
+
+        main_drop = float(main_a) - float(main_b)
+        observed_drain_main = (main_drop * capacity / 100.0 / dt_h
+                                if main_drop > 0 else None)
+        observed_drain_sys = None
+        sys_drop = None
+        if sys_a is not None and sys_b is not None:
+            sys_drop = float(sys_a) - float(sys_b)
+            if sys_drop > 0:
+                observed_drain_sys = sys_drop * capacity / 100.0 / dt_h
+
+        load_w = out_wh / dt_h
+        implied_parasitic_main = (
+            observed_drain_main - load_w * (1 + overhead)
+            if observed_drain_main is not None else None
+        )
+        implied_parasitic_sys = (
+            observed_drain_sys - load_w * (1 + overhead)
+            if observed_drain_sys is not None else None
+        )
+
+        windows.append({
+            "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                     time.gmtime(int(a["ts"]))),
+            "dt_h": round(dt_h, 2),
+            "main_soc_a": main_a,
+            "main_soc_b": main_b,
+            "main_drop_pp": round(main_drop, 2),
+            "system_soc_a": (round(sys_a, 2) if sys_a is not None else None),
+            "system_soc_b": (round(sys_b, 2) if sys_b is not None else None),
+            "system_drop_pp": (round(sys_drop, 2) if sys_drop is not None else None),
+            "load_w": round(load_w, 1),
+            "observed_drain_w_main": (round(observed_drain_main, 1)
+                                       if observed_drain_main is not None else None),
+            "observed_drain_w_system": (round(observed_drain_sys, 1)
+                                         if observed_drain_sys is not None else None),
+            "implied_parasitic_w_main": (round(implied_parasitic_main, 1)
+                                          if implied_parasitic_main is not None else None),
+            "implied_parasitic_w_system": (round(implied_parasitic_sys, 1)
+                                            if implied_parasitic_sys is not None else None),
+        })
+
+    # Summary stats — median implied parasitic each way + sample count.
+    def _median(vals: list[float]) -> float | None:
+        if not vals:
+            return None
+        s = sorted(vals)
+        return round(s[len(s) // 2], 1)
+
+    implied_main = [w["implied_parasitic_w_main"] for w in windows
+                    if w["implied_parasitic_w_main"] is not None]
+    implied_sys = [w["implied_parasitic_w_system"] for w in windows
+                   if w["implied_parasitic_w_system"] is not None]
+
+    return {
+        "device_sn": device_sn,
+        "hours": hours,
+        "capacity_wh": capacity,
+        "overhead_pct_assumed": overhead,
+        "n_windows": len(windows),
+        "median_implied_parasitic_w_main": _median(implied_main),
+        "median_implied_parasitic_w_system": _median(implied_sys),
+        "windows": windows,
+    }
+
+
 @app.get("/api/daily_summary")
 def api_daily_summary(device_sn: str | None = None, days: int = 7):
     """Daily sunset/sunrise predicted vs actual SOC rows. Sourced from
