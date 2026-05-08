@@ -167,6 +167,23 @@ DEFAULT_SOLAR_COEFF = 0.32
 CLEAR_SKY_GHI_THRESHOLD = 700.0
 CLEAR_SKY_MAX_CLOUD_PCT = 30.0
 
+# SOC headroom filter for fit_solar_coefficient. When SOC is close to
+# full, the BMS tapers the charging current to protect the pack — so
+# even when GHI is at peak, the reported `solar_w` is the BMS-accepted
+# value, not the panel's actual capability. The MPPT idles surplus.
+# Including high-SOC hours in the fit therefore back-solves a lower k
+# than the panels can really deliver. Symptom on the user's rig
+# 2026-05-08: clear-sky moments showed k=4.0-4.2 from 3.6+kW peaks at
+# ~900 W/m² GHI, but fit_solar_coefficient returned k=3.29 because
+# many "clear-sky" fit hours had SOC ≥ 90% (sub-2kW absorbed despite
+# bright sun). Filter to hours where SOC was low enough for the BMS
+# to accept full power — 80% leaves ~6 kWh of headroom on a 30 kWh
+# pack, easily enough to soak a peak hour at full panel output.
+# Pair with: no AC charging during the hour (otherwise solar competes
+# with AC for charge headroom and gets curtailed similarly).
+SOLAR_FIT_MAX_SOC_PCT = 80.0
+SOLAR_FIT_MAX_AC_INPUT_W = 50.0
+
 # Default charge efficiency: not all solar Wh ends up as stored Wh.
 # LiFePO4 chemistry + inverter/charger losses typically combine to
 # ~5-10%. The default below is a conservative cold-start fallback.
@@ -344,9 +361,25 @@ def fit_solar_coefficient(
         panels, or none we can detect — don't fabricate production).
       • Few pairs but evidence of solar → DEFAULT_SOLAR_COEFF (rough fit).
       • Enough pairs → least-squares regression against actual data.
+
+    Three-tier pair pool, in order of preference:
+      1. headroom_pairs — clear sky AND SOC < 80% AND no AC charging.
+         The cleanest fit: BMS isn't tapering, AC isn't competing for
+         headroom, sky is bright. This captures the panel's actual
+         capability ceiling.
+      2. clear_sky_pairs — clear sky only. Used when there aren't
+         enough headroom samples (e.g. user keeps SOC high most of
+         the day). Better than nothing but may under-fit due to BMS
+         taper biting on some hours.
+      3. broad_pairs — any GHI > 50, any sky. Last-resort fallback
+         for devices with persistently overcast histories.
     """
     # Bucket both series to the hour (epoch // 3600) and join.
+    # Track SOC at hour start AND whether AC charging was active during
+    # the hour, so we can filter out BMS-tapered samples below.
     by_hour_solar: dict[int, float] = {}
+    by_hour_soc_min: dict[int, float] = {}   # min SOC seen in hour ≈ start
+    by_hour_has_ac: dict[int, bool] = {}
     for row in energy_history:
         ts = int(row.get("ts") or 0)
         sol = float(row.get("solar_w") or 0)
@@ -358,6 +391,15 @@ def fit_solar_coefficient(
         prev = by_hour_solar.get(h, 0.0)
         if sol > prev:
             by_hour_solar[h] = sol
+        # Lowest SOC in the hour represents the "early" part — when BMS
+        # taper hasn't kicked in yet (SOC rises during charging).
+        soc = _row_soc(row)
+        if soc is not None:
+            prev_soc = by_hour_soc_min.get(h)
+            if prev_soc is None or soc < prev_soc:
+                by_hour_soc_min[h] = soc
+        if float(row.get("ac_input_w") or 0) > SOLAR_FIT_MAX_AC_INPUT_W:
+            by_hour_has_ac[h] = True
 
     # If the device has produced essentially no solar in 14 days of history,
     # treat it as "no panels detected" rather than guessing with a default.
@@ -368,9 +410,9 @@ def fit_solar_coefficient(
     if not any(v > 50 for v in by_hour_solar.values()):
         return 0.0, 0
 
-    # Build two pools: clear-sky pairs (preferred — capture the panel's
-    # true GHI→W relationship without cloud attenuation noise) and a
-    # broader fallback for devices with persistently overcast histories.
+    # Build three pools: headroom (cleanest), clear-sky (bright but may
+    # include BMS-taper hours), and broad (last-resort fallback).
+    headroom_pairs: list[tuple[float, float]] = []
     clear_sky_pairs: list[tuple[float, float]] = []
     broad_pairs: list[tuple[float, float]] = []
     for w in weather_hourly:
@@ -383,11 +425,23 @@ def fit_solar_coefficient(
             continue
         broad_pairs.append((ghi, sol))
         cloud = float(w.get("cloud_cover_pct") or 0)
-        if ghi >= CLEAR_SKY_GHI_THRESHOLD and cloud <= CLEAR_SKY_MAX_CLOUD_PCT:
+        is_clear_sky = (ghi >= CLEAR_SKY_GHI_THRESHOLD
+                        and cloud <= CLEAR_SKY_MAX_CLOUD_PCT)
+        if is_clear_sky:
             clear_sky_pairs.append((ghi, sol))
+            soc_at_h = by_hour_soc_min.get(h)
+            has_ac = by_hour_has_ac.get(h, False)
+            if (soc_at_h is not None
+                    and soc_at_h <= SOLAR_FIT_MAX_SOC_PCT
+                    and not has_ac):
+                headroom_pairs.append((ghi, sol))
 
-    pairs = (clear_sky_pairs if len(clear_sky_pairs) >= MIN_FIT_SAMPLES
-             else broad_pairs)
+    if len(headroom_pairs) >= MIN_FIT_SAMPLES:
+        pairs = headroom_pairs
+    elif len(clear_sky_pairs) >= MIN_FIT_SAMPLES:
+        pairs = clear_sky_pairs
+    else:
+        pairs = broad_pairs
 
     if len(pairs) < MIN_FIT_SAMPLES:
         return DEFAULT_SOLAR_COEFF, len(pairs)

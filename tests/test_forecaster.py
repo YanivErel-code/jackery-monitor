@@ -116,6 +116,89 @@ def test_solar_fit_prefers_clear_sky_pairs_when_available():
     assert abs(k - 0.5) < 0.05, f"got k={k}, expected ~0.5 (clear-sky truth)"
 
 
+def test_solar_fit_prefers_low_soc_no_ac_pairs_over_high_soc_clear_sky():
+    # When SOC is high during otherwise-clear-sky hours, the BMS tapers
+    # the charging current to protect the pack — `solar_w` is then the
+    # BMS-accepted value, not the panel's actual capability. Including
+    # those hours back-solves a lower k. Verify the headroom filter
+    # picks low-SOC samples (true panel capability) over high-SOC ones.
+    base = 1_700_000_000
+    weather = []
+    energy = []
+    # 5 BMS-tapered clear-sky hours: SOC=92%, k apparent=2.5 (taper)
+    for i in range(5):
+        ghi = 850 + i * 10
+        weather.append({"ts": base + i * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 5})
+        energy.append({"ts": base + i * 3600,
+                       "solar_w": int(2.5 * ghi),
+                       "battery_pct": 92, "ac_input_w": 0})
+    # 5 headroom clear-sky hours: SOC=60%, k truth=4.0
+    for i in range(5):
+        ghi = 900 + i * 10
+        weather.append({"ts": base + (10 + i) * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 8})
+        energy.append({"ts": base + (10 + i) * 3600,
+                       "solar_w": int(4.0 * ghi),
+                       "battery_pct": 60, "ac_input_w": 0})
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    # Headroom-filter pool exists (5 ≥ MIN_FIT_SAMPLES=2), so it wins.
+    # k should recover ~4.0, not the LSQ blend ~3.25.
+    assert n == 5
+    assert abs(k - 4.0) < 0.10, f"got k={k}, expected ~4.0 (headroom truth)"
+
+
+def test_solar_fit_excludes_hours_with_ac_charging():
+    # AC charging into the same battery competes for headroom and the
+    # BMS curtails solar similarly to the high-SOC case. Hours with AC
+    # input are excluded from the headroom pool even when SOC is low.
+    base = 1_700_000_000
+    weather = []
+    energy = []
+    # 4 hours: SOC low BUT AC plug on → curtailed solar (k=2.5)
+    for i in range(4):
+        ghi = 900 + i * 5
+        weather.append({"ts": base + i * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 5})
+        energy.append({"ts": base + i * 3600,
+                       "solar_w": int(2.5 * ghi),
+                       "battery_pct": 60, "ac_input_w": 1500})
+    # 4 hours: SOC low AND no AC → true k=4.0
+    for i in range(4):
+        ghi = 900 + i * 5
+        weather.append({"ts": base + (10 + i) * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 5})
+        energy.append({"ts": base + (10 + i) * 3600,
+                       "solar_w": int(4.0 * ghi),
+                       "battery_pct": 60, "ac_input_w": 0})
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    assert n == 4
+    assert abs(k - 4.0) < 0.10, f"got k={k}, expected ~4.0"
+
+
+def test_solar_fit_falls_back_to_clear_sky_when_no_headroom_pairs():
+    # Persistently-high SOC history (user keeps battery topped). No
+    # samples qualify for the headroom pool. Fall back to clear-sky
+    # pairs (still better than broad).
+    base = 1_700_000_000
+    weather = []
+    energy = []
+    # All clear-sky hours but SOC always 95% → no headroom pool
+    for i in range(8):
+        ghi = 900 + i * 5
+        weather.append({"ts": base + i * 3600,
+                        "ghi_w_m2": ghi, "cloud_cover_pct": 5})
+        energy.append({"ts": base + i * 3600,
+                       "solar_w": int(2.8 * ghi),  # tapered
+                       "battery_pct": 95, "ac_input_w": 0})
+    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    assert n == 8  # clear-sky fallback fires
+    # Returns the tapered fit since no headroom data exists. Verify it's
+    # not the default coefficient.
+    assert k != forecaster.DEFAULT_SOLAR_COEFF
+    assert abs(k - 2.8) < 0.10
+
+
 def test_solar_fit_falls_back_to_broad_pool_when_no_clear_sky():
     # Persistently overcast history: no sample meets the clear-sky
     # filter. Don't return DEFAULT — fall back to the broad GHI>50 pool
