@@ -4629,15 +4629,29 @@ function renderForecastDayStrip(j) {
     // Sunset SOC: predicted_soc at the LAST hour with solar > 0 for
     // this day. Matches the hero "At sunset" card's calc (renderEodPill)
     // so the two surfaces show identical numbers on overlapping days.
-    // Null on days that have no daylight in the window (rare — first
-    // tile when forecast starts post-sunset).
+    // Sunrise SOC: predicted_soc at the LAST dark hour BEFORE the
+    // first daylight hour — the overnight low (matches hero's
+    // "At sunrise" calc). Null on days where the corresponding
+    // transition isn't in the window (e.g. today's tile, where
+    // sunrise already happened before "now" and isn't in fc).
     let sunsetSoc = null;
-    for (const h of d.hours) {
-      if ((h.solar_w || 0) > 0 && h.predicted_soc != null) {
-        sunsetSoc = Number(h.predicted_soc);
-      }
+    let sunriseSoc = null;
+    let firstDaylightIdx = -1;
+    for (let k = 0; k < d.hours.length; k++) {
+      const h = d.hours[k];
+      const isDay = (h.solar_w || 0) > 0;
+      if (isDay && firstDaylightIdx === -1) firstDaylightIdx = k;
+      if (isDay && h.predicted_soc != null) sunsetSoc = Number(h.predicted_soc);
+    }
+    // Sunrise = SOC at the dark hour just before the first daylight
+    // hour. Skip if the day starts already in daylight (e.g. today's
+    // forecast that begins mid-afternoon).
+    if (firstDaylightIdx > 0) {
+      const prev = d.hours[firstDaylightIdx - 1];
+      if (prev?.predicted_soc != null) sunriseSoc = Number(prev.predicted_soc);
     }
     d.sunsetSoc = sunsetSoc;
+    d.sunriseSoc = sunriseSoc;
   }
 
   // For the FIRST tile (Today), the forecast only contains hours from
@@ -4686,23 +4700,33 @@ function renderForecastDayStrip(j) {
     const warnLine = d.depleted
       ? '<span class="fdt-warn">⚠ depleted</span>'
       : '';
-    // Inline the sunset point between start and end when it's
-    // meaningfully above both endpoints (>2pp). Reads as
-    // "78% → sunset 100% → 90%". On cloudy days where SOC barely
-    // climbs, fall back to the plain "78% → 90%" two-point form.
-    const endpointMax = Math.max(d.startSoc, d.endSoc);
-    const sunsetMidpoint = (d.sunsetSoc != null && d.sunsetSoc > endpointMax + 2)
-      ? `<span class="fdt-arrow">→</span>
-         <span class="fdt-mid">sunset</span>
-         ${Math.round(d.sunsetSoc)}<small>%</small>`
-      : '';
+    // Build the SOC trajectory inline. Up to four points:
+    //   start → SUNRISE low → SUNSET peak → end
+    // Only include sunrise/sunset when they exist in this day's
+    // window AND when they're meaningfully different from their
+    // neighbors (>2pp), so cloudy / no-arc days fall back to a clean
+    // two-point start→end display.
+    const segments = [];
+    segments.push(`${Math.round(d.startSoc)}<small>%</small>`);
+    if (d.sunriseSoc != null && Math.abs(d.startSoc - d.sunriseSoc) > 2) {
+      segments.push('<span class="fdt-arrow">→</span>');
+      segments.push('<span class="fdt-mid">sunrise</span>');
+      segments.push(`${Math.round(d.sunriseSoc)}<small>%</small>`);
+    }
+    const lastShown = d.sunriseSoc != null && Math.abs(d.startSoc - d.sunriseSoc) > 2
+      ? d.sunriseSoc : d.startSoc;
+    if (d.sunsetSoc != null && Math.abs(d.sunsetSoc - lastShown) > 2
+        && Math.abs(d.sunsetSoc - d.endSoc) > 2) {
+      segments.push('<span class="fdt-arrow">→</span>');
+      segments.push('<span class="fdt-mid">sunset</span>');
+      segments.push(`${Math.round(d.sunsetSoc)}<small>%</small>`);
+    }
+    segments.push('<span class="fdt-arrow">→</span>');
+    segments.push(`${Math.round(d.endSoc)}<small>%</small>`);
     return `<div class="forecast-day-tile ${cls}">
       <span class="fdt-label">${labelFor(d)}</span>
       <span class="fdt-soc">
-        ${Math.round(d.startSoc)}<small>%</small>
-        ${sunsetMidpoint}
-        <span class="fdt-arrow">→</span>
-        ${Math.round(d.endSoc)}<small>%</small>
+        ${segments.join('\n')}
       </span>
       <span class="fdt-solar">${(d.solarWh / 1000).toFixed(1)} kWh ↑</span>
       ${warnLine}
