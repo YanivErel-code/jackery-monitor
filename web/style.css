@@ -2318,6 +2318,12 @@ footer {
   color: var(--text-dim);
   font-family: var(--font-mono, monospace);
 }
+.forecast-day-tile .fdt-peak {
+  font-size: 11px;
+  color: var(--text-mute);
+  font-family: var(--font-mono, monospace);
+  letter-spacing: .03em;
+}
 /* Color cues: green border when SOC stays comfortably above 20 all
    day, amber when min dips into the 10-30 band (running thin),
    red when SOC bottoms at 0 (depleted). The dashboard's existing
