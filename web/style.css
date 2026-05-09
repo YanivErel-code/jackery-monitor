@@ -2318,15 +2318,17 @@ footer {
   color: var(--text-dim);
   font-family: var(--font-mono, monospace);
 }
-/* Trajectory arc: each point is a label-above-value pair, laid out
-   in a row with small gaps. Lets us fit 4 labeled points (now,
-   sunset, midnight, sunrise) inside the tile without the line
-   wrapping awkwardly. */
+/* Trajectory arc: each point is a label-above-value pair, spread
+   across the full tile width so the eye can scan left-to-right
+   through NOW → SUNSET → MIDNIGHT → SUNRISE without the values
+   bunching at the left edge. */
 .forecast-day-tile .fdt-arc {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 0 8px;
+  justify-content: space-between;
+  width: 100%;
+  gap: 4px 8px;
   font-variant-numeric: tabular-nums;
 }
 .forecast-day-tile .fdt-pt {
