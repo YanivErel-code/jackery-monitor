@@ -2324,6 +2324,19 @@ footer {
   font-family: var(--font-mono, monospace);
   letter-spacing: .03em;
 }
+.forecast-day-tile .fdt-mid {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-mute);
+  font-weight: 500;
+  margin-right: 1px;
+}
+/* Allow the SOC line to wrap on narrow viewports so the inline
+   sunset midpoint doesn't push the right end out of the tile. */
+.forecast-day-tile .fdt-soc {
+  flex-wrap: wrap;
+}
 /* Color cues: green border when SOC stays comfortably above 20 all
    day, amber when min dips into the 10-30 band (running thin),
    red when SOC bottoms at 0 (depleted). The dashboard's existing
