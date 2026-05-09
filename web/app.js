@@ -4700,54 +4700,45 @@ function renderForecastDayStrip(j) {
     const warnLine = d.depleted
       ? '<span class="fdt-warn">⚠ depleted</span>'
       : '';
-    // Build the SOC trajectory inline. The today tile (first in
-    // strip) is special: it extends through midnight to also show
+    // Build the SOC trajectory as labeled points. The today tile
+    // (first in strip) extends through midnight to also show
     // tomorrow's sunrise (overnight low), so the user can see both
     // ends of the night in one place. Other tiles show the full
-    // daily arc within their own window.
+    // daily arc within their own window. Rendered as a label-above-
+    // value grid so each point fits compactly without wrapping —
+    // an inline "78% → SUNSET 100% → MIDNIGHT 90% → SUNRISE 73%"
+    // line was overflowing the 5-up tile width.
     const tileIdx = visible.indexOf(d);
     const isFirst = tileIdx === 0;
     const nextSunriseSoc = isFirst && visible[1]?.sunriseSoc != null
       ? Number(visible[1].sunriseSoc) : null;
 
-    const segments = [];
-    segments.push(`${Math.round(d.startSoc)}<small>%</small>`);
-    // Sunrise within THIS day (e.g. tomorrow tile): only include
-    // when meaningfully below start. Today's tile typically has no
-    // sunrise inside its window — the next-sunrise extension
-    // handles it instead.
+    const points = [];
+    points.push({ label: isFirst ? 'now' : 'midnight', value: d.startSoc });
     if (d.sunriseSoc != null && Math.abs(d.startSoc - d.sunriseSoc) > 2) {
-      segments.push('<span class="fdt-arrow">→</span>');
-      segments.push('<span class="fdt-mid">sunrise</span>');
-      segments.push(`${Math.round(d.sunriseSoc)}<small>%</small>`);
+      points.push({ label: 'sunrise', value: d.sunriseSoc });
     }
-    const lastShown = d.sunriseSoc != null && Math.abs(d.startSoc - d.sunriseSoc) > 2
-      ? d.sunriseSoc : d.startSoc;
-    if (d.sunsetSoc != null && Math.abs(d.sunsetSoc - lastShown) > 2
+    const lastShown = points[points.length - 1].value;
+    if (d.sunsetSoc != null
+        && Math.abs(d.sunsetSoc - lastShown) > 2
         && Math.abs(d.sunsetSoc - d.endSoc) > 2) {
-      segments.push('<span class="fdt-arrow">→</span>');
-      segments.push('<span class="fdt-mid">sunset</span>');
-      segments.push(`${Math.round(d.sunsetSoc)}<small>%</small>`);
+      points.push({ label: 'sunset', value: d.sunsetSoc });
     }
-    // End-of-day. Label it MIDNIGHT only when we're extending past
-    // it with the next-sunrise point — otherwise the bare value
-    // reads as the natural end of the trajectory.
+    points.push({ label: 'midnight', value: d.endSoc });
     if (nextSunriseSoc != null) {
-      segments.push('<span class="fdt-arrow">→</span>');
-      segments.push('<span class="fdt-mid">midnight</span>');
-      segments.push(`${Math.round(d.endSoc)}<small>%</small>`);
-      segments.push('<span class="fdt-arrow">→</span>');
-      segments.push('<span class="fdt-mid">sunrise</span>');
-      segments.push(`${Math.round(nextSunriseSoc)}<small>%</small>`);
-    } else {
-      segments.push('<span class="fdt-arrow">→</span>');
-      segments.push(`${Math.round(d.endSoc)}<small>%</small>`);
+      points.push({ label: 'sunrise', value: nextSunriseSoc });
     }
+
+    const arc = points.map((p) => `
+      <div class="fdt-pt">
+        <span class="fdt-pt-label">${p.label}</span>
+        <span class="fdt-pt-value">${Math.round(p.value)}<small>%</small></span>
+      </div>
+    `).join('');
+
     return `<div class="forecast-day-tile ${cls}">
       <span class="fdt-label">${labelFor(d)}</span>
-      <span class="fdt-soc">
-        ${segments.join('\n')}
-      </span>
+      <div class="fdt-arc">${arc}</div>
       <span class="fdt-solar">${(d.solarWh / 1000).toFixed(1)} kWh ↑</span>
       ${warnLine}
     </div>`;

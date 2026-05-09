@@ -2318,24 +2318,39 @@ footer {
   color: var(--text-dim);
   font-family: var(--font-mono, monospace);
 }
-.forecast-day-tile .fdt-peak {
-  font-size: 11px;
-  color: var(--text-mute);
-  font-family: var(--font-mono, monospace);
-  letter-spacing: .03em;
+/* Trajectory arc: each point is a label-above-value pair, laid out
+   in a row with small gaps. Lets us fit 4 labeled points (now,
+   sunset, midnight, sunrise) inside the tile without the line
+   wrapping awkwardly. */
+.forecast-day-tile .fdt-arc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0 8px;
+  font-variant-numeric: tabular-nums;
 }
-.forecast-day-tile .fdt-mid {
-  font-size: 10px;
+.forecast-day-tile .fdt-pt {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+.forecast-day-tile .fdt-pt-label {
+  font-size: 9px;
   text-transform: uppercase;
   letter-spacing: .06em;
   color: var(--text-mute);
   font-weight: 500;
-  margin-right: 1px;
 }
-/* Allow the SOC line to wrap on narrow viewports so the inline
-   sunset midpoint doesn't push the right end out of the tile. */
-.forecast-day-tile .fdt-soc {
-  flex-wrap: wrap;
+.forecast-day-tile .fdt-pt-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+}
+.forecast-day-tile .fdt-pt-value small {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 10px;
 }
 /* Color cues: green border when SOC stays comfortably above 20 all
    day, amber when min dips into the 10-30 band (running thin),
