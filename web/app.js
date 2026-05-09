@@ -4674,6 +4674,17 @@ function renderForecastDayStrip(j) {
     const warnLine = d.depleted
       ? '<span class="fdt-warn">⚠ depleted</span>'
       : '';
+    // Peak SOC line: the highest predicted_soc reached during the
+    // day, rendered when it's meaningfully above both endpoints (>2pp
+    // higher than max(start, end)). Surfaces "we charge to 100% then
+    // drift back to 90% by midnight" — without this the start→end
+    // arrow alone hides the peak that the hero "AT SUNSET" card
+    // shows. Threshold avoids redundant labels on cloudy days where
+    // SOC barely climbs.
+    const endpointMax = Math.max(d.startSoc, d.endSoc);
+    const peakLine = (d.maxSoc !== -Infinity && d.maxSoc > endpointMax + 2)
+      ? `<span class="fdt-peak">peak ${Math.round(d.maxSoc)}%</span>`
+      : '';
     return `<div class="forecast-day-tile ${cls}">
       <span class="fdt-label">${labelFor(d)}</span>
       <span class="fdt-soc">
@@ -4681,6 +4692,7 @@ function renderForecastDayStrip(j) {
         <span class="fdt-arrow">→</span>
         ${Math.round(d.endSoc)}<small>%</small>
       </span>
+      ${peakLine}
       <span class="fdt-solar">${(d.solarWh / 1000).toFixed(1)} kWh ↑</span>
       ${warnLine}
     </div>`;
