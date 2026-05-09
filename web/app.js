@@ -4700,14 +4700,22 @@ function renderForecastDayStrip(j) {
     const warnLine = d.depleted
       ? '<span class="fdt-warn">⚠ depleted</span>'
       : '';
-    // Build the SOC trajectory inline. Up to four points:
-    //   start → SUNRISE low → SUNSET peak → end
-    // Only include sunrise/sunset when they exist in this day's
-    // window AND when they're meaningfully different from their
-    // neighbors (>2pp), so cloudy / no-arc days fall back to a clean
-    // two-point start→end display.
+    // Build the SOC trajectory inline. The today tile (first in
+    // strip) is special: it extends through midnight to also show
+    // tomorrow's sunrise (overnight low), so the user can see both
+    // ends of the night in one place. Other tiles show the full
+    // daily arc within their own window.
+    const tileIdx = visible.indexOf(d);
+    const isFirst = tileIdx === 0;
+    const nextSunriseSoc = isFirst && visible[1]?.sunriseSoc != null
+      ? Number(visible[1].sunriseSoc) : null;
+
     const segments = [];
     segments.push(`${Math.round(d.startSoc)}<small>%</small>`);
+    // Sunrise within THIS day (e.g. tomorrow tile): only include
+    // when meaningfully below start. Today's tile typically has no
+    // sunrise inside its window — the next-sunrise extension
+    // handles it instead.
     if (d.sunriseSoc != null && Math.abs(d.startSoc - d.sunriseSoc) > 2) {
       segments.push('<span class="fdt-arrow">→</span>');
       segments.push('<span class="fdt-mid">sunrise</span>');
@@ -4721,8 +4729,20 @@ function renderForecastDayStrip(j) {
       segments.push('<span class="fdt-mid">sunset</span>');
       segments.push(`${Math.round(d.sunsetSoc)}<small>%</small>`);
     }
-    segments.push('<span class="fdt-arrow">→</span>');
-    segments.push(`${Math.round(d.endSoc)}<small>%</small>`);
+    // End-of-day. Label it MIDNIGHT only when we're extending past
+    // it with the next-sunrise point — otherwise the bare value
+    // reads as the natural end of the trajectory.
+    if (nextSunriseSoc != null) {
+      segments.push('<span class="fdt-arrow">→</span>');
+      segments.push('<span class="fdt-mid">midnight</span>');
+      segments.push(`${Math.round(d.endSoc)}<small>%</small>`);
+      segments.push('<span class="fdt-arrow">→</span>');
+      segments.push('<span class="fdt-mid">sunrise</span>');
+      segments.push(`${Math.round(nextSunriseSoc)}<small>%</small>`);
+    } else {
+      segments.push('<span class="fdt-arrow">→</span>');
+      segments.push(`${Math.round(d.endSoc)}<small>%</small>`);
+    }
     return `<div class="forecast-day-tile ${cls}">
       <span class="fdt-label">${labelFor(d)}</span>
       <span class="fdt-soc">
