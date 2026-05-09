@@ -4686,25 +4686,24 @@ function renderForecastDayStrip(j) {
     const warnLine = d.depleted
       ? '<span class="fdt-warn">⚠ depleted</span>'
       : '';
-    // Sunset SOC line: predicted_soc at the last daylight hour of
-    // the day, mirroring the hero "At sunset" card. Surfaces "we
-    // charge to 100% by sunset, then drift back to 90% by midnight"
-    // so the start→end arrow doesn't read as if the day's peak was
-    // hidden. Skip when sunset SOC is within 2pp of both endpoints
-    // (cloudy day, no meaningful arc) or when there's no sunset in
-    // this day's window.
+    // Inline the sunset point between start and end when it's
+    // meaningfully above both endpoints (>2pp). Reads as
+    // "78% → sunset 100% → 90%". On cloudy days where SOC barely
+    // climbs, fall back to the plain "78% → 90%" two-point form.
     const endpointMax = Math.max(d.startSoc, d.endSoc);
-    const peakLine = (d.sunsetSoc != null && d.sunsetSoc > endpointMax + 2)
-      ? `<span class="fdt-peak">sunset ${Math.round(d.sunsetSoc)}%</span>`
+    const sunsetMidpoint = (d.sunsetSoc != null && d.sunsetSoc > endpointMax + 2)
+      ? `<span class="fdt-arrow">→</span>
+         <span class="fdt-mid">sunset</span>
+         ${Math.round(d.sunsetSoc)}<small>%</small>`
       : '';
     return `<div class="forecast-day-tile ${cls}">
       <span class="fdt-label">${labelFor(d)}</span>
       <span class="fdt-soc">
         ${Math.round(d.startSoc)}<small>%</small>
+        ${sunsetMidpoint}
         <span class="fdt-arrow">→</span>
         ${Math.round(d.endSoc)}<small>%</small>
       </span>
-      ${peakLine}
       <span class="fdt-solar">${(d.solarWh / 1000).toFixed(1)} kWh ↑</span>
       ${warnLine}
     </div>`;
