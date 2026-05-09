@@ -4626,6 +4626,18 @@ function renderForecastDayStrip(j) {
     const lastSoc = d.hours[d.hours.length - 1]?.predicted_soc;
     d.endSoc = lastSoc != null ? Number(lastSoc) : prevEnd;
     prevEnd = d.endSoc;
+    // Sunset SOC: predicted_soc at the LAST hour with solar > 0 for
+    // this day. Matches the hero "At sunset" card's calc (renderEodPill)
+    // so the two surfaces show identical numbers on overlapping days.
+    // Null on days that have no daylight in the window (rare — first
+    // tile when forecast starts post-sunset).
+    let sunsetSoc = null;
+    for (const h of d.hours) {
+      if ((h.solar_w || 0) > 0 && h.predicted_soc != null) {
+        sunsetSoc = Number(h.predicted_soc);
+      }
+    }
+    d.sunsetSoc = sunsetSoc;
   }
 
   // For the FIRST tile (Today), the forecast only contains hours from
@@ -4674,16 +4686,16 @@ function renderForecastDayStrip(j) {
     const warnLine = d.depleted
       ? '<span class="fdt-warn">⚠ depleted</span>'
       : '';
-    // Peak SOC line: the highest predicted_soc reached during the
-    // day, rendered when it's meaningfully above both endpoints (>2pp
-    // higher than max(start, end)). Surfaces "we charge to 100% then
-    // drift back to 90% by midnight" — without this the start→end
-    // arrow alone hides the peak that the hero "AT SUNSET" card
-    // shows. Threshold avoids redundant labels on cloudy days where
-    // SOC barely climbs.
+    // Sunset SOC line: predicted_soc at the last daylight hour of
+    // the day, mirroring the hero "At sunset" card. Surfaces "we
+    // charge to 100% by sunset, then drift back to 90% by midnight"
+    // so the start→end arrow doesn't read as if the day's peak was
+    // hidden. Skip when sunset SOC is within 2pp of both endpoints
+    // (cloudy day, no meaningful arc) or when there's no sunset in
+    // this day's window.
     const endpointMax = Math.max(d.startSoc, d.endSoc);
-    const peakLine = (d.maxSoc !== -Infinity && d.maxSoc > endpointMax + 2)
-      ? `<span class="fdt-peak">peak ${Math.round(d.maxSoc)}%</span>`
+    const peakLine = (d.sunsetSoc != null && d.sunsetSoc > endpointMax + 2)
+      ? `<span class="fdt-peak">sunset ${Math.round(d.sunsetSoc)}%</span>`
       : '';
     return `<div class="forecast-day-tile ${cls}">
       <span class="fdt-label">${labelFor(d)}</span>
