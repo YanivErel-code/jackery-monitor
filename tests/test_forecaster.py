@@ -1003,14 +1003,18 @@ def test_fit_drain_model_falls_back_when_too_few_windows():
     assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
 
-def test_fit_drain_model_falls_back_on_implausible_coefficients():
-    """If the OLS produces a negative parasitic (e.g. all windows have
-    drain < load * 1.0), fall back to defaults rather than emit a value
-    that says the battery gains energy at idle."""
+def test_fit_drain_model_clamps_negative_parasitic_to_zero():
+    """When all clean-discharge windows show drain < load × 1.10 (a
+    sign that out_w is AC-side and already includes the inverter
+    losses we're trying to add as overhead, per advisor 2026-05-10),
+    the implied parasitic comes out negative. Clamp to 0 rather than
+    fall back to the cold-start default — 0 says "no extra parasitic
+    on top of metered load", which is closer to truth on this
+    hardware than 50W phantom default."""
     base = 1_700_000_000
     history = []
-    # 8 windows with drain consistently BELOW load (sensor over-reads
-    # or hidden charging). Makes OLS regress to negative intercept.
+    # 8 windows with drain consistently BELOW load × 1.10. Makes
+    # implied parasitic regress to a negative value.
     for i, load_w in enumerate([1000, 1200, 1400, 1600, 1800,
                                  1000, 1300, 1500]):
         # Force soc_drop < load * 1h / capacity, so drain < load.
@@ -1027,7 +1031,7 @@ def test_fit_drain_model_falls_back_on_implausible_coefficients():
         history, capacity_wh=30000,
     )
     assert n >= 5
-    assert parasitic_w == forecaster.DEFAULT_PARASITIC_W
+    assert parasitic_w == 0.0
     assert overhead_pct == forecaster.DEFAULT_INVERTER_OVERHEAD_PCT
 
 

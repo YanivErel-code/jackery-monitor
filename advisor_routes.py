@@ -607,6 +607,36 @@ def _recent_code_changes() -> list[dict[str, Any]]:
             ),
         },
         {
+            "ts_iso": "2026-05-10T17:30:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Follow-up to 2026-05-10T16:51 advisor anomaly: the "
+                "01:30 plain-median revert didn't move parasitic_w "
+                "(stayed at 316W) because the run-pool median came "
+                "out NEGATIVE (out_w meter is AC-side and already "
+                "includes inverter losses, so adding +10% overhead "
+                "double-counts), which my code rejected as 'invalid' "
+                "and fell through to the noisier per-pair median that "
+                "lands at 316W. Three changes: "
+                "(1) Add MAX_FIT_START_SOC_PCT=95 / MAX_RUN_START_SOC_"
+                "PCT=95 — exclude windows starting in the BMS taper "
+                "region where the discharge slope is distorted by "
+                "balancing current. (2) Tighten input noise floors "
+                "from 50 Wh → 20 Wh in both fit_drain_model and "
+                "_clean_discharge_runs — small input ramps were "
+                "confounding the slope. (3) Clamp negative implied "
+                "parasitic to 0 instead of falling through. Negative "
+                "fit means out_w over-counts (advisor's hypothesis); "
+                "0 says 'no extra parasitic on top of metered load' "
+                "which is closer to truth on this hardware than the "
+                "316W phantom. Expected drift: 316 → 0-50W. The "
+                "+10% overhead double-count is a known model defect "
+                "(out_w being AC-side); clamping parasitic to 0 is "
+                "the right interim until we ship a per-device "
+                "overhead correction."
+            ),
+        },
+        {
             "ts_iso": "2026-05-10T01:30:00+00:00",
             "subsystem": "forecaster",
             "summary": (
