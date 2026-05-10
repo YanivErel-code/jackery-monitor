@@ -4892,10 +4892,17 @@ async function renderDailyAccuracy() {
   if (empty) empty.hidden = true;
   if (table) table.hidden = false;
 
-  // Render newest-first, but keep MAE math over the full window.
+  // Render newest-first. Track sunset/sunrise errors in two buckets:
+  // ALL (everything visible) and POST-FIX (predictions_made_at >=
+  // cutoff_ts — i.e. made by current code, not stale older code).
+  // Stale rows still render so the user can see history; they're
+  // visually muted and don't count toward the post-fix MAE headline.
+  const cutoffTs = Number(j.cutoff_ts || 0);
   const sorted = [...rows].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  const sunsetErrs = [];
-  const sunriseErrs = [];
+  const sunsetErrsAll = [];
+  const sunriseErrsAll = [];
+  const sunsetErrsPostFix = [];
+  const sunriseErrsPostFix = [];
   const html = sorted.map((row) => {
     const date = row.date || '—';
     const sp = row.predicted_sunset_soc_pct;
@@ -4904,10 +4911,20 @@ async function renderDailyAccuracy() {
     const ra = row.actual_sunrise_soc_pct;
     const sErr = (sp != null && sa != null) ? sa - sp : null;
     const rErr = (rp != null && ra != null) ? ra - rp : null;
-    if (sErr != null) sunsetErrs.push(sErr);
-    if (rErr != null) sunriseErrs.push(rErr);
-    return `<tr>
-      <td>${date}</td>
+    const madeAt = Number(row.predictions_made_at || 0);
+    const isPostFix = cutoffTs > 0 && madeAt > 0 && madeAt >= cutoffTs;
+    if (sErr != null) {
+      sunsetErrsAll.push(sErr);
+      if (isPostFix) sunsetErrsPostFix.push(sErr);
+    }
+    if (rErr != null) {
+      sunriseErrsAll.push(rErr);
+      if (isPostFix) sunriseErrsPostFix.push(rErr);
+    }
+    const rowCls = isPostFix ? '' : 'acc-row-stale';
+    const staleBadge = isPostFix ? '' : ' <span class="acc-stale-badge" title="Predictions made by older code (before the latest forecaster fix). Excluded from the post-fix MAE.">stale</span>';
+    return `<tr class="${rowCls}">
+      <td>${date}${staleBadge}</td>
       <td>${_fmtPct(sp)}</td>
       <td>${_fmtPct(sa)}</td>
       ${_fmtErrCell(sErr)}
@@ -4917,7 +4934,10 @@ async function renderDailyAccuracy() {
     </tr>`;
   }).join('');
   if (tbody) tbody.innerHTML = html;
-  _renderAccuracySummary(sunsetErrs, sunriseErrs);
+  _renderAccuracySummary(
+    sunsetErrsAll, sunriseErrsAll,
+    sunsetErrsPostFix, sunriseErrsPostFix,
+  );
 }
 
 function _fmtPct(v) {
@@ -4932,20 +4952,30 @@ function _fmtErrCell(err) {
   return `<td class="${cls}">${sign}${err.toFixed(1)}</td>`;
 }
 
-function _renderAccuracySummary(sunsetErrs, sunriseErrs) {
+function _renderAccuracySummary(sunsetErrsAll, sunriseErrsAll,
+                                 sunsetErrsPostFix, sunriseErrsPostFix) {
   const mae = (xs) => xs.length
     ? (xs.reduce((s, x) => s + Math.abs(x), 0) / xs.length).toFixed(1)
     : null;
   const setText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  // Headline is post-fix when there's any post-fix data; falls back
+  // to all-shown when no post-fix samples are available yet (e.g.
+  // immediately after a cutoff bump). The subline always shows the
+  // alternate count so the user can tell which one they're seeing.
+  const hasPostFix = sunsetErrsPostFix.length + sunriseErrsPostFix.length > 0;
+  const sunsetErrs = hasPostFix ? sunsetErrsPostFix : sunsetErrsAll;
+  const sunriseErrs = hasPostFix ? sunriseErrsPostFix : sunriseErrsAll;
+  const scopeNote = hasPostFix ? ' · post-fix' : ' · all (no post-fix yet)';
+
   const sunsetMae = mae(sunsetErrs);
   const sunriseMae = mae(sunriseErrs);
   setText('daily-acc-sunset-mae', sunsetMae ?? '—');
   setText('daily-acc-sunset-n', sunsetErrs.length
-    ? `${sunsetErrs.length} day${sunsetErrs.length === 1 ? '' : 's'} measured`
+    ? `${sunsetErrs.length} day${sunsetErrs.length === 1 ? '' : 's'} measured${scopeNote}`
     : 'no data');
   setText('daily-acc-sunrise-mae', sunriseMae ?? '—');
   setText('daily-acc-sunrise-n', sunriseErrs.length
-    ? `${sunriseErrs.length} day${sunriseErrs.length === 1 ? '' : 's'} measured`
+    ? `${sunriseErrs.length} day${sunriseErrs.length === 1 ? '' : 's'} measured${scopeNote}`
     : 'no data');
   // Hit rate = share of all measured points (sunset + sunrise) where
   // |error| ≤ 5pp. Single number across both phases gives a quick "is
@@ -4955,7 +4985,7 @@ function _renderAccuracySummary(sunsetErrs, sunriseErrs) {
   const hitRate = all.length ? Math.round((hits / all.length) * 100) : null;
   setText('daily-acc-hitrate', hitRate ?? '—');
   setText('daily-acc-hitrate-sub', all.length
-    ? `${hits} of ${all.length} predictions within 5pp`
+    ? `${hits} of ${all.length} predictions within 5pp${scopeNote}`
     : 'no data');
 }
 
