@@ -2551,13 +2551,21 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
 def api_daily_summary(device_sn: str | None = None, days: int = 7):
     """Daily sunset/sunrise predicted vs actual SOC rows. Sourced from
     daily_solar_summary, written by the smart-charge tick. Used by the
-    Logs → Debug panel for at-a-glance comparison."""
+    Logs → Debug panel + Forecast tab's accuracy table.
+
+    `cutoff_ts` returned alongside the rows is the active forecaster
+    breaking-change timestamp. Each row has its own `predictions_made_at`
+    so the UI can split MAE into "all-shown" and "post-fix-only" — the
+    latter only counts rows whose predictions were made AT or AFTER
+    cutoff_ts (i.e. by current code, not stale buggy older code)."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
-        return {"device_sn": None, "rows": []}
+        return {"device_sn": None, "rows": [],
+                "cutoff_ts": FORECASTER_BREAKING_CHANGE_TS}
     days = max(1, min(int(days), 90))
     return {"device_sn": device_sn, "days": days,
+            "cutoff_ts": FORECASTER_BREAKING_CHANGE_TS,
             "rows": state.energy.list_daily_summary(device_sn, days=days)}
 
 

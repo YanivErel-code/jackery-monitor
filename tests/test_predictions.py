@@ -109,6 +109,55 @@ def test_list_daily_summary_filters_by_date_not_updated_at(db):
     assert len(rows30) == 10, f"expected 10 rows for days=30, got {len(rows30)}"
 
 
+def test_predictions_made_at_only_bumps_when_writing_predictions(db):
+    """predictions_made_at must reflect when predicted_* values were
+    last written, NOT when actuals were backfilled. Otherwise stale
+    rows whose actuals get filled today would look 'fresh' to the
+    cutoff filter and pollute the post-fix MAE.
+
+    Sequence: write prediction → record predictions_made_at = T1.
+    Backfill writes only actuals at T2 > T1. predictions_made_at
+    must remain T1, not jump to T2."""
+    sn = "SN-MADE-AT"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    import time as _time
+    t1 = int(_time.time()) - 3600
+    sunset_ts = t1 - 60  # already in the past relative to t2
+    sunrise_ts = t1 - 30
+    # Step 1: write the prediction. predictions_made_at should ≈ now.
+    db.upsert_daily_summary(
+        device_sn=sn, local_date="2026-05-09",
+        sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
+        predicted_sunset_soc_pct=80.0,
+        predicted_sunrise_soc_pct=42.0,
+    )
+    rows = db.list_daily_summary(sn, days=14)
+    initial_made_at = rows[0]["predictions_made_at"]
+    assert initial_made_at is not None and initial_made_at > 0
+
+    # Step 2: simulate a back-fill upsert (actual values only, no
+    # predicted_* args). Sleep 1s so a wrongly-bumped value would
+    # be detectable. predictions_made_at should NOT change.
+    _time.sleep(1.1)
+    db.upsert_daily_summary(
+        device_sn=sn, local_date="2026-05-09",
+        sunset_ts=None, sunrise_ts=None,
+        predicted_sunset_soc_pct=None,
+        actual_sunset_soc_pct=78.0,
+        predicted_sunrise_soc_pct=None,
+        actual_sunrise_soc_pct=44.0,
+    )
+    rows2 = db.list_daily_summary(sn, days=14)
+    # Same row, same predictions_made_at. updated_at should have
+    # bumped (the row WAS touched), but predictions_made_at must
+    # not have moved.
+    assert rows2[0]["predictions_made_at"] == initial_made_at
+    assert rows2[0]["updated_at"] > initial_made_at  # updated_at did bump
+    # And the actuals landed.
+    assert rows2[0]["actual_sunset_soc_pct"] == 78.0
+    assert rows2[0]["actual_sunrise_soc_pct"] == 44.0
+
+
 def test_backfill_daily_actuals_fills_missing_actuals(db):
     """The single-shot tick writes only today's row, but each row's
     sunrise_ts falls on the FOLLOWING calendar day — so today's tick

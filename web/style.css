@@ -2418,6 +2418,26 @@ footer {
 .acc-table tbody td.acc-err-warn   { color: #facc15; }
 .acc-table tbody td.acc-err-bad    { color: #f87171; }
 .acc-table tbody td.acc-missing    { color: var(--text-dim); }
+/* Stale rows: predictions made by older code (before the latest
+   forecaster cutoff). Shown for context but visually muted, and the
+   error cells lose their green/yellow/red tint so the eye doesn't
+   read them as comparable to current performance. */
+.acc-table tbody tr.acc-row-stale td { color: var(--text-mute); opacity: .6; }
+.acc-table tbody tr.acc-row-stale td.acc-err-good,
+.acc-table tbody tr.acc-row-stale td.acc-err-warn,
+.acc-table tbody tr.acc-row-stale td.acc-err-bad { color: var(--text-mute); }
+.acc-stale-badge {
+  display: inline-block;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
 
 /* Three-up summary row above the daily-accuracy table: per-phase MAE
    plus an overall hit-rate score for the selected window. */

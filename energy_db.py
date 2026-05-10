@@ -373,6 +373,28 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                     "ALTER TABLE smart_charge_decisions "
                     "ADD COLUMN baseline_predicted_sunrise_soc_pct REAL"
                 )
+            # daily_solar_summary: predictions_made_at tracks when the row's
+            # predicted_* values were last written (NOT bumped by backfill of
+            # actual_*). Used by the Forecast tab to filter the headline
+            # MAE to predictions made by post-cutoff code, so wild errors
+            # from older buggy code don't drag the displayed accuracy down.
+            existing_ds = {row[1] for row in c.execute(
+                "PRAGMA table_info(daily_solar_summary)").fetchall()}
+            if "predictions_made_at" not in existing_ds:
+                c.execute(
+                    "ALTER TABLE daily_solar_summary "
+                    "ADD COLUMN predictions_made_at INTEGER"
+                )
+                # Backfill existing rows: use sunset_ts as the proxy for
+                # when the day's predictions were finalized. By the time
+                # sunset arrives, the predicted_sunset_soc_pct has stopped
+                # being updated for that day (the next tick targets the
+                # next day). Imperfect but better than NULL.
+                c.execute(
+                    "UPDATE daily_solar_summary "
+                    "SET predictions_made_at = COALESCE(sunset_ts, sunrise_ts) "
+                    "WHERE predictions_made_at IS NULL"
+                )
 
     # ---------- ingestion ----------
     def upsert_device(self, device_sn: str, name: str | None,
@@ -703,11 +725,17 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             existing = c.execute(
                 """SELECT sunset_ts, sunrise_ts,
                           predicted_sunset_soc_pct, actual_sunset_soc_pct,
-                          predicted_sunrise_soc_pct, actual_sunrise_soc_pct
+                          predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
+                          predictions_made_at
                      FROM daily_solar_summary
                     WHERE date = ? AND device_sn = ?""",
                 (local_date, device_sn),
             ).fetchone()
+            # Bump predictions_made_at ONLY when at least one predicted_*
+            # value is non-None — backfill_daily_actuals passes None for
+            # predicted_* and shouldn't make stale rows look fresh.
+            writing_predictions = (predicted_sunset_soc_pct is not None
+                                   or predicted_sunrise_soc_pct is not None)
             if existing:
                 merged = (
                     sunset_ts if sunset_ts is not None else existing[0],
@@ -717,6 +745,8 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                     predicted_sunrise_soc_pct if predicted_sunrise_soc_pct is not None else existing[4],
                     actual_sunrise_soc_pct if actual_sunrise_soc_pct is not None else existing[5],
                 )
+                predictions_made_at = (now if writing_predictions
+                                       else existing[6])
                 c.execute(
                     """UPDATE daily_solar_summary
                           SET sunset_ts = ?, sunrise_ts = ?,
@@ -724,9 +754,11 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                               actual_sunset_soc_pct = ?,
                               predicted_sunrise_soc_pct = ?,
                               actual_sunrise_soc_pct = ?,
-                              updated_at = ?
+                              updated_at = ?,
+                              predictions_made_at = ?
                         WHERE date = ? AND device_sn = ?""",
-                    (*merged, now, local_date, device_sn),
+                    (*merged, now, predictions_made_at,
+                     local_date, device_sn),
                 )
             else:
                 c.execute(
@@ -734,11 +766,12 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                            (date, device_sn, sunset_ts, sunrise_ts,
                             predicted_sunset_soc_pct, actual_sunset_soc_pct,
                             predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
-                            updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            updated_at, predictions_made_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (local_date, device_sn, sunset_ts, sunrise_ts,
                      predicted_sunset_soc_pct, actual_sunset_soc_pct,
-                     predicted_sunrise_soc_pct, actual_sunrise_soc_pct, now),
+                     predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
+                     now, now if writing_predictions else None),
                 )
 
     def backfill_daily_actuals(self, device_sn: str, *,
@@ -827,7 +860,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 """SELECT date, sunset_ts, sunrise_ts,
                           predicted_sunset_soc_pct, actual_sunset_soc_pct,
                           predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
-                          updated_at
+                          updated_at, predictions_made_at
                      FROM daily_solar_summary
                     WHERE device_sn = ?
                       AND date >= ?
@@ -842,7 +875,8 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                                 if r[3] is not None and r[4] is not None else None,
              "sunrise_error_pp": (r[6] - r[5])
                                  if r[5] is not None and r[6] is not None else None,
-             "updated_at": r[7]}
+             "updated_at": r[7],
+             "predictions_made_at": r[8]}
             for r in rows
         ]
 
