@@ -631,9 +631,21 @@ def fit_drain_model(
     Window-selection gates mirror `fit_inverter_overhead_pct` exactly;
     keep them in sync with `diagnose_idle_windows` if you change either.
     """
-    SOLAR_NOISE_WH = 50.0
-    AC_NOISE_WH = 50.0
+    # Tightened from 50 → 20 Wh per advisor 2026-05-10T16:51: even
+    # small input ramps (e.g. dawn solar trickle, AC plug bouncing on
+    # for a minute) confound the slope. 20 Wh = ~20W average, well
+    # below the device's signal floor.
+    SOLAR_NOISE_WH = 20.0
+    AC_NOISE_WH = 20.0
     MIN_OUT_W = 50.0
+    # Exclude windows where SOC starts above 95% — the BMS taper near
+    # full distorts the discharge slope (charging current ramps down
+    # as cells balance, but our slope-based fit attributes the
+    # apparent drain to parasitic+overhead). Advisor flagged this on
+    # 2026-05-10: clean windows starting at 87-95% SOC produce
+    # consistent 27-50W implied parasitic; the per-pair median was
+    # being dragged to 316W by taper-skewed start-near-100% windows.
+    MAX_FIT_START_SOC_PCT = 95.0
 
     rows = sorted(
         (r for r in (energy_history or []) if r.get("ts") is not None),
@@ -644,6 +656,8 @@ def fit_drain_model(
         a, b = rows[i], rows[i + 1]
         soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
+            continue
+        if soc_a > MAX_FIT_START_SOC_PCT:
             continue
         soc_drop = soc_a - soc_b
         # pp gate (same as fit_inverter_overhead_pct).
@@ -712,7 +726,20 @@ def fit_drain_model(
                 for load, d, _ in median_pool
             )
             parasitic_w = implied[len(implied) // 2]
-            if 0 <= parasitic_w <= 1000:
+            # Clamp negative results to 0 rather than falling through
+            # to the noisier per-pair median. Implied parasitic going
+            # negative on this device means the metered out_w already
+            # includes inverter conversion losses (i.e. it's AC-side,
+            # not DC-side) — adding the +10% overhead on top
+            # double-counts. Advisor 2026-05-10T16:51: clean overnight
+            # windows show implied parasitic of -125W to +27W. Until
+            # we ship a per-device overhead correction, clamp to 0
+            # so the simulator predicts roughly load×1.10 of drain
+            # rather than load×1.10 + 316W. Over-prediction by ~10%
+            # is preferable to over-prediction by ~80%.
+            if parasitic_w < 0:
+                return 0.0, float(default_overhead_pct), len(median_pool)
+            if parasitic_w <= 1000:
                 return float(parasitic_w), float(default_overhead_pct), len(median_pool)
         # Run-based fit didn't produce enough samples — last-resort
         # fallback to the per-pair median (noisier but better than
@@ -721,7 +748,9 @@ def fit_drain_model(
             d - load * (1.0 + default_overhead_pct) for load, d in pairs
         )
         parasitic_w = implied_parasitics[len(implied_parasitics) // 2]
-        if parasitic_w < 0 or parasitic_w > 1000:
+        if parasitic_w < 0:
+            return 0.0, float(default_overhead_pct), n
+        if parasitic_w > 1000:
             return float(default_parasitic_w), float(default_overhead_pct), n
         return float(parasitic_w), float(default_overhead_pct), n
 
@@ -782,12 +811,18 @@ def _clean_discharge_runs(
     even though reality was ~385 W. Aggregating across 4-6h runs
     eliminates the bias.
     """
-    SOLAR_NOISE_WH = 50.0
-    AC_NOISE_WH = 50.0
+    # Tightened in lockstep with fit_drain_model — 20 Wh signal floor.
+    SOLAR_NOISE_WH = 20.0
+    AC_NOISE_WH = 20.0
     MIN_RUN_HOURS = 2.0
     MIN_RUN_AVG_LOAD_W = 50.0
     MAX_RUN_HOURS = 12.0  # don't reach across overnight gaps
     MAX_BUCKET_GAP_H = 1.5  # break a run if poll dropped > 90 min
+    # Same 95% start-SOC cap as fit_drain_model — exclude taper-region
+    # windows where the BMS ramps current rather than honoring the
+    # actual instantaneous load. Advisor 2026-05-10T16:51 traced the
+    # over-fit parasitic to runs starting at 99-100% SOC.
+    MAX_RUN_START_SOC_PCT = 95.0
 
     runs: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -826,6 +861,8 @@ def _clean_discharge_runs(
             continue
         soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
+            continue
+        if soc_a > MAX_RUN_START_SOC_PCT:
             continue
         soc_drop = soc_a - soc_b
         min_pp = (MIN_RUN_SOC_DROP_PCT_SYSTEM
