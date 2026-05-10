@@ -102,7 +102,7 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778312000")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778412000")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's

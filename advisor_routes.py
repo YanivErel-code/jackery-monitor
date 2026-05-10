@@ -246,8 +246,16 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         "fitted_idle_overhead_w": (round(fitted_parasitic_w, 1)
                                    if fitted_parasitic_w is not None else None),
         "fitted_idle_overhead_n_windows": fitted_drain_n,
-        "forecast_accuracy_summary": accuracy_summary,
-        "forecast_accuracy_summary_post_fix": accuracy_summary_post_fix,
+        # `forecast_accuracy_summary` (no suffix) is the PRIMARY headline
+        # the advisor should reason from: post-fix predictions only,
+        # made_at >= forecaster_cutoff_ts. The `_all_time` field is kept
+        # for historical context but should NOT drive recommendations —
+        # it mixes pre- and post-fix predictions and is dragged down by
+        # stale rows from older buggy code. Without this primary/legacy
+        # split the advisor was citing 36-48pp long-lead MAE as
+        # "current performance" when post-fix MAE is actually 8-15pp.
+        "forecast_accuracy_summary": accuracy_summary_post_fix,
+        "forecast_accuracy_summary_all_time": accuracy_summary,
         "forecaster_cutoff_ts": FORECASTER_BREAKING_CHANGE_TS,
         "forecaster_cutoff_iso": _iso(FORECASTER_BREAKING_CHANGE_TS),
         "recent_samples": recent_samples,
@@ -596,6 +604,34 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "separately. Don't re-flag the 17-19pp under-prediction "
                 "on 5/8 18:00-21:00 UTC targets — this commit IS the "
                 "fix."
+            ),
+        },
+        {
+            "ts_iso": "2026-05-10T01:30:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Three coordinated changes responding to 2026-05-10 "
+                "advisor anomalies. (1) parasitic_w: reverted dt²-"
+                "weighted median (which over-fit by giving overwhelming "
+                "weight to whichever single long run was outlier-leaning) "
+                "back to plain median over a ≥4h length-filtered pool. "
+                "Different nights have genuinely different parasitic "
+                "(BMS rebalancing, pack temp, etc.); plain median is "
+                "the right combiner for night-to-night-varying signal. "
+                "Expected drift on the user's rig: 316W → ~225W. "
+                "(2) Solar fit SOC gate tightened from <80% to <70% — "
+                "advisor empirics on 5/9 showed clear-sky k=4.3-4.7 "
+                "even at SOC 76%, indicating BMS taper begins biting "
+                "well before 80%. Expected k drift: 3.73 → ~4.0+. "
+                "(3) Advisor bundle: forecast_accuracy_summary now "
+                "exposes the post-fix slice as the PRIMARY headline "
+                "(was the all-time-mixed slice); the legacy unfiltered "
+                "summary moved to forecast_accuracy_summary_all_time. "
+                "Stops the advisor from citing 36-48pp long-lead MAE "
+                "from stale pre-fix predictions as if it were current "
+                "performance. Combined effect of (1)+(2): the 8-15pp "
+                "long-lead under-bias the advisor flagged at 2026-05-10 "
+                "00:58 should resolve. Don't re-flag those anomalies."
             ),
         },
         {

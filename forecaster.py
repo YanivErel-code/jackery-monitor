@@ -176,12 +176,15 @@ CLEAR_SKY_MAX_CLOUD_PCT = 30.0
 # 2026-05-08: clear-sky moments showed k=4.0-4.2 from 3.6+kW peaks at
 # ~900 W/m² GHI, but fit_solar_coefficient returned k=3.29 because
 # many "clear-sky" fit hours had SOC ≥ 90% (sub-2kW absorbed despite
-# bright sun). Filter to hours where SOC was low enough for the BMS
-# to accept full power — 80% leaves ~6 kWh of headroom on a 30 kWh
-# pack, easily enough to soak a peak hour at full panel output.
-# Pair with: no AC charging during the hour (otherwise solar competes
-# with AC for charge headroom and gets curtailed similarly).
-SOLAR_FIT_MAX_SOC_PCT = 80.0
+# bright sun). The first cut at 80% still left k stuck at 3.73 because
+# advisor empirics on 2026-05-09 showed clear-sky k=4.3-4.7 even at
+# SOC 76% — the BMS taper apparently begins biting well before 80%
+# on this hardware. Tightened to 70% so we only fit during deep
+# headroom hours where the MPPT is unambiguously running at panel
+# capacity. 70% on a 30 kWh pack still leaves 9 kWh of room — plenty
+# to soak a peak hour. Pair with: no AC charging (otherwise solar
+# competes with AC for charge headroom and gets curtailed similarly).
+SOLAR_FIT_MAX_SOC_PCT = 70.0
 SOLAR_FIT_MAX_AC_INPUT_W = 50.0
 
 # Default charge efficiency: not all solar Wh ends up as stored Wh.
@@ -688,24 +691,29 @@ def fit_drain_model(
     # was 103.8 W vs the reconciled-truth ~385 W.
     if load_range_ratio < MIN_LOAD_RANGE_FOR_JOINT_FIT:
         run_triples = _clean_discharge_runs(rows, capacity_wh)
-        if len(run_triples) >= 2:
-            # Length-weighted median: weight each run's implied
-            # parasitic by dt² (variance ~ 1/dt² for fixed pp
-            # quantization noise on system_soc, so optimal weight is
-            # dt²). Long runs (e.g. 9h overnight) carry far more
-            # signal than short 2h runs and should dominate. Plain
-            # median pulled the estimate toward noisy short runs:
-            # the user's 5/8 9h overnight implied 321W parasitic but
-            # the unweighted median across 10 mixed-length runs
-            # landed at 225W, so the simulator under-predicted
-            # overnight drain by ~100W.
-            weighted = [
-                (d - load * (1.0 + default_overhead_pct), dt_h * dt_h)
-                for load, d, dt_h in run_triples
-            ]
-            parasitic_w = _length_weighted_median(weighted)
-            if parasitic_w is not None and 0 <= parasitic_w <= 1000:
-                return float(parasitic_w), float(default_overhead_pct), len(run_triples)
+        # Plain median over runs ≥ 4h. The dt² weighting we tried on
+        # 5/9 over-fit to whichever single run was longest (5/8's 9h
+        # overnight implied 321W parasitic; 5/9's comparable run
+        # implied ~50W). Different nights have genuinely different
+        # parasitic — BMS rebalancing activity, ambient temperature,
+        # pack thermal management — and dt² treated them as if they
+        # were noisy measurements of the same value. Plain median is
+        # the right combiner for night-to-night-varying signal: it
+        # gives the typical-night parasitic. The ≥4h length filter
+        # keeps quality control: short 2-3h runs have 1/dt² more
+        # quantization noise so they don't get to vote on the typical
+        # value. If too few long runs, fall back to all qualifying
+        # runs (rare on a device with daily overnight discharges).
+        long_runs = [t for t in run_triples if t[2] >= 4.0]
+        median_pool = long_runs if len(long_runs) >= 2 else run_triples
+        if len(median_pool) >= 2:
+            implied = sorted(
+                d - load * (1.0 + default_overhead_pct)
+                for load, d, _ in median_pool
+            )
+            parasitic_w = implied[len(implied) // 2]
+            if 0 <= parasitic_w <= 1000:
+                return float(parasitic_w), float(default_overhead_pct), len(median_pool)
         # Run-based fit didn't produce enough samples — last-resort
         # fallback to the per-pair median (noisier but better than
         # leaving the user on cold-start defaults indefinitely).
