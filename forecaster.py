@@ -651,9 +651,25 @@ def fit_drain_model(
         (r for r in (energy_history or []) if r.get("ts") is not None),
         key=lambda r: r["ts"],
     )
+    # Detect whether this device has ANY system_soc data. If yes, it's
+    # a multi-pack rig and we MUST require system_soc on every fit
+    # window — falling back to battery_pct (main-pack only) on rows
+    # that happen to lack pack snapshots reintroduces the pack-ratio
+    # bias we fixed in eee1228. The advisor flagged on 2026-05-11 that
+    # the 414W fitted parasitic was suspiciously close to the old
+    # pre-fix main-pct-biased range (316-370W); confirmed the
+    # contamination by checking: if even a handful of fit windows fall
+    # back to main_pct ×system_capacity, their inflated drain pulls
+    # the median up. Single-unit devices have no pack data → this gate
+    # never fires for them.
+    require_system_soc = any(_row_has_system_soc(r) for r in rows)
     pairs: list[tuple[float, float]] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
+        if require_system_soc and not (
+            _row_has_system_soc(a) and _row_has_system_soc(b)
+        ):
+            continue
         soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
@@ -704,7 +720,10 @@ def fit_drain_model(
     # signal. Advisor flagged this 2026-05-05T18:57 — fitted parasitic
     # was 103.8 W vs the reconciled-truth ~385 W.
     if load_range_ratio < MIN_LOAD_RANGE_FOR_JOINT_FIT:
-        run_triples = _clean_discharge_runs(rows, capacity_wh)
+        run_triples = _clean_discharge_runs(
+            rows, capacity_wh,
+            require_system_soc=require_system_soc,
+        )
         # Plain median over runs ≥ 4h. The dt² weighting we tried on
         # 5/9 over-fit to whichever single run was longest (5/8's 9h
         # overnight implied 321W parasitic; 5/9's comparable run
@@ -786,6 +805,8 @@ def fit_drain_model(
 def _clean_discharge_runs(
     sorted_rows: list[dict[str, Any]],
     capacity_wh: int,
+    *,
+    require_system_soc: bool = False,
 ) -> list[tuple[float, float, float]]:
     """Walk consecutive clean-discharge buckets (no solar, no AC charge,
     SOC available) and emit one `(avg_load_w, observed_drain_w, dt_h)`
@@ -828,10 +849,15 @@ def _clean_discharge_runs(
     current: list[dict[str, Any]] = []
     last_ts: float | None = None
     for row in sorted_rows:
+        # When require_system_soc, exclude rows missing pack data —
+        # otherwise _row_soc falls back to battery_pct, reintroducing
+        # pack-ratio bias on multi-pack rigs.
+        has_soc = (_row_has_system_soc(row) if require_system_soc
+                   else _row_soc(row) is not None)
         is_clean = (
             (row.get("solar_wh") or 0) <= SOLAR_NOISE_WH
             and (row.get("ac_input_wh") or 0) <= AC_NOISE_WH
-            and _row_soc(row) is not None
+            and has_soc
         )
         ts = row.get("ts")
         gap_too_large = (

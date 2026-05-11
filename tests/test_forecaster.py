@@ -1102,6 +1102,59 @@ def test_fit_drain_model_uses_system_soc_when_present():
     assert p_sys < 250, f"system-soc fit too high: {p_sys}"
 
 
+def test_fit_drain_model_strict_system_soc_excludes_mixed_rows():
+    """Multi-pack rig with a mix of rows that DO have system_soc and
+    rows that LACK it. The strict mode (auto-triggered when ANY row
+    has system_soc) must reject rows missing system_soc rather than
+    silently falling back to battery_pct — that fallback reintroduces
+    the pack-ratio bias on those windows and pulls the fit median up.
+
+    Advisor flagged 2026-05-11T16:44: fitted parasitic landed at
+    414 W on the user's rig — suspiciously close to the pre-eee1228
+    main-pct-biased range (316-370 W) — because some history rows
+    had no pack snapshot and _row_soc silently fell back to
+    battery_pct ×system_capacity, inflating their implied drain."""
+    base = 1_700_000_000
+    history = []
+    # 4 clean discharge runs WITH system_soc. system drops 2pp/h
+    # implying drain = 605W. Load 460W → implied parasitic ≈ 99W.
+    for run in range(4):
+        run_base = base + run * 12 * 3600
+        for h in range(6):  # 6 samples = 5h run
+            history.append({
+                "ts": run_base + h * 3600,
+                "battery_pct": 90 - 3 * h,    # main drops faster
+                "system_soc": 80.0 - 2.0 * h,  # system drops at truth rate
+                "output_wh": 460,
+                "solar_wh": 0, "ac_input_wh": 0,
+            })
+    # 4 contaminating runs WITHOUT system_soc — _row_soc fallback to
+    # battery_pct would walk main×system_capacity, implying ~3×
+    # truth drain → fake "parasitic" of 1200W+.
+    for run in range(4):
+        run_base = base + (10 + run) * 12 * 3600
+        for h in range(6):
+            history.append({
+                "ts": run_base + h * 3600,
+                "battery_pct": 90 - 6 * h,    # main-only drops 6pp/h
+                # NO system_soc field
+                "output_wh": 460,
+                "solar_wh": 0, "ac_input_wh": 0,
+            })
+    parasitic_w, _, _ = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    # Strict mode: should ignore the contaminating runs entirely and
+    # fit cleanly to ~99W from the system_soc runs. The clamp to 0
+    # for negative values also applies — quantization can push it
+    # below 0 — so allow [0, 200] as a sane band that's nowhere near
+    # the contaminated 1200W+.
+    assert parasitic_w <= 200, (
+        f"got parasitic_w={parasitic_w}; strict mode must exclude the "
+        "no-system_soc rows whose battery_pct fallback inflates drain"
+    )
+
+
 def test_diagnose_idle_windows_classifies_each_rejection():
     """Continuous timeline of 9 hourly buckets, each adjacent pair
     constructed to hit a specific rejection cause (or qualify). Verifies
