@@ -607,6 +607,32 @@ def _recent_code_changes() -> list[dict[str, Any]]:
             ),
         },
         {
+            "ts_iso": "2026-05-11T18:00:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Final fix for the persistent over-fitted parasitic_w "
+                "on multi-pack rigs. Advisor 2026-05-11T16:44 noted "
+                "the fit was still landing at 414W — suspiciously "
+                "close to the pre-eee1228 main-pct-biased range "
+                "(316-370W) — and hypothesized that one code path "
+                "was silently falling back to main-pack SOC. "
+                "Confirmed: _row_soc silently falls back to "
+                "battery_pct when the row lacks system_soc, "
+                "reintroducing the pack-ratio bias for those windows. "
+                "Mixed pool (system_soc rows + fallback rows) "
+                "produced an inflated median. fit_drain_model now "
+                "auto-detects multi-pack devices (any row has "
+                "system_soc → device is multi-pack) and requires "
+                "system_soc on EVERY fit window in strict mode. "
+                "Single-unit devices unaffected (no pack data → "
+                "strict mode doesn't trigger). The diag endpoint "
+                "mirrors the strict mode so the displayed pool "
+                "matches what the fit actually uses. Expected drift "
+                "on the user's rig: 414W → close to 0-150W band the "
+                "empirical reconciliation implies."
+            ),
+        },
+        {
             "ts_iso": "2026-05-10T17:30:00+00:00",
             "subsystem": "forecaster",
             "summary": (

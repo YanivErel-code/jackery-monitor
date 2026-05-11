@@ -102,7 +102,7 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778471000")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778565000")
 )
 
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
@@ -2514,7 +2514,15 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
     # (which it is on this device). Surface each run's dt_h plus the
     # dt²-weighted median so the user can see the headline number the
     # fit actually produces (matching what server-side surfaces).
-    run_triples = forecaster._clean_discharge_runs(rows, capacity)
+    # Mirror fit_drain_model's strict system_soc requirement: when ANY
+    # row in history has pack data, treat the device as multi-pack and
+    # exclude windows that fall back to battery_pct (main-pack only).
+    # Without this strict mode, the diag would show a different pool
+    # than the actual fit uses and obscure the source of bias.
+    require_system_soc = any(forecaster._row_has_system_soc(r) for r in rows)
+    run_triples = forecaster._clean_discharge_runs(
+        rows, capacity, require_system_soc=require_system_soc,
+    )
     runs_detail = []
     weighted_pairs: list[tuple[float, float]] = []
     for load_w, drain_w, dt_h in run_triples:
