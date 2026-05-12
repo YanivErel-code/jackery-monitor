@@ -272,6 +272,15 @@ class JackeryCloudClient:
             # but don't re-login automatically — that would steal the session
             # back from whoever just claimed it (typically the iOS app).
             self.token = None
+            # Log enough to distinguish "another client contested" (typical
+            # codes 401, 1002 with "kicked out" in msg) from "our token
+            # just expired on its own" (1001 with "expired"). Diagnostic
+            # for the 2026-05-12 every-60s-contention loop.
+            log.warning(
+                "cloud token rejected on %s: code=%r msg=%r keys=%s",
+                path, data.get("code"), data.get("msg"),
+                sorted(data.keys())[:10],
+            )
             raise SessionContestedError(
                 f"{path}: cloud rejected token ({data.get('code')}: {data.get('msg')})"
             )
