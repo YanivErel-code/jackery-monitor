@@ -719,10 +719,18 @@ async def cloud_loop() -> None:
             backoff = min(backoff * 2, 300)
             continue
         # Sleep until next poll OR a device-switch nudges us awake
+        sleep_started = time.time()
+        sleep_target = user_settings.get("cloud_poll_interval_s")
         try:
             await asyncio.wait_for(state.cloud_force_repoll.wait(),
-                                   timeout=user_settings.get("cloud_poll_interval_s"))
+                                   timeout=sleep_target)
             state.cloud_force_repoll.clear()
+            slept = time.time() - sleep_started
+            log.info(
+                "cloud_loop sleep interrupted by force_repoll after %.1fs "
+                "(target=%ds) — investigating who set it",
+                slept, sleep_target,
+            )
         except TimeoutError:
             pass
 
