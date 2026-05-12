@@ -95,6 +95,23 @@ class SessionContestedError(CloudAuthError):
     pass
 
 
+class TokenExpiredError(CloudAuthError):
+    """Raised when the cloud returns a token-TTL-expired response (code
+    10402 / msg 'Token expires').
+
+    Observed empirically 2026-05-12: Jackery's HTTP tokens have a very
+    short TTL (~5-30 seconds). Hitting this is ROUTINE, not contention —
+    no other client is involved, our token just timed out. The caller
+    should silently re-login on the next iteration without emitting
+    user-visible warnings.
+
+    Distinct from SessionContestedError so the bridge can fire a real
+    "another client signed in" alert only when actually warranted (e.g.
+    401 / 1002 with "kicked" semantics).
+    """
+    pass
+
+
 class CloudCredentialsError(CloudAuthError, ConfigError):
     """The saved Jackery cloud email/password is wrong (not just stale).
     Don't retry; surface to the user."""
@@ -246,15 +263,44 @@ class JackeryCloudClient:
         return self.token
 
     @staticmethod
-    def _is_token_expired(data: dict) -> bool:
-        # observed expired-token codes: 401, 1001, "token" in msg
+    def _classify_auth_error(data: dict) -> str | None:
+        """Return 'expired' (routine TTL refresh) or 'contested' (another
+        client kicked us) or None (not an auth error).
+
+        Empirical mapping as of 2026-05-12:
+          - code=10402, msg='Token expires' → 'expired' (Jackery rotates
+            tokens every ~5-30s; this is the normal lifecycle, not
+            contention)
+          - code=401 / 1001 / 1002 → historically treated as contested;
+            we keep this until we see one in practice that's actually
+            a TTL case
+          - msg containing 'token' + ('expir'|'invalid'|'auth') and not
+            already matched above → 'expired' (default for fuzzy matches)
+        """
         if not isinstance(data, dict):
-            return False
+            return None
         code = data.get("code")
-        if code in (401, 1001, 1002):
-            return True
         msg = (data.get("msg") or "").lower()
-        return "token" in msg and ("expir" in msg or "invalid" in msg or "auth" in msg)
+        # Jackery's TTL-rotation signal. Observed 2026-05-12 with
+        # msg='Token expires' (note the unusual present-tense phrasing).
+        if code == 10402:
+            return "expired"
+        # Legacy codes — keep as "contested" because we don't have
+        # confirmation they're TTL rather than kick-out. If a future
+        # investigation proves any of these are routine TTL, move them.
+        if code in (401, 1001, 1002):
+            return "contested"
+        if "token" in msg and ("expir" in msg or "invalid" in msg or "auth" in msg):
+            return "expired"
+        return None
+
+    @staticmethod
+    def _is_token_expired(data: dict) -> bool:
+        """Back-compat shim. Returns True for ANY auth error (expired or
+        contested) so existing callers that just want "should I re-auth"
+        keep working. New code should use `_classify_auth_error` for the
+        distinction."""
+        return JackeryCloudClient._classify_auth_error(data) is not None
 
     async def _authed_get(self, path: str, params: dict | None = None) -> dict:
         if not self.token:
@@ -267,17 +313,27 @@ class JackeryCloudClient:
         if resp.status_code != 200:
             raise CloudAuthError(f"{path} HTTP {resp.status_code}: {resp.text[:200]}")
         data = resp.json()
-        if self._is_token_expired(data):
+        kind = self._classify_auth_error(data)
+        if kind is not None:
             # Drop the cached token so the next intentional login() is fresh,
             # but don't re-login automatically — that would steal the session
             # back from whoever just claimed it (typically the iOS app).
             self.token = None
-            # Log enough to distinguish "another client contested" (typical
-            # codes 401, 1002 with "kicked out" in msg) from "our token
-            # just expired on its own" (1001 with "expired"). Diagnostic
-            # for the 2026-05-12 every-60s-contention loop.
+            if kind == "expired":
+                # Routine TTL rotation — log at debug so we don't drown the
+                # warn channel. Bridge handles this by re-logging-in on the
+                # next iteration with no user-facing cooldown.
+                log.debug(
+                    "cloud token TTL expired on %s: code=%r msg=%r",
+                    path, data.get("code"), data.get("msg"),
+                )
+                raise TokenExpiredError(
+                    f"{path}: token TTL expired ({data.get('code')}: {data.get('msg')})"
+                )
+            # kind == "contested" — a real "another client kicked us"
+            # signal. Bridge applies the existing back-off + alerting.
             log.warning(
-                "cloud token rejected on %s: code=%r msg=%r keys=%s",
+                "cloud token CONTESTED on %s: code=%r msg=%r keys=%s",
                 path, data.get("code"), data.get("msg"),
                 sorted(data.keys())[:10],
             )

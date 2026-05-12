@@ -455,6 +455,7 @@ async def cloud_loop() -> None:
         from cloud_client import (
             JackeryCloudClient,
             SessionContestedError,
+            TokenExpiredError,
             cloud_props_to_telemetry,
         )
     except Exception as e:
@@ -610,8 +611,8 @@ async def cloud_loop() -> None:
                     continue
                 try:
                     props = await c.fetch_properties(dev_id)
-                except SessionContestedError:
-                    raise  # let outer handler trigger cooldown
+                except (SessionContestedError, TokenExpiredError):
+                    raise  # let outer handler distinguish + react
                 except Exception as e:
                     log.warning("fetch_properties(%s) failed: %s", dev_sn, e)
                     continue
@@ -653,6 +654,17 @@ async def cloud_loop() -> None:
                 except Exception as e:
                     event("warn", "mqtt", f"Realtime subscribe failed: {e}")
             backoff = 10
+        except TokenExpiredError as e:
+            # Routine: Jackery's HTTP tokens have a very short TTL (~5-30s
+            # observed). Just drop the cached token, log at INFO, and
+            # loop back to the top — the next iteration re-logs in
+            # silently with no contested-counter increment, no cooldown,
+            # no user-visible alert. MQTT keeps streaming throughout so
+            # telemetry doesn't gap.
+            if state.cloud_client:
+                state.cloud_client.token = None
+            log.info("Token TTL expired (%s) — refreshing on next iteration", e)
+            continue
         except SessionContestedError as e:
             # The phone app (or another client) just logged in and bumped us.
             # Don't fight back — cool down and let them keep the session.
