@@ -432,6 +432,16 @@ class State:
         # but populated by the cloud_loop itself when it catches a 401-style
         # response from the cloud.
         self.contested_until: float = 0.0
+        # Consecutive SessionContestedError counter. Exponential-backed off
+        # so a persistent contender (e.g. the user's phone app left
+        # running) doesn't generate a one-per-minute warning forever. Reset
+        # to 0 on the first successful poll. Used by the cloud_loop to
+        # compute the next cooldown, and by the event log to fire an
+        # actionable alert once it's clear the contention isn't transient.
+        self.contested_consecutive: int = 0
+        # Set True once we've emitted the "persistent contention" error so
+        # we don't spam the alert every cycle. Cleared when a poll succeeds.
+        self.contested_alerted: bool = False
 
 state = State()
 
@@ -621,6 +631,15 @@ async def cloud_loop() -> None:
             if any_polled:
                 state.cloud_state = "connected"
                 state.cloud_error = None
+                # Reset contention tracking on the first successful poll.
+                # If we'd alerted about persistent contention, clear the
+                # latch so a future contention episode produces a fresh
+                # alert instead of being suppressed.
+                if state.contested_consecutive > 0 or state.contested_alerted:
+                    state.contested_consecutive = 0
+                    state.contested_alerted = False
+                    event("info", "session",
+                          "Cloud session reclaimed; contested counter reset")
             # Subscribe to MQTT pushes once per cloud_loop lifetime, after
             # the first successful HTTP poll (so user_id is set + device
             # selected). paho-mqtt handles reconnect re-subscription via
@@ -637,15 +656,46 @@ async def cloud_loop() -> None:
         except SessionContestedError as e:
             # The phone app (or another client) just logged in and bumped us.
             # Don't fight back — cool down and let them keep the session.
-            cooldown = user_settings.get("session_contested_cooldown_s")
+            # Exponential backoff on consecutive episodes: a persistent
+            # contender (e.g. phone app left running indefinitely) used to
+            # generate a one-per-minute warning forever; now the cooldown
+            # doubles each cycle up to a 1h cap so the log doesn't drown.
+            state.contested_consecutive += 1
+            base_cooldown = user_settings.get("session_contested_cooldown_s")
+            # 2^0=1× for the first, 2× for the second, 4× for the third...
+            # capped at 1h so a stuck contender doesn't push the next retry
+            # past usefulness.
+            mult = min(2 ** (state.contested_consecutive - 1), 60)
+            cooldown = min(base_cooldown * mult, 3600)
             state.contested_until = time.time() + cooldown
             state.cloud_state = "contested"
             state.cloud_error = str(e)
             if state.cloud_client:
                 state.cloud_client.token = None
             event("warn", "session",
-                  f"Session contested by another client; cooling down {cooldown}s",
-                  cooldown_s=cooldown)
+                  f"Session contested by another client; cooling down {cooldown}s "
+                  f"(consecutive={state.contested_consecutive})",
+                  cooldown_s=cooldown,
+                  consecutive=state.contested_consecutive)
+            # After 3 consecutive contentions WITHOUT a successful poll
+            # between them, the contender clearly isn't going away on its
+            # own — emit an error-level event that downstream alerting
+            # will surface to the user with an actionable message. One-
+            # shot via the contested_alerted latch so the alert doesn't
+            # spam every cycle thereafter.
+            if state.contested_consecutive >= 3 and not state.contested_alerted:
+                state.contested_alerted = True
+                event(
+                    "error", "session",
+                    "Persistent cloud session contention. Another client is "
+                    "actively contesting this account's Jackery session — "
+                    "most likely the Jackery phone app is open (foreground "
+                    "or background-refresh), or a second instance of this "
+                    "bridge is running. Telemetry will stay stale until "
+                    "you sign the contender out. The bridge will keep "
+                    "retrying with backoff (up to 1h between attempts).",
+                    consecutive=state.contested_consecutive,
+                )
             continue
         except Exception as e:
             state.cloud_state = "error"
@@ -789,6 +839,13 @@ def merged_poll() -> dict:
             "pause_remaining_s": round(pause_remaining, 1) if pause_remaining else None,
             "contested_until": state.contested_until or None,
             "contested_remaining_s": round(contested_remaining, 1) if contested_remaining else None,
+            # Consecutive contention counter — surfaced so the server's
+            # alert path can distinguish a one-off contention (e.g. user
+            # briefly opened the phone app) from a persistent contender
+            # that needs the user to take action. 0 means "not currently
+            # contended"; > 0 means "this many consecutive failures since
+            # the last successful poll".
+            "contested_consecutive": state.contested_consecutive,
         },
     }
 

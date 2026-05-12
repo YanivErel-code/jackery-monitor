@@ -302,44 +302,62 @@ async def poll_loop() -> None:
                 state.last_status = status_dict
                 state.last_update_ts = ts
 
-                # Cloud-stall alerting: fire a banner-style alert when the
-                # bridge's cloud telemetry has been stale > CLOUD_STALL_
-                # ALERT_S AND there's no intentional pause/cooldown active.
-                # Edge-triggered via state.cloud_stalled_alerted so it only
-                # fires once per stall episode; resets when telemetry
-                # returns. Watchdog will auto-recover at the 10min mark,
-                # but the user wants to know BEFORE that, not after.
-                if cloud_meta:
-                    cloud_age = (cloud_meta.get("age_s")
-                                  if isinstance(cloud_meta, dict) else None)
-                    cloud_state = (cloud_meta.get("state")
-                                    if isinstance(cloud_meta, dict) else None)
-                    paused = cloud_state in ("paused", "contested")
+                # Cloud-stall alerting: two distinct conditions, both
+                # surfaced as one-shot banner alerts so the user notices.
+                #
+                # (1) Persistent session contention: another client (phone
+                #     app, second bridge instance) is bouncing our token.
+                #     contested_consecutive >= 3 means we've cooled down
+                #     and retried three times in a row without success —
+                #     not transient. User needs to sign the contender out.
+                # (2) Generic stall: telemetry stale > CLOUD_STALL_ALERT_S
+                #     for any other reason (hung HTTP, network loss).
+                #     Watchdog will auto-restart at the 10min mark but the
+                #     user wants to know before that.
+                #
+                # Edge-triggered via state.cloud_stalled_alerted so each
+                # episode produces exactly one alert; resets on recovery.
+                if cloud_meta and isinstance(cloud_meta, dict):
+                    cloud_age = cloud_meta.get("age_s")
+                    cloud_state = cloud_meta.get("state")
+                    contested_count = (cloud_meta.get("contested_consecutive")
+                                        or 0)
+                    paused = cloud_state == "paused"
+                    persistent_contention = contested_count >= 3
                     is_stale = (cloud_age is not None
                                 and cloud_age >= CLOUD_STALL_ALERT_S
-                                and not paused)
-                    if is_stale and not state.cloud_stalled_alerted:
+                                and not paused
+                                and cloud_state != "contested")
+                    should_alert = persistent_contention or is_stale
+                    if should_alert and not state.cloud_stalled_alerted:
                         state.cloud_stalled_alerted = True
+                        if persistent_contention:
+                            msg = (
+                                f"Cloud session contested {contested_count}× "
+                                "in a row. Another client is taking the "
+                                "session — likely the Jackery phone app. "
+                                "Sign out of the app to restore live "
+                                "telemetry."
+                            )
+                            log.error("persistent contention alert: "
+                                       "consecutive=%d", contested_count)
+                        else:
+                            msg = (
+                                f"Cloud telemetry stalled "
+                                f"({int((cloud_age or 0) // 60)}m old, "
+                                f"state={cloud_state}). Bridge watchdog "
+                                "will auto-restart at 10m; you may also "
+                                "hit /api/resume_polling."
+                            )
+                            log.warning(
+                                "cloud-stall alert: age=%.0fs state=%s",
+                                cloud_age or 0, cloud_state,
+                            )
                         await broadcast({
                             "type": "alert",
-                            "data": {
-                                "level": "warning",
-                                "message": (
-                                    f"Cloud telemetry stalled "
-                                    f"({int(cloud_age // 60)}m old, "
-                                    f"state={cloud_state}). Bridge "
-                                    "watchdog will auto-restart at 10m; "
-                                    "you may also hit /api/resume_polling."
-                                ),
-                            },
+                            "data": {"level": "warning", "message": msg},
                         })
-                        log.warning(
-                            "cloud-stall alert: age=%.0fs state=%s",
-                            cloud_age, cloud_state,
-                        )
-                    elif not is_stale and state.cloud_stalled_alerted:
-                        # Recovery — clear the latch so the next stall
-                        # produces a fresh alert.
+                    elif not should_alert and state.cloud_stalled_alerted:
                         state.cloud_stalled_alerted = False
                         log.info(
                             "cloud-stall recovered: age=%.0fs state=%s",
