@@ -665,6 +665,88 @@ async def cloud_loop() -> None:
             pass
 
 
+# Watchdog thresholds. The cloud_loop is supposed to update `cloud_ts` on
+# every successful poll (typically every 30-60s). If we go more than
+# WATCHDOG_STALE_S without a successful update — AND the user hasn't
+# explicitly paused or hit a contested cooldown — something has stalled
+# (almost always a hung HTTP await inside c.login() or c.fetch_*). The
+# watchdog cancels and recreates the cloud_loop task so a fresh attempt
+# starts. Restart is throttled to WATCHDOG_MIN_RESTART_INTERVAL_S to
+# avoid a thrash loop if the upstream is genuinely broken.
+WATCHDOG_CHECK_INTERVAL_S = 120
+WATCHDOG_STALE_S = 600                # 10 min stale → restart
+WATCHDOG_MIN_RESTART_INTERVAL_S = 300  # don't restart more than 1x/5min
+
+
+async def cloud_watchdog_loop() -> None:
+    """Monitor cloud_loop liveness; cancel + recreate the task when the
+    upstream HTTP layer hangs.
+
+    Background: 2026-05-12 the cloud_loop was observed stuck in
+    "logging-in" for 5 hours with no error logged and no telemetry
+    updates. The task was alive but blocked inside `await c.login()`
+    despite httpx's 15s timeout — likely a half-open TCP / TLS stall
+    that httpx didn't surface as a TimeoutError. force_repoll alone
+    can't unblock a hung HTTP await; only cancelling the task can.
+
+    Skips when the user has explicitly paused or a contested cooldown
+    is active, since those are intentional stalls."""
+    last_restart_at: float = 0.0
+    while True:
+        try:
+            await asyncio.sleep(WATCHDOG_CHECK_INTERVAL_S)
+            now = time.time()
+            # Skip during intentional pauses.
+            if (state.pause_until or 0) > now:
+                continue
+            if (state.contested_until or 0) > now:
+                continue
+            # No telemetry yet AND no credentials → nothing to watchdog.
+            if not state.cloud_creds:
+                continue
+            cloud_ts = state.cloud_ts or 0
+            age = now - cloud_ts if cloud_ts else float("inf")
+            if age < WATCHDOG_STALE_S:
+                continue
+            # Throttle restarts to avoid a thrash loop when upstream is
+            # genuinely down.
+            since_last_restart = now - last_restart_at
+            if since_last_restart < WATCHDOG_MIN_RESTART_INTERVAL_S:
+                continue
+            event(
+                "warn", "watchdog",
+                f"Cloud telemetry stale {age:.0f}s in state={state.cloud_state}; "
+                "restarting cloud_loop",
+                age_s=round(age, 1), state=state.cloud_state,
+            )
+            # Cancel + recreate. Drop the client too so the next login()
+            # starts with a fresh httpx connection pool — important if a
+            # half-open TCP socket is what hung us.
+            if state.cloud_task and not state.cloud_task.done():
+                state.cloud_task.cancel()
+                try:
+                    await asyncio.wait_for(state.cloud_task, timeout=5.0)
+                except (Exception, TimeoutError):
+                    pass
+            if state.cloud_client:
+                try:
+                    await asyncio.wait_for(state.cloud_client.aclose(),
+                                            timeout=5.0)
+                except Exception:
+                    pass
+                state.cloud_client = None
+            state.cloud_state = "logging-in"
+            state.cloud_task = asyncio.create_task(
+                cloud_loop(), name="cloud_loop"
+            )
+            last_restart_at = now
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Watchdog itself must never die — log and continue.
+            log.exception("watchdog iteration error: %s", e)
+
+
 # ---- merged poll output ----
 def merged_poll() -> dict:
     """Return the current cloud telemetry snapshot."""
@@ -1042,6 +1124,10 @@ async def main() -> None:
     if state.cloud_creds:
         state.cloud_task = asyncio.create_task(cloud_loop(), name="cloud_loop")
         bg.append(state.cloud_task)
+    # Watchdog runs regardless of whether creds are set yet — if they're
+    # added later via the set_credentials RPC, the watchdog will kick in
+    # without needing a server restart.
+    bg.append(asyncio.create_task(cloud_watchdog_loop(), name="cloud_watchdog"))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
