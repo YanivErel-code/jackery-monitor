@@ -877,6 +877,7 @@ async def handle(method: str, params: dict) -> dict:
 
     if method == "connect":
         # Nudge the cloud poller awake.
+        log.info("force_repoll set by: connect RPC")
         state.cloud_force_repoll.set()
         return {"ok": True}
 
@@ -975,6 +976,7 @@ async def handle(method: str, params: dict) -> dict:
             state.cloud_telemetry = None
             state.cloud_props_raw = {}
             state.cloud_ts = None
+            log.info("force_repoll set by: select_device RPC")
             state.cloud_force_repoll.set()
         return {"ok": True, "device_id": device_id, "name": match["name"]}
 
@@ -1032,6 +1034,7 @@ async def handle(method: str, params: dict) -> dict:
         if state.cloud_state in ("paused", "contested"):
             state.cloud_state = "logging-in"
         # Nudge the loop awake so we re-poll right away.
+        log.info("force_repoll set by: resume_polling RPC")
         state.cloud_force_repoll.set()
         event("info", "session", "Polling resumed by user", was_paused=was_paused)
         return {"ok": True, "was_paused": was_paused}
@@ -1138,6 +1141,7 @@ async def handle(method: str, params: dict) -> dict:
               action_id=ack.get("action_id"))
         # Force a quick re-poll so the UI reflects the new state without
         # waiting for the next 15s poll cycle.
+        log.info("force_repoll set by: set_output RPC")
         state.cloud_force_repoll.set()
         return {"ok": True, **ack}
 
