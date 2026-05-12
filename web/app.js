@@ -4886,7 +4886,7 @@ async function renderDailyAccuracy() {
     if (tbody) tbody.innerHTML = '';
     if (table) table.hidden = true;
     if (empty) empty.hidden = false;
-    _renderAccuracySummary([], []);
+    _renderAccuracySummary([], [], [], []);
     return;
   }
   if (empty) empty.hidden = true;
