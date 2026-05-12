@@ -713,8 +713,12 @@ async def cloud_watchdog_loop() -> None:
             since_last_restart = now - last_restart_at
             if since_last_restart < WATCHDOG_MIN_RESTART_INTERVAL_S:
                 continue
+            # Level "error" (not just warn) so the Logs tab surfaces this
+            # prominently and downstream alerting hooks fire. Telemetry
+            # being stale for 10+ minutes IS a real problem the user
+            # should know about, even if the auto-restart recovers it.
             event(
-                "warn", "watchdog",
+                "error", "watchdog",
                 f"Cloud telemetry stale {age:.0f}s in state={state.cloud_state}; "
                 "restarting cloud_loop",
                 age_s=round(age, 1), state=state.cloud_state,

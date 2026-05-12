@@ -105,6 +105,14 @@ FORECASTER_BREAKING_CHANGE_TS = int(
     os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778565000")
 )
 
+# When cloud telemetry hasn't been refreshed by the bridge in this many
+# seconds we surface a WebSocket alert + sticky banner so the user
+# notices BEFORE the watchdog auto-recovers. 8 min is a hair under the
+# bridge watchdog's 10min restart threshold — gives the user a heads-up
+# while recovery is still pending, not after the fact. Skips when the
+# user has paused polling or the session is in contested cooldown.
+CLOUD_STALL_ALERT_S = 8 * 60
+
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
 # active-device (which the worker manages), so two browsers can look at
 # different Jackerys at the same time without stomping each other. Plain
@@ -133,6 +141,11 @@ class AppState:
         self.connection_status = "disconnected"   # disconnected | scanning | connecting | connected | error
         self.connection_error: str | None = None
         self.low_battery_alerted = False
+        # Edge-triggered flag for the cloud-stalled alert. Fires the first
+        # time we detect cloud telemetry has been stale beyond
+        # CLOUD_STALL_ALERT_S; resets when fresh telemetry returns. Without
+        # this we'd spam an alert every poll cycle once the bridge stalls.
+        self.cloud_stalled_alerted = False
         self.poll_task: asyncio.Task | None = None
         # WebSocket -> {view_id, auth_token} captured at connect time.
         # `view_id` may be None for clients that haven't picked a device
@@ -288,6 +301,50 @@ async def poll_loop() -> None:
                 state.last_cloud_meta = cloud_meta
                 state.last_status = status_dict
                 state.last_update_ts = ts
+
+                # Cloud-stall alerting: fire a banner-style alert when the
+                # bridge's cloud telemetry has been stale > CLOUD_STALL_
+                # ALERT_S AND there's no intentional pause/cooldown active.
+                # Edge-triggered via state.cloud_stalled_alerted so it only
+                # fires once per stall episode; resets when telemetry
+                # returns. Watchdog will auto-recover at the 10min mark,
+                # but the user wants to know BEFORE that, not after.
+                if cloud_meta:
+                    cloud_age = (cloud_meta.get("age_s")
+                                  if isinstance(cloud_meta, dict) else None)
+                    cloud_state = (cloud_meta.get("state")
+                                    if isinstance(cloud_meta, dict) else None)
+                    paused = cloud_state in ("paused", "contested")
+                    is_stale = (cloud_age is not None
+                                and cloud_age >= CLOUD_STALL_ALERT_S
+                                and not paused)
+                    if is_stale and not state.cloud_stalled_alerted:
+                        state.cloud_stalled_alerted = True
+                        await broadcast({
+                            "type": "alert",
+                            "data": {
+                                "level": "warning",
+                                "message": (
+                                    f"Cloud telemetry stalled "
+                                    f"({int(cloud_age // 60)}m old, "
+                                    f"state={cloud_state}). Bridge "
+                                    "watchdog will auto-restart at 10m; "
+                                    "you may also hit /api/resume_polling."
+                                ),
+                            },
+                        })
+                        log.warning(
+                            "cloud-stall alert: age=%.0fs state=%s",
+                            cloud_age, cloud_state,
+                        )
+                    elif not is_stale and state.cloud_stalled_alerted:
+                        # Recovery — clear the latch so the next stall
+                        # produces a fresh alert.
+                        state.cloud_stalled_alerted = False
+                        log.info(
+                            "cloud-stall recovered: age=%.0fs state=%s",
+                            cloud_age or 0, cloud_state,
+                        )
 
                 # Log unknown model_codes ONCE per process so server logs
                 # become a contribution channel — paste the warning into
