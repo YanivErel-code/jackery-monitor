@@ -78,16 +78,23 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
     fitted_parasitic_w: float | None = None
     fitted_overhead_pct: float | None = None
     fitted_drain_n: int = 0
+    main_wh = forecaster.battery_capacity_wh(model_code)
+    pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
     try:
-        ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+        # Pass capacity hints so db.history populates system_soc on
+        # multi-pack rigs. Without them fit_drain_model silently falls
+        # back to integer battery_pct (1pp quantization) and produces
+        # a ~400W inflated parasitic — bisected 2026-05-12 to this
+        # missing hint; mirrors the canonical call in build_forecast.
+        ehist = state.energy.history(
+            device_sn, hours=14 * 24, bucket_s=3600,
+            main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+        )
         fitted_parasitic_w, fitted_overhead_pct, fitted_drain_n = (
             forecaster.fit_drain_model(ehist, capacity)
         )
     except Exception as e:
         log.debug("advisor: drain model fit failed: %s", e)
-
-    main_wh = forecaster.battery_capacity_wh(model_code)
-    pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
 
     # Compute both legacy 14d-all and a post-fix slice gated on the
     # forecaster's last breaking-change cutoff, mirroring
