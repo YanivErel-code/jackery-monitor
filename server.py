@@ -1238,13 +1238,25 @@ def _resolved_capacity_wh(device_sn: str | None) -> int:
 def _cached_history(device_sn: str) -> list[dict]:
     """One-shot 14d history pull, used by the resolver's live-fit
     branch. Memoized via _param_fit_cache so multiple param lookups
-    in the same request don't re-query the DB."""
+    in the same request don't re-query the DB.
+
+    Passes capacity hints so `db.history()` populates `system_soc` on
+    multi-pack rigs. Without them, the forecaster fits silently fall
+    back to integer `battery_pct` (main pack only) with 1pp
+    quantization noise, which on this device inflates the implied
+    parasitic to ~400W via quantization rounding — a 2026-05-12
+    regression bisected to this missing hint. Mirrors the canonical
+    `state.energy.history` call in `build_forecast`."""
     key = (device_sn, "_history")
     now = time.time()
     cached = _param_fit_cache.get(key)
     if cached and now - cached[0] < _PARAM_FIT_CACHE_TTL_S:
         return cached[1]  # type: ignore[return-value]
-    h = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+    main_wh, pack_wh = _capacity_hints(device_sn)
+    h = state.energy.history(
+        device_sn, hours=14 * 24, bucket_s=3600,
+        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+    )
     _param_fit_cache[key] = (now, h)
     return h
 
@@ -2220,7 +2232,11 @@ async def api_forecast(device_sn: str | None = None, _diag: int = 0):
     result = await _build_and_record_forecast(device_sn)
     if _diag and device_sn:
         try:
-            ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+            main_wh, pack_wh = _capacity_hints(device_sn)
+            ehist = state.energy.history(
+                device_sn, hours=14 * 24, bucket_s=3600,
+                main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+            )
             result["idle_window_diag"] = forecaster.diagnose_idle_windows(ehist)
         except Exception as e:
             log.debug("forecast diag failed: %s", e)
@@ -2862,7 +2878,11 @@ def api_smart_charge_status(device_sn: str | None = None):
     if device_sn:
         history = state.energy.list_smart_charge_decisions(device_sn, limit=50)
         try:
-            ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
+            main_wh, pack_wh = _capacity_hints(device_sn)
+            ehist = state.energy.history(
+                device_sn, hours=14 * 24, bucket_s=3600,
+                main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+            )
             tz_off = device_location.get_tz_offset() or 0
             wx = state.energy.list_weather_observations(
                 since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
@@ -2934,8 +2954,10 @@ def api_smart_charge_backtest(
 
     # History needs ~14d lookback for solar-coefficient + idle-overhead
     # fits at the OLDEST replay point, plus the days we're replaying.
+    main_wh, pack_wh = _capacity_hints(device_sn)
     history = state.energy.history(
         device_sn, hours=(days + 14) * 24, bucket_s=3600,
+        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
     )
     weather_obs = state.energy.list_weather_observations(
         since_ts=since_ts - 14 * 86400, limit=24 * (days + 14) + 72,
