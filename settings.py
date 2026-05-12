@@ -41,12 +41,12 @@ SCHEMA: dict[str, dict[str, Any]] = {
     },
     "cloud_poll_interval_s": {
         "env": "CLOUD_POLL_INTERVAL_S",
-        "default": 15,
+        "default": 60,
         "type": "int",
         "min": 5,
         "max": 600,
         "label": "Cloud poll interval (s)",
-        "hint": "How often the bridge polls the Jackery cloud. Lower = fresher data, but more API calls.",
+        "hint": "How often the bridge polls the Jackery cloud. Lower = fresher data on fields not covered by MQTT (battery %, port states, AC/car input split), but more API calls + more re-logins (Jackery's HTTP tokens TTL out after ~5-10s so every poll triggers a re-auth). MQTT pushes update ip/op/temp every 2-3s independent of this, so the live power flow stays fresh regardless.",
     },
     "session_contested_cooldown_s": {
         "env": "SESSION_CONTESTED_COOLDOWN_S",

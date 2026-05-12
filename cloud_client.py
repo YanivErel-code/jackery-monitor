@@ -15,10 +15,31 @@ Auth flow:
   2. GET  /v1/device/list                                   -> list of devices
   3. GET  /v1/device/property?deviceId=<id>                 -> properties dict
 
-Token expires periodically (~24h); we re-login transparently on 'token expired' codes.
+Token lifetime — empirical findings 2026-05-12:
+  - HTTP tokens have a SHORT TTL: roughly 5-10s OR a small request count
+    (3-4 successful calls), whichever comes first. After expiry the cloud
+    returns 200 OK with body {code:10402, msg:"Token expires"}.
+  - There is NO refresh endpoint. Probed all common variants
+    (/v1/auth/refresh, /auth/refreshToken, /auth/keepalive, /auth/renew,
+    /token/refresh, /user/refresh, etc.) — they either 404 or return the
+    same 10402. The bearer `token` header is accepted only on data
+    endpoints; /v1/auth/* paths require the AES+RSA-encrypted login flow.
+  - The MQTT password we receive at login is NOT a stand-in HTTP token;
+    using it as the bearer also returns 10402.
+  - Workflow: log in → make a small burst of HTTP calls (bind/list +
+    fetch_properties per device) → token TTL expires → log in again.
+    MQTT pushes flow independently throughout (separate auth/connection)
+    so live `ip`/`op` deltas keep arriving in the gap between HTTP polls.
 
 The properties dict shape matches BLE (rb, bt, ip, op, acip, acov, acohz, oac, odc, odcu, odcc, ec, ot, it, ...),
 so we reuse the same _portable_status_to_dict adapter from device_client.
+
+MQTT vs HTTP coverage — only HTTP `/v1/device/property` returns the full
+~34-field property dict. MQTT pushes only 5 dynamic fields (ip, op,
+acpsp, acov1, it). Critical fields like `rb` (battery %), `acip`/`cip`
+(AC + car input, needed to compute solar = ip-acip-cip), and port
+on/off states (`oac`, `odc*`) come ONLY via HTTP. So HTTP polling can't
+be eliminated even with healthy MQTT.
 """
 
 from __future__ import annotations
