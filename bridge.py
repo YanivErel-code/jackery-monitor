@@ -442,6 +442,12 @@ class State:
         # Set True once we've emitted the "persistent contention" error so
         # we don't spam the alert every cycle. Cleared when a poll succeeds.
         self.contested_alerted: bool = False
+        # Consecutive TokenExpiredError counter. Used by the TTL-refresh
+        # backoff: 2s → 4s → 8s → 16s → 32s. Reset to 0 on first
+        # successful poll. Without this, Jackery's auth rate-limiter
+        # invalidates tokens within ~40ms after a fast re-login storm
+        # and the bridge gets stuck logging in 25+ times/min.
+        self.token_expired_consecutive: int = 0
 
 state = State()
 
@@ -641,6 +647,9 @@ async def cloud_loop() -> None:
                     state.contested_alerted = False
                     event("info", "session",
                           "Cloud session reclaimed; contested counter reset")
+                # Reset TTL backoff: a successful poll means we're past
+                # any rate-limit window.
+                state.token_expired_consecutive = 0
             # Subscribe to MQTT pushes once per cloud_loop lifetime, after
             # the first successful HTTP poll (so user_id is set + device
             # selected). paho-mqtt handles reconnect re-subscription via
@@ -656,14 +665,26 @@ async def cloud_loop() -> None:
             backoff = 10
         except TokenExpiredError as e:
             # Routine: Jackery's HTTP tokens have a very short TTL (~5-30s
-            # observed). Just drop the cached token, log at INFO, and
-            # loop back to the top — the next iteration re-logs in
-            # silently with no contested-counter increment, no cooldown,
-            # no user-visible alert. MQTT keeps streaming throughout so
-            # telemetry doesn't gap.
+            # observed). Drop the cached token; the next iteration will
+            # re-login silently. BUT we sleep briefly before the retry —
+            # if the cloud is rate-limiting our auth endpoint (observed
+            # 2026-05-12: too-fast re-logins after a TTL expiry caused
+            # the next token to be invalidated within ~40ms, creating
+            # a login storm of 25+ logins/min), the delay lets the rate
+            # limiter relax and we get back to a stable 1-poll-per-60s
+            # rhythm. Track consecutive expiries so a sustained pattern
+            # (broken cloud, bad creds) backs off exponentially instead
+            # of hammering.
             if state.cloud_client:
                 state.cloud_client.token = None
-            log.info("Token TTL expired (%s) — refreshing on next iteration", e)
+            state.token_expired_consecutive += 1
+            # 2s, 4s, 8s, 16s, 32s (cap). Resets on first successful poll.
+            backoff_s = min(2 * (2 ** (state.token_expired_consecutive - 1)), 32)
+            log.info(
+                "Token TTL expired (%s) — refreshing in %ds (consecutive=%d)",
+                e, backoff_s, state.token_expired_consecutive,
+            )
+            await asyncio.sleep(backoff_s)
             continue
         except SessionContestedError as e:
             # The phone app (or another client) just logged in and bumped us.
