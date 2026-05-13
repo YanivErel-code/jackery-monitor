@@ -15,21 +15,28 @@ Auth flow:
   2. GET  /v1/device/list                                   -> list of devices
   3. GET  /v1/device/property?deviceId=<id>                 -> properties dict
 
-Token lifetime — empirical findings 2026-05-12:
-  - HTTP tokens have a SHORT TTL: roughly 5-10s OR a small request count
-    (3-4 successful calls), whichever comes first. After expiry the cloud
-    returns 200 OK with body {code:10402, msg:"Token expires"}.
-  - There is NO refresh endpoint. Probed all common variants
-    (/v1/auth/refresh, /auth/refreshToken, /auth/keepalive, /auth/renew,
-    /token/refresh, /user/refresh, etc.) — they either 404 or return the
-    same 10402. The bearer `token` header is accepted only on data
-    endpoints; /v1/auth/* paths require the AES+RSA-encrypted login flow.
-  - The MQTT password we receive at login is NOT a stand-in HTTP token;
-    using it as the bearer also returns 10402.
-  - Workflow: log in → make a small burst of HTTP calls (bind/list +
-    fetch_properties per device) → token TTL expires → log in again.
-    MQTT pushes flow independently throughout (separate auth/connection)
-    so live `ip`/`op` deltas keep arriving in the gap between HTTP polls.
+Token lifetime — empirical findings 2026-05-13:
+  - HTTP tokens are JWTs with a 30-day `exp` claim (decoded from the
+    header.payload). Under normal conditions the token persists for that
+    full duration — a single login can serve thousands of polls.
+  - The cloud returns 200 OK with body {code:10402, msg:"Token expires"}
+    ONLY when our session has been kicked by another login on the same
+    account. It's not a TTL signal — it's a contention signal. (We
+    initially misread it as TTL because a leaked credential was
+    constantly invalidating us every ~5s; with clean creds the kick
+    never happens unless the user signs into the phone app or another
+    bridge instance runs.)
+  - Codes 401 / 1001 / 1002 are the legacy contention signals; same
+    semantics as 10402. All four are treated identically: cool down,
+    let the contender keep the session, retry after the configured
+    `session_contested_cooldown_s` (default 60s).
+  - There is NO refresh endpoint. Probed all common variants — they
+    either 404 or return 10402. /v1/auth/* requires the AES+RSA-
+    encrypted login flow. The MQTT password isn't a stand-in HTTP
+    token either.
+  - MQTT pushes flow independently throughout (separate auth/connection)
+    so live `ip`/`op` deltas keep arriving even while HTTP is paused
+    during a contested-session cooldown.
 
 The properties dict shape matches BLE (rb, bt, ip, op, acip, acov, acohz, oac, odc, odcu, odcc, ec, ot, it, ...),
 so we reuse the same _portable_status_to_dict adapter from device_client.
@@ -112,23 +119,6 @@ class SessionContestedError(CloudAuthError):
     Note: not a TransientError — re-login fixes it but at the cost of
     invalidating the user's phone-app session, so callers must opt in
     rather than retrying blindly.
-    """
-    pass
-
-
-class TokenExpiredError(CloudAuthError):
-    """Raised when the cloud returns a token-TTL-expired response (code
-    10402 / msg 'Token expires').
-
-    Observed empirically 2026-05-12: Jackery's HTTP tokens have a very
-    short TTL (~5-30 seconds). Hitting this is ROUTINE, not contention —
-    no other client is involved, our token just timed out. The caller
-    should silently re-login on the next iteration without emitting
-    user-visible warnings.
-
-    Distinct from SessionContestedError so the bridge can fire a real
-    "another client signed in" alert only when actually warranted (e.g.
-    401 / 1002 with "kicked" semantics).
     """
     pass
 
@@ -284,44 +274,30 @@ class JackeryCloudClient:
         return self.token
 
     @staticmethod
-    def _classify_auth_error(data: dict) -> str | None:
-        """Return 'expired' (routine TTL refresh) or 'contested' (another
-        client kicked us) or None (not an auth error).
+    def _is_auth_error(data: dict) -> bool:
+        """True iff the response is the Jackery server telling us our
+        session has been invalidated (because another client signed in).
 
-        Empirical mapping as of 2026-05-12:
-          - code=10402, msg='Token expires' → 'expired' (Jackery rotates
-            tokens every ~5-30s; this is the normal lifecycle, not
-            contention)
-          - code=401 / 1001 / 1002 → historically treated as contested;
-            we keep this until we see one in practice that's actually
-            a TTL case
-          - msg containing 'token' + ('expir'|'invalid'|'auth') and not
-            already matched above → 'expired' (default for fuzzy matches)
-        """
+        Empirical mapping as of 2026-05-13:
+          - code=10402, msg='Token expires' — modern signal
+          - code=401 / 1001 / 1002 — legacy signals (kept; semantics
+            identical in practice)
+          - msg containing 'token' + ('expir'|'invalid'|'auth') —
+            fuzzy fallback for protocol drift
+        All map to the same caller action: cool down, let the contender
+        keep the session, retry after `session_contested_cooldown_s`."""
         if not isinstance(data, dict):
-            return None
+            return False
         code = data.get("code")
         msg = (data.get("msg") or "").lower()
-        # Jackery's TTL-rotation signal. Observed 2026-05-12 with
-        # msg='Token expires' (note the unusual present-tense phrasing).
-        if code == 10402:
-            return "expired"
-        # Legacy codes — keep as "contested" because we don't have
-        # confirmation they're TTL rather than kick-out. If a future
-        # investigation proves any of these are routine TTL, move them.
-        if code in (401, 1001, 1002):
-            return "contested"
+        if code in (10402, 401, 1001, 1002):
+            return True
         if "token" in msg and ("expir" in msg or "invalid" in msg or "auth" in msg):
-            return "expired"
-        return None
+            return True
+        return False
 
-    @staticmethod
-    def _is_token_expired(data: dict) -> bool:
-        """Back-compat shim. Returns True for ANY auth error (expired or
-        contested) so existing callers that just want "should I re-auth"
-        keep working. New code should use `_classify_auth_error` for the
-        distinction."""
-        return JackeryCloudClient._classify_auth_error(data) is not None
+    # Back-compat alias for callers that imported the old name.
+    _is_token_expired = _is_auth_error
 
     async def _authed_get(self, path: str, params: dict | None = None) -> dict:
         if not self.token:
@@ -334,27 +310,13 @@ class JackeryCloudClient:
         if resp.status_code != 200:
             raise CloudAuthError(f"{path} HTTP {resp.status_code}: {resp.text[:200]}")
         data = resp.json()
-        kind = self._classify_auth_error(data)
-        if kind is not None:
+        if self._is_auth_error(data):
             # Drop the cached token so the next intentional login() is fresh,
             # but don't re-login automatically — that would steal the session
             # back from whoever just claimed it (typically the iOS app).
             self.token = None
-            if kind == "expired":
-                # Routine TTL rotation — log at debug so we don't drown the
-                # warn channel. Bridge handles this by re-logging-in on the
-                # next iteration with no user-facing cooldown.
-                log.debug(
-                    "cloud token TTL expired on %s: code=%r msg=%r",
-                    path, data.get("code"), data.get("msg"),
-                )
-                raise TokenExpiredError(
-                    f"{path}: token TTL expired ({data.get('code')}: {data.get('msg')})"
-                )
-            # kind == "contested" — a real "another client kicked us"
-            # signal. Bridge applies the existing back-off + alerting.
             log.warning(
-                "cloud token CONTESTED on %s: code=%r msg=%r keys=%s",
+                "cloud session contested on %s: code=%r msg=%r keys=%s",
                 path, data.get("code"), data.get("msg"),
                 sorted(data.keys())[:10],
             )

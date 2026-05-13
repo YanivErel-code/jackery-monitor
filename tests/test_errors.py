@@ -12,7 +12,6 @@ from cloud_client import (
     CloudCredentialsError,
     JackeryCloudClient,
     SessionContestedError,
-    TokenExpiredError,
 )
 from device_client import DeviceClientError
 from errors import ConfigError, IntegrationError, JackeryError, TransientError
@@ -76,56 +75,47 @@ def test_cloud_credentials_is_config_error():
     assert issubclass(CloudCredentialsError, CloudAuthError)
 
 
-def test_token_expired_is_distinct_from_contested():
-    """Both are auth errors, but the bridge handles them differently:
-    contested → 60s cooldown + alert; expired → silent re-login. They
-    must inherit CloudAuthError for back-compat catchers, but neither
-    is a subclass of the other."""
-    with pytest.raises(CloudAuthError):
-        raise TokenExpiredError("expired")
-    assert not issubclass(TokenExpiredError, SessionContestedError)
-    assert not issubclass(SessionContestedError, TokenExpiredError)
+def test_auth_error_code_10402_is_contested():
+    """Empirical 2026-05-13: Jackery returns code=10402 with
+    msg='Token expires' when another client has signed in on the same
+    account. The 'TTL' framing earlier in the project's history was
+    wrong — a leaked credential was constantly invalidating us.
+    All auth-error codes route to the same contested-cooldown path."""
+    assert JackeryCloudClient._is_auth_error(
+        {"code": 10402, "msg": "Token expires", "data": {}}
+    ) is True
 
 
-def test_classify_auth_error_code_10402_is_expired():
-    """Empirical 2026-05-12: Jackery returns code=10402 with
-    msg='Token expires' on every poll after the token's ~5s TTL runs
-    out. Must be classified 'expired' (routine), not 'contested'."""
-    cls = JackeryCloudClient._classify_auth_error
-    assert cls({"code": 10402, "msg": "Token expires", "data": {}}) == "expired"
+def test_auth_error_legacy_codes_are_contested():
+    is_err = JackeryCloudClient._is_auth_error
+    assert is_err({"code": 401, "msg": "Unauthorized"}) is True
+    assert is_err({"code": 1001, "msg": ""}) is True
+    assert is_err({"code": 1002, "msg": ""}) is True
 
 
-def test_classify_auth_error_legacy_codes_are_contested():
-    cls = JackeryCloudClient._classify_auth_error
-    assert cls({"code": 401, "msg": "Unauthorized"}) == "contested"
-    assert cls({"code": 1001, "msg": ""}) == "contested"
-    assert cls({"code": 1002, "msg": ""}) == "contested"
+def test_auth_error_msg_fallback():
+    """Fuzzy fallback for protocol drift — if the code is unknown but
+    the message mentions token/expired/invalid/auth, treat it as
+    contention rather than miss the signal."""
+    is_err = JackeryCloudClient._is_auth_error
+    assert is_err({"code": 12345, "msg": "Token has expired"}) is True
+    assert is_err({"code": 12345, "msg": "Invalid token"}) is True
 
 
-def test_classify_auth_error_msg_fallback_is_expired():
-    """Anything we can't pin to a specific code but matches the fuzzy
-    'token expired/invalid/auth' pattern defaults to 'expired' — the
-    safer choice (silent re-login) given we don't have evidence it's
-    a real contention."""
-    cls = JackeryCloudClient._classify_auth_error
-    assert cls({"code": 12345, "msg": "Token has expired"}) == "expired"
-    assert cls({"code": 12345, "msg": "Invalid token"}) == "expired"
+def test_auth_error_returns_false_for_success():
+    is_err = JackeryCloudClient._is_auth_error
+    assert is_err({"code": 0, "msg": "ok", "data": {}}) is False
+    assert is_err(None) is False
+    assert is_err({}) is False
 
 
-def test_classify_auth_error_returns_none_for_success():
-    cls = JackeryCloudClient._classify_auth_error
-    assert cls({"code": 0, "msg": "ok", "data": {}}) is None
-    assert cls(None) is None
-    assert cls({}) is None
-
-
-def test_is_token_expired_back_compat():
-    """The back-compat shim returns True for either flavor so callers
-    that don't care about the distinction keep working."""
-    is_exp = JackeryCloudClient._is_token_expired
-    assert is_exp({"code": 10402, "msg": "Token expires"}) is True
-    assert is_exp({"code": 401, "msg": "unauth"}) is True
-    assert is_exp({"code": 0, "msg": "ok"}) is False
+def test_is_token_expired_back_compat_alias():
+    """`_is_token_expired` is kept as an alias of `_is_auth_error` so
+    any external caller importing the old name keeps working."""
+    assert (
+        JackeryCloudClient._is_token_expired
+        is JackeryCloudClient._is_auth_error
+    )
 
 
 def test_dispatch_lets_caller_separate_axes():
