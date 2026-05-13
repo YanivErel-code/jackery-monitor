@@ -638,14 +638,25 @@ def fit_drain_model(
     SOLAR_NOISE_WH = 20.0
     AC_NOISE_WH = 20.0
     MIN_OUT_W = 50.0
-    # Exclude windows where SOC starts above 95% — the BMS taper near
-    # full distorts the discharge slope (charging current ramps down
-    # as cells balance, but our slope-based fit attributes the
-    # apparent drain to parasitic+overhead). Advisor flagged this on
-    # 2026-05-10: clean windows starting at 87-95% SOC produce
-    # consistent 27-50W implied parasitic; the per-pair median was
-    # being dragged to 316W by taper-skewed start-near-100% windows.
-    MAX_FIT_START_SOC_PCT = 95.0
+    # Only fit on windows that start near full (>85% SOC). Empirical
+    # finding 2026-05-13: on multi-pack LiFePO4 rigs, the system_soc
+    # reading is unreliable in mid-discharge (~30-80%) because the
+    # flat voltage curve forces the BMS to fall back on coulomb
+    # counting + periodic recalibration, producing apparent SOC
+    # "drops" that don't match actual energy delivered. Pack-output
+    # data dumped during the 2026-05-13 investigation showed packs
+    # delivering ~430W in both heavy-drain (drain/load=1.80) and
+    # near-full (drain/load=1.17) windows — only the SOC reading
+    # differed. Windows starting >85% SOC pass through the reliable
+    # high-voltage region of the curve and produce a consistent
+    # drain/load ratio matching the empirical reconciliation.
+    #
+    # Earlier code had an UPPER bound (>95% rejected for "BMS taper")
+    # — that's now dropped because the data shows windows starting
+    # at 96-98% give the same well-behaved ratio (1.19-1.21) as 85-
+    # 95% starts. The original 316W parasitic noted on 2026-05-10
+    # turned out to be the SOC non-linearity issue, not BMS taper.
+    MIN_FIT_START_SOC_PCT = 85.0
 
     rows = sorted(
         (r for r in (energy_history or []) if r.get("ts") is not None),
@@ -673,7 +684,7 @@ def fit_drain_model(
         soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
-        if soc_a > MAX_FIT_START_SOC_PCT:
+        if soc_a < MIN_FIT_START_SOC_PCT:
             continue
         soc_drop = soc_a - soc_b
         # pp gate (same as fit_inverter_overhead_pct).
@@ -839,11 +850,11 @@ def _clean_discharge_runs(
     MIN_RUN_AVG_LOAD_W = 50.0
     MAX_RUN_HOURS = 12.0  # don't reach across overnight gaps
     MAX_BUCKET_GAP_H = 1.5  # break a run if poll dropped > 90 min
-    # Same 95% start-SOC cap as fit_drain_model — exclude taper-region
-    # windows where the BMS ramps current rather than honoring the
-    # actual instantaneous load. Advisor 2026-05-10T16:51 traced the
-    # over-fit parasitic to runs starting at 99-100% SOC.
-    MAX_RUN_START_SOC_PCT = 95.0
+    # Same start-SOC floor as fit_drain_model (kept in sync). Multi-pack
+    # LiFePO4 SOC reading is unreliable in mid-discharge (<85%) because
+    # of the flat voltage curve — see fit_drain_model's docstring for
+    # the 2026-05-13 pack-output investigation that established this.
+    MIN_RUN_START_SOC_PCT = 85.0
 
     runs: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -888,7 +899,7 @@ def _clean_discharge_runs(
         soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
-        if soc_a > MAX_RUN_START_SOC_PCT:
+        if soc_a < MIN_RUN_START_SOC_PCT:
             continue
         soc_drop = soc_a - soc_b
         min_pp = (MIN_RUN_SOC_DROP_PCT_SYSTEM
