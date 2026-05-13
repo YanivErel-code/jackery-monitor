@@ -521,14 +521,17 @@ def test_build_forecast_emits_diagnostic_sources():
     # 'default'.
     now = int(time.time())
     history = []
-    # Discharge-only history: 15 windows of 2pp drops, 545W out_w.
+    # Discharge-only history: 15 independent 2pp-drop pairs, 545W out_w.
+    # Each pair is a 1-hour window, pairs are 3 hours apart. Starts must
+    # be >= MIN_FIT_START_SOC_PCT (85.0) — use the same starting SOC for
+    # all pairs since they're independent windows, not a continuous run.
     for i in range(15):
         ts = now - 60 * 3600 + i * 3600 * 3
-        history.append({"ts": ts, "battery_pct": 90 - 2 * i, "output_w": 545,
+        history.append({"ts": ts, "battery_pct": 95, "output_w": 545,
                         "output_wh": 545, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0,
                         "input_wh": 0, "input_w": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 88 - 2 * i, "output_w": 545,
+        history.append({"ts": ts + 3600, "battery_pct": 93, "output_w": 545,
                         "output_wh": 545, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0,
                         "input_wh": 0, "input_w": 0})
@@ -769,15 +772,15 @@ def test_fit_drain_model_recovers_parasitic_and_overhead():
     explodes for low loads — this hybrid fit recovers both terms."""
     base = 1_700_000_000
     history = []
-    # 12 clean discharge windows at varying loads. drain in W; on a
-    # 30000Wh capacity, drain*1h corresponds to drain/300 pp drop.
-    # Make sure soc_drop >= 2pp.
+    # 12 independent clean-discharge pairs at varying loads, all
+    # starting at SOC=99 (well above the MIN_FIT_START_SOC_PCT=85 gate).
+    # Pairs are 3 hours apart so they're independent (not a continuous
+    # run). drain in W; on 30000Wh capacity, drain*1h ≈ drain/300 pp drop.
     for i, load_w in enumerate([200, 400, 600, 800, 1000, 1200,
                                  200, 500, 700, 900, 1100, 1300]):
         true_drain = 300 + load_w * 1.10
-        # 1h windows. pp_drop = drain / capacity * 100.
         pp_drop = true_drain / 30000 * 100  # ~2-5pp
-        soc0 = 80 - i * 6
+        soc0 = 99
         soc1 = round(soc0 - pp_drop, 0)  # cloud quantizes to 1pp
         history.append({"ts": base + i * 3 * 3600,
                         "battery_pct": soc0,
@@ -805,13 +808,13 @@ def test_fit_drain_model_recovers_parasitic_via_multi_hour_runs():
     clean-discharge run path aggregates noise across the run and
     should recover the real parasitic value."""
     base = 1_700_000_000
-    # 8 hour-long clean buckets, simulating an overnight run.
-    # True drain: 385 + 462 * 1.10 = 893 W. On 30240 Wh that's
-    # 2.95pp/h. After 8 hours the SOC drop is ~24pp, large enough
-    # that the ±1pp quantization on each end (±0.5pp / 24pp = 4%
-    # noise) doesn't dominate the fit.
+    # 9 hour-long clean buckets, simulating an overnight run starting
+    # near full (>= MIN_FIT_START_SOC_PCT=85). True drain: 385 + 462 *
+    # 1.10 = 893 W. On 30240 Wh that's 2.95pp/h. After 8 hours the SOC
+    # drop is ~24pp; ±1pp quantization (±0.5pp / 24pp = 4% noise)
+    # doesn't dominate the run-aggregate fit.
     history = []
-    soc = 95
+    soc = 99
     for h in range(9):
         history.append({
             "ts": base + h * 3600,
@@ -820,10 +823,11 @@ def test_fit_drain_model_recovers_parasitic_via_multi_hour_runs():
             "solar_wh": 0, "ac_input_wh": 0,
         })
         soc -= 3  # quantize to 3pp/h ≈ true 2.95pp/h
-    # Throw in 5 noisy short pairs at the SAME load: alternating 2pp
-    # / 3pp drops simulating the boundary jitter that biased the
-    # original per-pair median low. With the multi-hour-run fix in
-    # place, these don't matter — the run-based median dominates.
+    # Throw in 5 short pairs at lower SOC — these fall below the
+    # MIN_FIT_START_SOC_PCT gate and are filtered before the pool,
+    # which is correct: the new gate makes "noisy mid-discharge pair
+    # vs reliable long run" a moot comparison. Kept as data to verify
+    # the gate does its job.
     for i in range(5):
         ts = base + (10 + i * 3) * 3600
         drop = 2 if i % 2 == 0 else 3
@@ -923,12 +927,14 @@ def test_fit_drain_model_uses_parasitic_only_fallback_for_narrow_loads():
     parasitic-only fallback should recover ~415W instead."""
     base = 1_700_000_000
     # Continuous 9-hour timeline, SOC drops 3pp/hour at ~470W steady load.
-    # True drain = 415 + 470*1.10 = 932W ≈ 3.1pp/h on 30000Wh; quantized
-    # to 3pp gives observed drain = 900W → implied parasitic = 900 -
-    # 470*1.10 ≈ 383W. Loads alternate 465/475 to make the median
-    # non-degenerate but stay well within the 2x narrow-load gate.
+    # Start at 99% so the first ~5 hourly pairs stay above the
+    # MIN_FIT_START_SOC_PCT=85 gate. True drain = 415 + 470*1.10 = 932W
+    # ≈ 3.1pp/h on 30000Wh; quantized to 3pp gives observed drain = 900W
+    # → implied parasitic = 900 - 470*1.10 ≈ 383W. Loads alternate
+    # 465/475 to make the median non-degenerate but stay well within
+    # the 2x narrow-load gate.
     history = []
-    soc = 90
+    soc = 99
     for h in range(9):
         load_w = 465 if h % 2 == 0 else 475
         history.append({
@@ -958,11 +964,12 @@ def test_fit_drain_model_outlier_does_not_disable_narrow_fallback():
     correctly classifies the device as 'narrow'."""
     base = 1_700_000_000
     # 16 narrow-load buckets at ~470W steady (real overnight pattern)
-    # plus 2 outlier buckets at 1500W (one short kettle run during 14d).
-    # max/min = 1500/465 = 3.23 → old gate would pick OLS path (collapses).
+    # starting near full (>= MIN_FIT_START_SOC_PCT=85) plus 2 outlier
+    # buckets at 1500W (one short kettle run during 14d). max/min =
+    # 1500/465 = 3.23 → old gate would pick OLS path (collapses).
     # p90/p10 should land near 1.0 → narrow-fallback fires correctly.
     history = []
-    soc = 95
+    soc = 99
     for h in range(16):
         load_w = 465 if h % 2 == 0 else 475
         history.append({
@@ -972,7 +979,10 @@ def test_fit_drain_model_outlier_does_not_disable_narrow_fallback():
             "solar_wh": 0, "ac_input_wh": 0,
         })
         soc -= 3  # 3pp/h drop at ~932W true drain
-    # Tack on 2 outlier high-load hours (1500W kettle run).
+    # Tack on 2 outlier high-load hours (1500W kettle run). These end
+    # up at low SOC and are filtered by MIN_FIT_START_SOC_PCT — that
+    # doesn't matter for the test (we only need to verify the narrow-
+    # fallback isn't disabled by the load-range outlier).
     for h in range(2):
         history.append({
             "ts": base + (16 + h) * 3600,
@@ -994,7 +1004,7 @@ def test_fit_drain_model_outlier_does_not_disable_narrow_fallback():
 def test_fit_drain_model_falls_back_when_too_few_windows():
     """Single qualifying window is not enough — defaults are returned
     so callers don't blindly trust a one-shot fit."""
-    history = _discharge_window(1_700_000_000, 80, 78, out_w=545)
+    history = _discharge_window(1_700_000_000, 99, 97, out_w=545)
     parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
         history, capacity_wh=30000,
     )
@@ -1014,17 +1024,18 @@ def test_fit_drain_model_clamps_negative_parasitic_to_zero():
     base = 1_700_000_000
     history = []
     # 8 windows with drain consistently BELOW load × 1.10. Makes
-    # implied parasitic regress to a negative value.
+    # implied parasitic regress to a negative value. Start at SOC=99
+    # so each pair passes the MIN_FIT_START_SOC_PCT=85 gate.
     for i, load_w in enumerate([1000, 1200, 1400, 1600, 1800,
                                  1000, 1300, 1500]):
         # Force soc_drop < load * 1h / capacity, so drain < load.
         pp_drop = max(2, int((load_w * 0.6) / 30000 * 100))
         history.append({"ts": base + i * 3 * 3600,
-                        "battery_pct": 80,
+                        "battery_pct": 99,
                         "output_wh": load_w,
                         "solar_wh": 0, "ac_input_wh": 0})
         history.append({"ts": base + i * 3 * 3600 + 3600,
-                        "battery_pct": 80 - pp_drop,
+                        "battery_pct": 99 - pp_drop,
                         "output_wh": load_w,
                         "solar_wh": 0, "ac_input_wh": 0})
     parasitic_w, overhead_pct, n = forecaster.fit_drain_model(
@@ -1058,8 +1069,9 @@ def test_fit_drain_model_uses_system_soc_when_present():
         # main reports a faster drop because of pack-balancing lag.
         # We model that as main dropping `pack_ratio` × system rate
         # initially, decaying to system rate over the run.
-        soc_main = 80.0
-        soc_system = 80.0
+        # Start near full so the early pairs pass MIN_FIT_START_SOC_PCT=85.
+        soc_main = 99.0
+        soc_system = 99.0
         run_base = base + run * 12 * 3600
         for h in range(6):  # 6 hourly samples → 5h run
             history_main_only.append({
@@ -1084,8 +1096,16 @@ def test_fit_drain_model_uses_system_soc_when_present():
             decay = 4.0 if h < 2 else 1.5 if h < 4 else 1.0
             soc_main -= 2.1 * decay
 
-    # With main-only data the fit is biased high by the pack-ratio
-    # effect — main slope > system slope, multiplied by system capacity.
+    # With main-only data the pack-ratio effect makes main_pct drop
+    # ~4x faster than system_soc in the near-full reliable region
+    # (8-9pp/h vs 2.1pp/h in the first 2 hours of each run). With
+    # MIN_FIT_START_SOC_PCT=85 the pool only contains those early
+    # high-decay pairs → implied parasitic blows past the >1000W
+    # sanity clamp → fit returns defaults. (Before the filter shift,
+    # the pool also contained the later balanced-rate pairs which
+    # diluted the median into a plausible-but-wrong ~370W. The new
+    # gate produces a different failure mode — clamp to defaults —
+    # but the same lesson: don't trust main_pct on multi-pack rigs.)
     p_main, _, n_main = forecaster.fit_drain_model(
         history_main_only, capacity_wh=system_wh,
     )
@@ -1094,12 +1114,11 @@ def test_fit_drain_model_uses_system_soc_when_present():
     p_sys, _, n_sys = forecaster.fit_drain_model(
         history_with_system, capacity_wh=system_wh,
     )
-    # The system-soc fit should land much closer to the 130 W truth
-    # than the main-only fit. Don't assert exact values — quantization
-    # noise + the synthetic decay model make exact recovery hard —
-    # but the system fit must be substantially lower.
-    assert p_sys < p_main, f"system-soc fit ({p_sys}) should be < main-only fit ({p_main})"
-    assert p_sys < 250, f"system-soc fit too high: {p_sys}"
+    # Main-only fit is so biased it falls to defaults via the >1000W
+    # clamp; system_soc fit recovers ~130W truth.
+    assert p_main == forecaster.DEFAULT_PARASITIC_W, \
+        f"main-only fit should clamp to defaults via pack-ratio bias, got {p_main}"
+    assert 50 < p_sys < 250, f"system-soc fit should recover ~130W truth, got {p_sys}"
 
 
 def test_fit_drain_model_strict_system_soc_excludes_mixed_rows():
@@ -1204,14 +1223,15 @@ def test_inverter_overhead_pct_used_by_build_forecast():
     # 2pp drops per window (was 1pp) for the new MIN_SOC_DROP gate.
     now = int(time.time())
     history = []
-    # 15 cycles x (2 rows each, 2pp drop each) -> 15 qualifying windows.
-    # SOC ramps 90 → 60 over 30 cycles, well above DEPLETED floor.
+    # 15 independent 2pp-drop pairs at the same near-full SOC so they
+    # all clear MIN_FIT_START_SOC_PCT=85. Pairs are 3 hours apart so
+    # they're independent windows, not a continuous run.
     for i in range(15):
         ts = now - 60 * 3600 + i * 3600 * 3
-        history.append({"ts": ts, "battery_pct": 90 - 2 * i, "output_w": 545,
+        history.append({"ts": ts, "battery_pct": 95, "output_w": 545,
                         "output_wh": 545, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
-        history.append({"ts": ts + 3600, "battery_pct": 88 - 2 * i, "output_w": 545,
+        history.append({"ts": ts + 3600, "battery_pct": 93, "output_w": 545,
                         "output_wh": 545, "solar_w": 0, "solar_wh": 0,
                         "ac_input_wh": 0, "ac_input_w": 0})
     weather = [{"ts": now + i * 3600, "ghi_w_m2": 0, "cloud_cover_pct": 100}
