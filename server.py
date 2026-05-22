@@ -1736,6 +1736,11 @@ async def _solar_charge_evaluate(record: bool = True,
         main_soc = float(status.get("battery_percent") or 50)
         solar_w = float(status.get("solar_input_w") or 0)
         load_w = float(status.get("output_power_w") or 0)
+        # ac_input_w (= the device's `acip` field) tells the controller
+        # whether the Jackery is being grid-charged right now. If yes,
+        # solar_charge must yield (see AC_INPUT_GRID_CHARGE_THRESHOLD_W
+        # in solar_charge.py for the rationale).
+        ac_input_w = float(status.get("ac_input_w") or 0)
         # last_update_ts is bumped on every successful poll; if we have
         # one, treat telemetry as fresh enough for the controller. The
         # actual cloud-stall timeout is enforced via last_update_ts
@@ -1750,6 +1755,7 @@ async def _solar_charge_evaluate(record: bool = True,
         main_soc = float(t.get("battery_percent") or 50)
         solar_w = float(t.get("solar_input_w") or 0)
         load_w = float(t.get("output_power_w") or 0)
+        ac_input_w = float(t.get("ac_input_w") or 0)
         # Per-device timestamps aren't tracked separately; use the
         # active-device last_update_ts as proxy.
         telemetry_age_s = max(0.0,
@@ -1810,6 +1816,7 @@ async def _solar_charge_evaluate(record: bool = True,
         config=cfg,
         current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
         solar_w=solar_w, load_w=load_w,
+        ac_input_w=ac_input_w,
         telemetry_age_s=telemetry_age_s,
         target_sunrise_soc_pct=target,
         predicted_sunrise_soc_with_diversion=predicted_sunrise,

@@ -118,6 +118,20 @@ SUNSET_SUSTAIN_S = 5 * 60
 # Bridge stall safety: returns action="off" reason="stale telemetry".
 MAX_TELEMETRY_AGE_S = 90
 
+# If the device's AC input (acip) is above this, treat it as actively
+# grid-charging and force the diversion plug OFF. The 5000+ shares a
+# single input/output power budget during AC pass-through charging:
+# grid feeds the battery AND the AC output simultaneously, so adding
+# a heavy diversion load (1.4kW EV charger) on top of grid charging
+# (~800W) on top of normal house load (~300W) can exceed the wall
+# circuit's 15A budget (~1800W @ 120V) or trip the inverter's thermal
+# protection. Yielding to grid charging is the right invariant — the
+# user's smart-charge / automation rules use AC to refill the battery
+# specifically because the battery is low, and that needs to happen
+# unimpeded. Set at 50W (well above sensor noise / idle adapter draw,
+# well below any real grid-charging rate the unit produces).
+AC_INPUT_GRID_CHARGE_THRESHOLD_W = 50.0
+
 _config_lock = threading.Lock()
 
 
@@ -298,6 +312,7 @@ def compute_plan(
     current_soc_pct: float | None,
     solar_w: float | None,
     load_w: float | None,
+    ac_input_w: float | None = None,
     telemetry_age_s: float,
     target_sunrise_soc_pct: float,
     predicted_sunrise_soc_with_diversion: float | None,
@@ -360,6 +375,23 @@ def compute_plan(
         return _plan("off", f"stale telemetry ({telemetry_age_s:.0f}s old)")
     if current_soc_pct is None:
         return _plan("off", "missing telemetry (soc)")
+
+    # Hard yield to grid charging. Comes BEFORE the forecast check so
+    # it wins even when the projection says we have headroom — the
+    # invariant is "never compete with AC input for the inverter's
+    # power budget." Universal signal: covers smart_charge automation,
+    # battery-low automation rules, manual grid plug-in, etc. The 50W
+    # threshold sits above sensor noise but well below any actual
+    # grid-charging rate, so it triggers reliably the moment AC input
+    # starts but doesn't false-fire on idle adapter draw.
+    if ac_input_w is not None and ac_input_w > AC_INPUT_GRID_CHARGE_THRESHOLD_W:
+        return _plan(
+            "off",
+            f"grid charging active ({ac_input_w:.0f}W AC input ≥ "
+            f"{AC_INPUT_GRID_CHARGE_THRESHOLD_W:.0f}W); yielding to avoid "
+            f"inverter overdraw",
+        )
+
     if predicted_sunrise_soc_with_diversion is None:
         return _plan("off", "forecast unavailable")
 

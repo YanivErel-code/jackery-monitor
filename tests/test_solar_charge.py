@@ -23,12 +23,13 @@ def _cfg(**overrides):
 
 def _eval(*, current_soc, predicted_sunrise=80.0, target=20.0,
           telemetry_age=10.0, cfg=None, solar_w=0.0, load_w=0.0,
-          now_ts=1_700_000_000.0):
+          ac_input_w=0.0, now_ts=1_700_000_000.0):
     """Convenience wrapper around compute_plan with safe defaults."""
     return solar_charge.compute_plan(
         config=cfg or _cfg(),
         current_soc_pct=current_soc,
         solar_w=solar_w, load_w=load_w,
+        ac_input_w=ac_input_w,
         telemetry_age_s=telemetry_age,
         target_sunrise_soc_pct=target,
         predicted_sunrise_soc_with_diversion=predicted_sunrise,
@@ -120,6 +121,49 @@ def test_off_when_forecast_missing():
     )
     assert plan.action == "off"
     assert "forecast unavailable" in plan.reason
+
+
+def test_yields_to_grid_charging():
+    """Critical safety: if the Jackery is being grid-charged (acip > 50W),
+    excess diversion MUST yield regardless of forecast headroom. Running
+    both flows simultaneously can exceed the wall circuit's amperage budget
+    or trip the inverter's thermal protection. The check wins even when the
+    forecast says we have huge headroom."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=20.0,
+                 ac_input_w=800)  # smart_charge typical grid-charge rate
+    assert plan.action == "off"
+    assert "grid charging active" in plan.reason
+    assert "inverter overdraw" in plan.reason
+
+
+def test_acip_below_threshold_treated_as_noise():
+    """50W threshold is well above sensor noise but below any real
+    grid-charging rate, so a small phantom reading doesn't false-fire."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=20.0,
+                 ac_input_w=30)  # below threshold
+    assert plan.action == "on"  # forecast logic wins, yield doesn't fire
+
+
+def test_grid_charge_yield_overrides_forecast():
+    """Even if forecast headroom is huge AND SOC is high, grid charging
+    forces OFF. There is no scenario where we want to run both."""
+    plan = _eval(current_soc=99, predicted_sunrise=99.0, target=20.0,
+                 ac_input_w=500)
+    assert plan.action == "off"
+    assert "grid charging" in plan.reason
+
+
+def test_grid_charge_yield_uses_none_safely():
+    """Telemetry without ac_input_w (older snapshots, etc.) — None
+    must not crash the check. Falls through to forecast logic."""
+    plan = solar_charge.compute_plan(
+        config=_cfg(), current_soc_pct=80,
+        solar_w=0, load_w=0, ac_input_w=None,
+        telemetry_age_s=10, target_sunrise_soc_pct=20,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+    )
+    assert plan.action == "on"
 
 
 def test_solar_load_ignored_for_decision():
