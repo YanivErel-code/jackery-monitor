@@ -1856,12 +1856,66 @@ async def _solar_charge_evaluate(record: bool = True,
     return plan
 
 
+async def _solar_charge_hydrate_runtime():
+    """On startup, force every configured solar_charge plug OFF.
+
+    A container restart wipes the controller's in-memory plug_is_on
+    cache. Two failure modes if we don't reset:
+      1. Just hydrating from Kasa (plug_is_on = current Kasa state)
+         doesn't help — the asymmetric SOC logic says "in the recovery
+         band, hold current state," so a plug that's physically ON at
+         restart-time keeps draining the battery even though the
+         controller would never have started it at the current SOC.
+      2. Defaulting to plug_is_on=False (the prior bug) means the
+         controller thinks it's done when the plug is actually ON, so
+         it never turns it off.
+
+    The clean answer: treat every restart as "no session in progress."
+    Force the Kasa plug OFF, set runtime to match, and let the next
+    eval decide from scratch. If the controller really wants to be ON
+    (SOC >= comfort_high, forecast OK), it'll re-engage within one
+    30s tick. The brief gap is the cost of a clean state-reset and
+    is acceptable.
+
+    Best-effort: any failures (Kasa unreachable, no host configured)
+    log a warning and leave runtime at its safe default (False)."""
+    try:
+        configs = solar_charge.get_all_configs()
+    except Exception as e:
+        log.debug("solar_charge hydrate: get_all_configs failed: %s", e)
+        return
+    for sn, cfg in configs.items():
+        host = cfg.get("kasa_device_host")
+        if not host or cfg.get("mode") == "off":
+            continue
+        try:
+            # Force OFF — don't trust prior session state across restart.
+            await kasa_client.set_state(host, False)
+            solar_charge._update_runtime(
+                sn, plug_is_on=False, last_toggle_ts=time.time())
+            log.info(
+                "solar_charge hydrate: %s plug forced OFF on startup "
+                "(Kasa %s); next eval will decide whether to re-engage",
+                sn, host,
+            )
+        except Exception as e:
+            log.warning(
+                "solar_charge hydrate: %s Kasa force-off failed (%s); "
+                "runtime defaults to plug_is_on=False. If the plug is "
+                "physically ON, the next eval may not toggle it off.",
+                sn, e,
+            )
+
+
 async def solar_charge_loop():
     """Periodic tick — every 30 seconds, evaluate solar-charge for every
     device with a per-device config saved (mode != off). Tighter than
     smart_charge's 5-minute cadence because solar conditions change fast
     (cloud cover) and the controller needs to react before draining the
     battery."""
+    # Sync our runtime cache to the actual Kasa state before the first
+    # eval. See _solar_charge_hydrate_runtime for why.
+    await _solar_charge_hydrate_runtime()
     bo = _backoff.LoopBackoff(max_s=10 * 60)
     while True:
         try:
