@@ -1736,11 +1736,12 @@ async def _solar_charge_evaluate(record: bool = True,
         main_soc = float(status.get("battery_percent") or 50)
         solar_w = float(status.get("solar_input_w") or 0)
         load_w = float(status.get("output_power_w") or 0)
-        # last_status is refreshed on every successful poll; if we have
+        # last_update_ts is bumped on every successful poll; if we have
         # one, treat telemetry as fresh enough for the controller. The
-        # actual cloud-stall timeout is enforced via cloud_ts elsewhere.
+        # actual cloud-stall timeout is enforced via last_update_ts
+        # elsewhere (CLOUD_STALL_ALERT_S thresholding).
         telemetry_age_s = max(0.0,
-                              time.time() - float(state.cloud_ts or time.time()))
+                              time.time() - float(state.last_update_ts or time.time()))
     else:
         cloud = state.last_cloud_meta or {}
         devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
@@ -1750,9 +1751,9 @@ async def _solar_charge_evaluate(record: bool = True,
         solar_w = float(t.get("solar_input_w") or 0)
         load_w = float(t.get("output_power_w") or 0)
         # Per-device timestamps aren't tracked separately; use the
-        # active-device cloud_ts as proxy.
+        # active-device last_update_ts as proxy.
         telemetry_age_s = max(0.0,
-                              time.time() - float(state.cloud_ts or time.time()))
+                              time.time() - float(state.last_update_ts or time.time()))
         devs = (cloud.get("devices") or []) if isinstance(cloud, dict) else []
         meta = next((d for d in devs if str(d.get("device_sn")) == device_sn), {})
         model_code = meta.get("model_code")
