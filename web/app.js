@@ -3207,11 +3207,15 @@ async function loadSolarCharge() {
   const deviceSn = dev?.device_sn || '';
   const lbl = document.getElementById('solar-device-label');
   if (lbl) lbl.textContent = dev?.name ? `· ${dev.name}` : '';
+  const statusEl = document.getElementById('solar-status');
   if (!deviceSn) {
-    const s = document.getElementById('solar-status');
-    if (s) { s.hidden = false; s.textContent = 'No active device — pick one to configure solar charge.'; }
+    if (statusEl) { statusEl.hidden = false; statusEl.textContent = 'No active device — pick one to configure excess diversion.'; }
     return;
   }
+  // Clear any stale "no device" message from a prior load that ran
+  // before lastStatus was populated. Successful loads should always
+  // reset the banner so it doesn't linger.
+  if (statusEl) { statusEl.hidden = true; statusEl.textContent = ''; }
   try {
     const q = `?device_sn=${encodeURIComponent(deviceSn)}`;
     const kasaQ = `?jackery_sn=${encodeURIComponent(deviceSn)}`;
