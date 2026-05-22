@@ -385,7 +385,7 @@ function switchTab(name, opts = {}) {
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
-    loadAutomation(); loadSmartCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
+    loadAutomation(); loadSmartCharge(); loadSolarCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
     // User is now looking — clear the "new insights" dot.
     setAutomationDot(false);
   }
@@ -3198,6 +3198,176 @@ function renderSmartChargePlan(plan, narration) {
   el.hidden = false;
 }
 
+// ============================================================
+// Solar charge UI — inverse controller (Jackery → downstream load)
+// ============================================================
+async function loadSolarCharge() {
+  if (!document.getElementById('solar-form')) return;
+  const dev = activeJackeryDevice();
+  const deviceSn = dev?.device_sn || '';
+  const lbl = document.getElementById('solar-device-label');
+  if (lbl) lbl.textContent = dev?.name ? `· ${dev.name}` : '';
+  if (!deviceSn) {
+    const s = document.getElementById('solar-status');
+    if (s) { s.hidden = false; s.textContent = 'No active device — pick one to configure solar charge.'; }
+    return;
+  }
+  try {
+    const q = `?device_sn=${encodeURIComponent(deviceSn)}`;
+    const kasaQ = `?jackery_sn=${encodeURIComponent(deviceSn)}`;
+    const [cfgRes, kasaRes, statusRes, histRes] = await Promise.all([
+      fetch(`/api/solar_charge/config${q}`),
+      fetch(`/api/kasa/saved${kasaQ}`),
+      fetch(`/api/solar_charge/status${q}`),
+      fetch(`/api/solar_charge/history${q}&hours=24&limit=50`),
+    ]);
+    const cfgPayload = cfgRes.ok ? await cfgRes.json() : {};
+    const cfg = cfgPayload.config || {};
+    const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
+    const status = statusRes.ok ? await statusRes.json() : {};
+    const hist = histRes.ok ? await histRes.json() : { decisions: [] };
+
+    // Kasa picker (same pattern as smart-charge).
+    const sel = document.getElementById('solar-kasa-host');
+    const currentHost = cfg.kasa_device_host || '';
+    sel.innerHTML = '<option value="">— none —</option>';
+    for (const d of (kasa.devices || [])) {
+      const opt = document.createElement('option');
+      opt.value = d.host;
+      const label = d.alias || d.host;
+      const tail = d.host ? ` (${d.host.slice(-7)})` : '';
+      opt.textContent = `${label}${tail}`;
+      if (d.host === currentHost) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (currentHost && !Array.from(sel.options).some(o => o.value === currentHost)) {
+      const opt = document.createElement('option');
+      opt.value = currentHost;
+      opt.textContent = `${currentHost} (not in registry)`;
+      opt.selected = true;
+      sel.appendChild(opt);
+    }
+
+    // Hydrate fields with config + defaults.
+    document.getElementById('solar-mode').value = cfg.mode || 'off';
+    document.getElementById('solar-car-load-w').value = cfg.car_load_w ?? 1400;
+    document.getElementById('solar-comfort-high').value = cfg.comfort_high_pct ?? 70;
+    document.getElementById('solar-comfort-low').value = cfg.comfort_low_pct ?? 30;
+    document.getElementById('solar-min-hold').value = cfg.min_hold_s ?? 30;
+    document.getElementById('solar-surplus-buffer').value = cfg.surplus_buffer_w ?? 100;
+    document.getElementById('solar-safety-margin').value = cfg.safety_margin_pp ?? 5;
+
+    // Runtime panel: plug state + today's diverted kWh + last decision reason.
+    const rt = status.runtime || {};
+    const divertedKwh = ((status.diverted_wh_today || 0) / 1000).toFixed(2);
+    const lastDecision = (status.recent_decisions || [])[0];
+    const plugBadge = rt.plug_is_on
+      ? '<span class="sc-mode" style="background:#2d5a2d">PLUG ON</span>'
+      : '<span class="sc-mode" style="background:#555">PLUG OFF</span>';
+    const rtPanel = document.getElementById('solar-runtime');
+    if (rtPanel) {
+      rtPanel.hidden = false;
+      rtPanel.innerHTML = `
+        <div style="display:flex; gap:14px; flex-wrap:wrap; align-items:center">
+          ${plugBadge}
+          <span class="hint">Today diverted: <strong>${divertedKwh} kWh</strong></span>
+          ${lastDecision ? `<span class="hint">Last decision: <strong>${lastDecision.action}</strong> — ${escapeHtml(lastDecision.reason || '')}</span>` : ''}
+        </div>`;
+    }
+
+    // History block (last 24h decisions).
+    const histBlock = document.getElementById('solar-history-block');
+    const histEl = document.getElementById('solar-history');
+    if (histBlock && histEl) {
+      const rows = hist.decisions || [];
+      if (rows.length === 0) {
+        histBlock.hidden = true;
+      } else {
+        histBlock.hidden = false;
+        histEl.innerHTML = rows.map(r => {
+          const when = new Date((r.decided_at || 0) * 1000).toLocaleString();
+          const action = r.action || '?';
+          const modeBadge = `<span class="sc-mode">[${r.mode || '?'}]</span>`;
+          const exec = r.executed ? '✓' : '·';
+          const surplus = r.surplus_w != null ? `${Math.round(r.surplus_w)}W` : '—';
+          const soc = r.current_soc_pct != null ? `${Math.round(r.current_soc_pct)}%` : '—';
+          return `<div class="sc-history-row">
+            <span class="hint" style="min-width:160px">${when}</span>
+            ${modeBadge}
+            <strong>${action}</strong> ${exec}
+            <span class="hint">SOC ${soc} · surplus ${surplus}</span>
+            <span class="hint" style="flex:1; text-align:right">${escapeHtml(r.reason || '')}</span>
+          </div>`;
+        }).join('');
+      }
+    }
+  } catch (e) {
+    console.error('loadSolarCharge', e);
+    const s = document.getElementById('solar-status');
+    if (s) { s.hidden = false; s.textContent = `Load failed: ${e.message || e}`; }
+  }
+}
+
+document.getElementById('solar-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = document.getElementById('solar-status');
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) {
+    status.hidden = false;
+    status.textContent = 'No active device — cannot save.';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  const cfg = {
+    mode: document.getElementById('solar-mode').value,
+    kasa_device_host: document.getElementById('solar-kasa-host').value || null,
+    car_load_w: parseInt(document.getElementById('solar-car-load-w').value, 10) || 1400,
+    comfort_high_pct: parseInt(document.getElementById('solar-comfort-high').value, 10) || 70,
+    comfort_low_pct: parseInt(document.getElementById('solar-comfort-low').value, 10) || 30,
+    min_hold_s: parseInt(document.getElementById('solar-min-hold').value, 10) || 30,
+    surplus_buffer_w: parseInt(document.getElementById('solar-surplus-buffer').value, 10) || 100,
+    safety_margin_pp: parseInt(document.getElementById('solar-safety-margin').value, 10) || 5,
+  };
+  try {
+    const r = await fetch(`/api/solar_charge/config?device_sn=${encodeURIComponent(deviceSn)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `HTTP ${r.status}`);
+    }
+    status.textContent = 'Saved.';
+    setTimeout(() => { status.hidden = true; }, 2500);
+    loadSolarCharge();  // refresh runtime panel
+  } catch (err) {
+    status.textContent = `Save failed: ${err.message || err}`;
+  }
+});
+
+document.getElementById('solar-evaluate')?.addEventListener('click', async () => {
+  const status = document.getElementById('solar-status');
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  status.hidden = false;
+  status.textContent = 'Evaluating…';
+  try {
+    const url = deviceSn
+      ? `/api/solar_charge/evaluate_now?device_sn=${encodeURIComponent(deviceSn)}`
+      : '/api/solar_charge/evaluate_now';
+    const r = await fetch(url, { method: 'POST' });
+    const j = await r.json();
+    if (j.plan) {
+      status.textContent = `${j.plan.action.toUpperCase()} — ${j.plan.reason}`;
+    } else {
+      status.textContent = j.reason || 'No plan returned.';
+    }
+  } catch (e) {
+    status.textContent = `Evaluate failed: ${e.message || e}`;
+  }
+});
+
 document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const status = $('sc-status');
@@ -3532,6 +3702,7 @@ function applyStatus(s) {
     if (_allRules.length) renderRulesWithFilter();
     // Smart-charge config + AI insights are per-device — reload both.
     loadSmartCharge();
+    loadSolarCharge();
     loadAlgorithmAdvisor();
   }
   // Same idea for the Forecast tab: forecast is per-device (battery
