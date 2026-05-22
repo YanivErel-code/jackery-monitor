@@ -319,6 +319,30 @@ main {
   .automation-subtab { font-size: 12px; padding: 7px 12px; }
 }
 
+/* Collapsed history list: shows the latest decision plus a button that
+   reveals the rest. Used by both Smart-charge and Excess-diversion
+   history blocks so the Automation tab doesn't dump a full day of
+   30s-tick rows on the user. */
+.history-toggle {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 1px dashed var(--border, rgba(255,255,255,.12));
+  color: var(--text-dim);
+  padding: 7px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-top: 8px;
+  font-size: 12px;
+  text-align: center;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.history-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(255,255,255,.02);
+}
+
 /* Controllers sub-tab: 2-column grid on wide screens so smart-charge
    and excess-diversion sit side-by-side. Stacks on narrow screens. */
 #tab-automation[data-active-group="controllers"] {

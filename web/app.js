@@ -455,6 +455,47 @@ document.querySelectorAll('.settings-subtab').forEach((btn) => {
   btn.addEventListener('click', () => selectSettingsSubtab(btn.dataset.settingsTab));
 });
 
+// ---- Collapsed history list -----------------------------------------------
+// Renders `rows` into `listEl` showing only the first row by default with
+// a "Show N more" toggle that reveals/hides the rest. The toggle is
+// delegated below so it works for both Smart-charge and Excess-diversion
+// history without per-render rebinding.
+function renderCollapsedHistory(listEl, rows, rowRenderer) {
+  if (!listEl) return;
+  if (!rows.length) {
+    listEl.innerHTML = '';
+    return;
+  }
+  const remaining = rows.length - 1;
+  if (remaining === 0) {
+    listEl.innerHTML = rowRenderer(rows[0]);
+    return;
+  }
+  listEl.innerHTML = `
+    ${rowRenderer(rows[0])}
+    <button class="history-toggle" type="button" data-count="${remaining}">
+      Show ${remaining} more ▼
+    </button>
+    <div class="history-rest" hidden>
+      ${rows.slice(1).map(rowRenderer).join('')}
+    </div>
+  `;
+}
+
+document.body.addEventListener('click', (e) => {
+  const btn = e.target.closest('.history-toggle');
+  if (!btn) return;
+  const rest = btn.parentElement?.querySelector('.history-rest');
+  if (!rest) return;
+  if (rest.hidden) {
+    rest.hidden = false;
+    btn.textContent = 'Hide ▲';
+  } else {
+    rest.hidden = true;
+    btn.textContent = `Show ${btn.dataset.count} more ▼`;
+  }
+});
+
 // ---- Automation sub-tabs: same pattern as Settings ------------------------
 // Four groups (controllers / devices / rules / insights). Each card under
 // #tab-automation carries data-automation-group; this handler hides the
@@ -2955,10 +2996,13 @@ function renderSmartChargeHistory(rows) {
   }
   block.hidden = false;
   // Cap at 50 rows in the DOM — older ones live in the DB and the
-  // analytics block above the list summarizes them. With the new
-  // scrolling container this still lets the user review a full day's
-  // worth of decisions without the panel taking over the page.
-  list.innerHTML = rows.slice(0, 50).map((r) => {
+  // analytics block above the list summarizes them. Collapsed by
+  // default: shows only the latest decision; a "Show N more" toggle
+  // reveals the rest. Details buttons inside hidden rows are wired
+  // at render time and remain functional once revealed.
+  const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
+    ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  const renderRow = (r) => {
     const when = _formatDecisionTime(r.decided_at);
     const fullWhen = new Date((r.decided_at || 0) * 1000).toLocaleString();
     const pred = r.predicted_sunrise_soc_pct != null
@@ -2970,8 +3014,6 @@ function renderSmartChargeHistory(rows) {
     const actionCls = r.action === 'on' ? 'sc-act-on'
                     : r.action === 'off' ? 'sc-act-off'
                     : 'sc-act-skip';
-    const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
-      ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
     const narrationLine = r.narration
       ? `<div class="sc-narration">💬 ${safe(r.narration)}</div>`
       : '';
@@ -2986,9 +3028,12 @@ function renderSmartChargeHistory(rows) {
                 data-decided-at="${r.decided_at}" type="button">Details ▾</button>
       </div>${narrationLine}
       <div class="sc-detail-panel" data-detail-for="${r.decided_at}" hidden></div>`;
-  }).join('');
+  };
+  renderCollapsedHistory(list, rows.slice(0, 50), renderRow);
   // Wire the Details toggles. Each click hits the decision_details
-  // endpoint and renders into the matching panel.
+  // endpoint and renders into the matching panel. The querySelectorAll
+  // also finds buttons inside the hidden .history-rest container, so
+  // they work as soon as the user expands the list.
   list.querySelectorAll('[data-decided-at]').forEach((btn) => {
     btn.addEventListener('click', () => toggleDecisionDetails(btn));
   });
@@ -3313,31 +3358,29 @@ async function loadSolarCharge() {
         </div>`;
     }
 
-    // History block (last 24h decisions).
+    // History block (last 24h decisions). Collapsed by default: shows
+    // only the latest decision with a "Show N more" toggle for the rest.
     const histBlock = document.getElementById('solar-history-block');
     const histEl = document.getElementById('solar-history');
     if (histBlock && histEl) {
       const rows = hist.decisions || [];
-      if (rows.length === 0) {
-        histBlock.hidden = true;
-      } else {
-        histBlock.hidden = false;
-        histEl.innerHTML = rows.map(r => {
-          const when = new Date((r.decided_at || 0) * 1000).toLocaleString();
-          const action = r.action || '?';
-          const modeBadge = `<span class="sc-mode">[${r.mode || '?'}]</span>`;
-          const exec = r.executed ? '✓' : '·';
-          const surplus = r.surplus_w != null ? `${Math.round(r.surplus_w)}W` : '—';
-          const soc = r.current_soc_pct != null ? `${Math.round(r.current_soc_pct)}%` : '—';
-          return `<div class="sc-history-row">
-            <span class="hint" style="min-width:160px">${when}</span>
-            ${modeBadge}
-            <strong>${action}</strong> ${exec}
-            <span class="hint">SOC ${soc} · surplus ${surplus}</span>
-            <span class="hint" style="flex:1; text-align:right">${escapeHtml(r.reason || '')}</span>
-          </div>`;
-        }).join('');
-      }
+      histBlock.hidden = rows.length === 0;
+      const renderRow = (r) => {
+        const when = new Date((r.decided_at || 0) * 1000).toLocaleString();
+        const action = r.action || '?';
+        const modeBadge = `<span class="sc-mode">[${r.mode || '?'}]</span>`;
+        const exec = r.executed ? '✓' : '·';
+        const surplus = r.surplus_w != null ? `${Math.round(r.surplus_w)}W` : '—';
+        const soc = r.current_soc_pct != null ? `${Math.round(r.current_soc_pct)}%` : '—';
+        return `<div class="sc-history-row">
+          <span class="hint" style="min-width:160px">${when}</span>
+          ${modeBadge}
+          <strong>${action}</strong> ${exec}
+          <span class="hint">SOC ${soc} · surplus ${surplus}</span>
+          <span class="hint" style="flex:1; text-align:right">${escapeHtml(r.reason || '')}</span>
+        </div>`;
+      };
+      renderCollapsedHistory(histEl, rows, renderRow);
     }
   } catch (e) {
     console.error('loadSolarCharge', e);
