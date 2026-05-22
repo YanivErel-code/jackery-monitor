@@ -1,12 +1,11 @@
 """
-Solar-divert controller.
+Solar-divert controller (forecast-driven).
 
-Inverse of smart_charge: when the battery is full enough and solar is
-producing more than home demand, divert the surplus to a downstream load
-(typically an EV charger plugged into the Jackery's AC output). Toggles a
-Kasa smart plug ON when surplus is real and the overnight reserve is
-safe; OFF when surplus collapses, the battery is low, or the forecast
-says we won't reach the morning target.
+Inverse of smart_charge: when the forecast says the battery has enough
+overnight headroom, divert the surplus capacity to a downstream load
+(typically an EV charger plugged into the Jackery's AC output). The
+battery acts as the buffer between solar surplus and EV demand:
+discharges during dark hours, refills during sunny hours.
 
 Three modes (per-device, picked via the Solar-charge tab):
   - off:    no decisions, no toggling. Idle.
@@ -14,37 +13,43 @@ Three modes (per-device, picked via the Solar-charge tab):
             Use this for a few days to validate before going live.
   - active: full control — toggles Kasa plug per decisions.
 
-Decision policy is deterministic and rule-based. Hysteresis bands
-(comfort_low/high SOC + surplus buffer) absorb sensor noise so the plug
-doesn't chatter. Minimum hold time prevents back-to-back toggles below
-the EVSE's reasonable cycling tolerance.
+Decision algorithm per tick (every ~30s, self-regulating):
 
-Algorithm per tick (every ~30s, driven by the bridge poll cadence):
+  Compute baseline_sunrise_soc from build_forecast(no AC floor injected).
+  This is the projected SOC at tomorrow morning's sunrise assuming
+  nothing intervenes.
 
-  ON state preconditions (turn ON when ALL true):
-    - plug currently OFF
-    - system_soc >= comfort_high_pct (don't fight battery charging on top)
-    - solar_w - load_w >= car_load_w + surplus_buffer_w
-      (real surplus, with a buffer against load spike noise)
-    - predicted_sunrise_soc_with_car >= target + safety_margin_pp
-      (we're confident the overnight reserve survives)
-    - now - last_toggle_ts >= min_hold_s
+  ON state (turn ON when):
+    - baseline_sunrise_soc >= target + safety_margin + on_hysteresis_pp
+      (forecast says we have headroom to spare — divert into car)
+    - current_soc > comfort_low_pct (don't drain past hard floor)
+    - telemetry fresh, forecast available
+    - min_hold_s elapsed since last toggle
 
-  OFF state triggers (turn OFF when ANY true):
-    - plug currently ON
-    - system_soc <= comfort_low_pct (protect battery from over-discharge)
-    - solar_w - load_w < car_load_w - surplus_buffer_w
-      (we're net draining battery — solar collapsed or load spiked)
-    - predicted_sunrise_soc < target + safety_margin_pp
-      (forecast says we won't make it; bail)
-    - solar_w < SUNSET_SOLAR_W sustained for SUNSET_SUSTAIN_S
-      (graceful end-of-day; don't keep charging from battery alone)
-    - now - last_toggle_ts >= min_hold_s
+  OFF state (turn OFF when):
+    - baseline_sunrise_soc < target + safety_margin
+      (headroom exhausted — the controller's own past draining has
+      pulled the projected sunrise down to the safety floor)
+    - current_soc <= comfort_low_pct (hard SOC floor)
+    - telemetry stale or forecast unavailable
+    - min_hold_s elapsed
+
+  In the hysteresis band (between the OFF and ON thresholds): keep
+  current plug state.
+
+Self-regulation: when the plug is ON, the car pulls car_load_w from
+the Jackery, draining the battery faster than the natural load. Each
+30s tick recomputes the forecast from the *current* (now lower) SOC,
+so baseline_sunrise_soc walks down as we charge. Eventually it crosses
+the OFF threshold and the controller stops the charge. If we'd undershoot,
+the projection catches it BEFORE we hit the actual floor.
 
 Safety:
   - Test mode lets the user observe a few days of decisions without any
     plug movement.
-  - Min-hold time gates both directions, so a brief solar dip doesn't
+  - comfort_low is a hard SOC floor that overrides the forecast — if
+    SOC dips to it right now, OFF immediately regardless of projection.
+  - Min-hold time gates both directions, so a forecast wobble doesn't
     rapidly cycle the EVSE.
   - Cloud-disconnect / forecast-unavailable → return action="off" with
     reason. The caller (server.py) is responsible for fail-safe behavior
@@ -87,10 +92,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # tolerates it. Larger values reduce chatter at the cost of
     # responsiveness to cloud cover.
     "min_hold_s": 30,
-    # Surplus must exceed (car_load_w + buffer) to turn ON, and must
-    # drop below (car_load_w - buffer) to turn OFF. The hysteresis band
-    # absorbs noise on solar_w / load_w samples.
-    "surplus_buffer_w": 100,
+    # Hysteresis on the forecast gate: ON fires when predicted sunrise
+    # SOC >= target + safety_margin + on_hysteresis_pp, OFF when it
+    # drops below target + safety_margin. The pp band prevents
+    # oscillation around the boundary as the forecast recomputes
+    # tick-to-tick. Old name `surplus_buffer_w` kept for back-compat
+    # but no longer consulted by the forecast-driven controller.
+    "on_hysteresis_pp": 3,
+    "surplus_buffer_w": 100,  # legacy; ignored by forecast-driven gate
     # Predicted sunrise SOC must remain at least this many pp above
     # target to keep the plug ON. Bigger = safer (more pessimistic
     # about forecast error), smaller = more aggressive diversion.
@@ -138,6 +147,7 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     _int_in_range("comfort_low_pct", 5, 90)
     _int_in_range("min_hold_s", 10, 3600)
     _int_in_range("surplus_buffer_w", 0, 1000)
+    _int_in_range("on_hysteresis_pp", 0, 30)
     _int_in_range("safety_margin_pp", 0, 50)
     # Defensive sanity: comfort_low must be < comfort_high or we'd
     # paint an unreachable state (plug can never be on).
@@ -320,12 +330,11 @@ def compute_plan(
     now = float(now_ts if now_ts is not None else time.time())
     mode = str(config.get("mode") or "off").lower()
     car_load = float(config.get("car_load_w") or 1400)
-    comfort_high = float(config.get("comfort_high_pct") or 70)
     comfort_low = float(config.get("comfort_low_pct") or 30)
     # Note: `min_hold_s` is read inside gate_min_hold (separate function)
     # so compute_plan stays pure — pure decision in, dirty toggle gate out.
-    buffer_w = float(config.get("surplus_buffer_w") or 100)
     safety_pp = float(config.get("safety_margin_pp") or 5)
+    on_hysteresis_pp = float(config.get("on_hysteresis_pp") or 3)
 
     # Build skeleton Plan and the caller fills in plug_state_before before
     # calling — we can't read it from runtime here without coupling.
@@ -349,60 +358,63 @@ def compute_plan(
     # Fail-closed checks: any of these → OFF.
     if telemetry_age_s > MAX_TELEMETRY_AGE_S:
         return _plan("off", f"stale telemetry ({telemetry_age_s:.0f}s old)")
-    if current_soc_pct is None or solar_w is None or load_w is None:
-        return _plan("off", "missing telemetry (soc/solar/load)")
+    if current_soc_pct is None:
+        return _plan("off", "missing telemetry (soc)")
     if predicted_sunrise_soc_with_diversion is None:
         return _plan("off", "forecast unavailable")
 
-    surplus_w = solar_w - load_w
     safe_sunrise_floor = target_sunrise_soc_pct + safety_pp
+    on_threshold = safe_sunrise_floor + on_hysteresis_pp
 
-    # Hard floor: SOC drops below comfort_low → always OFF, regardless
-    # of everything else. Protects against forecaster error.
+    # Hard floor: SOC drops to comfort_low → always OFF regardless of
+    # what the forecast says. Protects against forecast error during
+    # the current tick — never drain past the immediate floor even if
+    # the simulation projects we'll recover by sunrise.
     if current_soc_pct <= comfort_low:
         return _plan("off",
                      f"SOC {current_soc_pct:.0f}% ≤ comfort_low {comfort_low:.0f}%")
 
-    # The plug's effective ON/OFF intent based on the current input vector.
-    # Notice the symmetry: ON gate is `surplus > car_load + buffer`, OFF
-    # gate is `surplus < car_load - buffer`. The dead zone in between
-    # leaves whatever state we were in.
-    want_on_by_inputs = (
-        current_soc_pct >= comfort_high
-        and surplus_w >= car_load + buffer_w
-        and predicted_sunrise_soc_with_diversion >= safe_sunrise_floor
-    )
-    want_off_by_inputs = (
-        surplus_w < car_load - buffer_w
-        or predicted_sunrise_soc_with_diversion < safe_sunrise_floor
-    )
-
-    # Pick action.
-    if want_on_by_inputs:
+    # Forecast-driven decision. The baseline forecast (computed by the
+    # caller with no AC charging injected) projects where SOC will land
+    # at sunrise if nothing else changes. We use it directly as the
+    # headroom signal:
+    #   - ON when projected sunrise is comfortably above floor (i.e.
+    #     above the safety floor + a hysteresis band). The hysteresis
+    #     prevents toggling around the boundary as the forecast
+    #     wobbles tick-to-tick.
+    #   - OFF when projected sunrise drops to or below the safety floor.
+    #     The plug's actual draw will pull SOC down faster than the
+    #     baseline projects, and each subsequent tick recomputes the
+    #     forecast from the (now lower) current SOC, so the projection
+    #     naturally regresses toward the floor and triggers OFF.
+    # This is the "forecast as truth, battery as buffer" model — the
+    # controller doesn't gate on real-time solar surplus, it gates on
+    # whether the overnight reserve is safe. Battery drains during dark
+    # hours, refills during sunny hours; the controller keeps charging
+    # as long as the simulator says we'll still hit the morning target.
+    pred = predicted_sunrise_soc_with_diversion
+    if pred >= on_threshold:
         return _plan(
             "on",
-            f"surplus {surplus_w:.0f}W ≥ car {car_load:.0f}W+buf{buffer_w:.0f} "
-            f"and predicted sunrise {predicted_sunrise_soc_with_diversion:.0f}% "
-            f"≥ target {target_sunrise_soc_pct:.0f}%+margin{safety_pp:.0f}",
+            f"predicted sunrise {pred:.1f}% ≥ target {target_sunrise_soc_pct:.0f}%"
+            f"+margin{safety_pp:.0f}+hyst{on_hysteresis_pp:.0f} = {on_threshold:.0f}%; "
+            f"battery has headroom to divert",
         )
-    if want_off_by_inputs:
-        # Why are we turning off / staying off?
-        if surplus_w < car_load - buffer_w:
-            why = (f"surplus {surplus_w:.0f}W < car {car_load:.0f}W-buf"
-                   f"{buffer_w:.0f}; net draining battery")
-        else:
-            why = (f"predicted sunrise {predicted_sunrise_soc_with_diversion:.0f}% "
-                   f"< target {target_sunrise_soc_pct:.0f}%+margin{safety_pp:.0f}; "
-                   f"diversion would risk overnight floor")
-        return _plan("off", why)
+    if pred < safe_sunrise_floor:
+        return _plan(
+            "off",
+            f"predicted sunrise {pred:.1f}% < target {target_sunrise_soc_pct:.0f}%"
+            f"+margin{safety_pp:.0f} = {safe_sunrise_floor:.0f}%; diversion would "
+            f"risk overnight floor",
+        )
 
-    # Dead zone: keep whatever state we were in. Caller decides the
-    # "skip" vs explicit echo based on plug_state_before (we don't
-    # know it here without tighter coupling).
+    # In the hysteresis band — keep current state. (gate_min_hold
+    # downgrades to "skip" when already in the requested state.)
     return _plan(
         "skip",
-        f"in hysteresis dead zone (surplus {surplus_w:.0f}W vs car "
-        f"{car_load:.0f}W±buf{buffer_w:.0f}); maintaining current plug state",
+        f"in hysteresis band: predicted sunrise {pred:.1f}% in "
+        f"[{safe_sunrise_floor:.0f}%, {on_threshold:.0f}%); holding "
+        f"current plug state",
     )
 
 
