@@ -346,6 +346,15 @@ def compute_plan(
     mode = str(config.get("mode") or "off").lower()
     car_load = float(config.get("car_load_w") or 1400)
     comfort_low = float(config.get("comfort_low_pct") or 30)
+    # comfort_high: minimum SOC to START a new charge session. Asymmetric
+    # with comfort_low so the controller doesn't immediately resume
+    # charging right after the hard floor catches it (which would put
+    # us at the edge of the floor whenever any forecast wobble fires).
+    # Once ON, the OFF gate is comfort_low (NOT comfort_high) — so
+    # in the band between [comfort_low, comfort_high], an already-ON
+    # session keeps going, but an already-OFF state holds off until
+    # SOC recovers past comfort_high.
+    comfort_high = float(config.get("comfort_high_pct") or 50)
     # Note: `min_hold_s` is read inside gate_min_hold (separate function)
     # so compute_plan stays pure — pure decision in, dirty toggle gate out.
     safety_pp = float(config.get("safety_margin_pp") or 5)
@@ -406,32 +415,28 @@ def compute_plan(
         return _plan("off",
                      f"SOC {current_soc_pct:.0f}% ≤ comfort_low {comfort_low:.0f}%")
 
-    # Forecast-driven decision. The baseline forecast (computed by the
-    # caller with no AC charging injected) projects where SOC will land
-    # at sunrise if nothing else changes. We use it directly as the
-    # headroom signal:
+    # Forecast-driven decision, gated by asymmetric SOC bands:
+    #   - START (OFF → ON) requires SOC >= comfort_high.  Without this,
+    #     immediately after the hard floor (comfort_low) catches a runaway
+    #     drain, the controller would resume at SOC ≈ comfort_low + ε,
+    #     putting the battery at the edge of the floor on every tick.
+    #     Requiring SOC to recover to comfort_high before re-engaging
+    #     gives the battery a meaningful buffer between "controller
+    #     wakes back up" and "controller's last-resort hard stop."
+    #   - CONTINUE (already ON) only needs forecast OK; the hard floor
+    #     is the stopper.  So in the band [comfort_low, comfort_high]:
+    #       - if currently ON → keep going (skip = hold state)
+    #       - if currently OFF → wait for SOC to climb past comfort_high
+    #     gate_min_hold (which sees plug_state_before) resolves the
+    #     skip into the correct hold.
+    #
+    # Forecast gate (within the SOC bands):
     #   - ON when projected sunrise is comfortably above floor (i.e.
-    #     above the safety floor + a hysteresis band). The hysteresis
+    #     above the safety floor + a hysteresis band). Hysteresis
     #     prevents toggling around the boundary as the forecast
     #     wobbles tick-to-tick.
     #   - OFF when projected sunrise drops to or below the safety floor.
-    #     The plug's actual draw will pull SOC down faster than the
-    #     baseline projects, and each subsequent tick recomputes the
-    #     forecast from the (now lower) current SOC, so the projection
-    #     naturally regresses toward the floor and triggers OFF.
-    # This is the "forecast as truth, battery as buffer" model — the
-    # controller doesn't gate on real-time solar surplus, it gates on
-    # whether the overnight reserve is safe. Battery drains during dark
-    # hours, refills during sunny hours; the controller keeps charging
-    # as long as the simulator says we'll still hit the morning target.
     pred = predicted_sunrise_soc_with_diversion
-    if pred >= on_threshold:
-        return _plan(
-            "on",
-            f"predicted sunrise {pred:.1f}% ≥ target {target_sunrise_soc_pct:.0f}%"
-            f"+margin{safety_pp:.0f}+hyst{on_hysteresis_pp:.0f} = {on_threshold:.0f}%; "
-            f"battery has headroom to divert",
-        )
     if pred < safe_sunrise_floor:
         return _plan(
             "off",
@@ -439,12 +444,27 @@ def compute_plan(
             f"+margin{safety_pp:.0f} = {safe_sunrise_floor:.0f}%; diversion would "
             f"risk overnight floor",
         )
-
-    # In the hysteresis band — keep current state. (gate_min_hold
-    # downgrades to "skip" when already in the requested state.)
+    if pred >= on_threshold and current_soc_pct >= comfort_high:
+        return _plan(
+            "on",
+            f"predicted sunrise {pred:.1f}% ≥ target {target_sunrise_soc_pct:.0f}%"
+            f"+margin{safety_pp:.0f}+hyst{on_hysteresis_pp:.0f} = {on_threshold:.0f}% "
+            f"AND SOC {current_soc_pct:.0f}% ≥ comfort_high {comfort_high:.0f}%; "
+            f"battery has headroom to divert",
+        )
+    # In one of the hold bands — skip means "maintain current plug state."
+    # gate_min_hold downgrades a flip to skip when the desired state
+    # already matches the current plug state, so this is the safe default.
+    if current_soc_pct < comfort_high:
+        return _plan(
+            "skip",
+            f"SOC {current_soc_pct:.0f}% < comfort_high {comfort_high:.0f}%; "
+            f"waiting for battery to recover before starting a new session "
+            f"(if already on, holding through forecast band)",
+        )
     return _plan(
         "skip",
-        f"in hysteresis band: predicted sunrise {pred:.1f}% in "
+        f"in forecast hysteresis band: predicted sunrise {pred:.1f}% in "
         f"[{safe_sunrise_floor:.0f}%, {on_threshold:.0f}%); holding "
         f"current plug state",
     )

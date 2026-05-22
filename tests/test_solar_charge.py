@@ -54,25 +54,39 @@ def test_test_mode_computes_decisions_same_as_active():
     assert plan.mode == "test"
 
 
-# ---------- ON gate: forecast above target + margin + hysteresis ----------
-def test_on_when_forecast_has_ample_headroom():
-    """User's typical case: predicted sunrise 80% vs target 20% + 5
-    margin + 3 hysteresis = 28% threshold. 80% >> 28% → ON."""
+# ---------- ON gate: forecast headroom AND SOC above comfort_high ----------
+def test_on_when_forecast_and_soc_both_pass():
+    """Both gates pass: predicted sunrise 80% vs 28% threshold,
+    AND SOC 80% >= comfort_high 70%. ON."""
     plan = _eval(current_soc=80, predicted_sunrise=80.0, target=20.0)
     assert plan.action == "on"
     assert "headroom" in plan.reason
 
 
 def test_on_when_forecast_just_above_threshold():
-    """ON gate fires at >= target + margin + hysteresis = 28%.
-    Forecast 28.5% → ON."""
+    """Forecast 28.5% → ON, with SOC well above comfort_high."""
     plan = _eval(current_soc=80, predicted_sunrise=28.5, target=20.0)
     assert plan.action == "on"
 
 
-def test_skip_in_hysteresis_band():
-    """Between OFF (25%) and ON (28%) thresholds with target=20.
-    Predicted 26% → hold current state (skip)."""
+def test_skip_when_soc_below_comfort_high_even_if_forecast_great():
+    """Critical regression test: after the hard floor catches a
+    runaway drain, the controller MUST NOT immediately resume just
+    because the forecast looks great. Requires SOC to climb back to
+    comfort_high (50% per user config / 70% default) before starting
+    a new session."""
+    plan = _eval(current_soc=22, predicted_sunrise=80.0, target=20.0)
+    # SOC 22% > comfort_low 30% (default)? No, default is 30, so 22<=30 → off via hard floor.
+    # Test with a config that allows SOC=22 above comfort_low.
+    plan = _eval(current_soc=40, predicted_sunrise=80.0, target=20.0,
+                 cfg=_cfg(comfort_low_pct=20, comfort_high_pct=50))
+    assert plan.action == "skip"
+    assert "comfort_high" in plan.reason
+
+
+def test_skip_in_forecast_hysteresis_band():
+    """Between OFF (25%) and ON (28%) forecast thresholds.
+    Predicted 26% with SOC above comfort_high → forecast band skip."""
     plan = _eval(current_soc=80, predicted_sunrise=26.0, target=20.0)
     assert plan.action == "skip"
     assert "hysteresis band" in plan.reason
