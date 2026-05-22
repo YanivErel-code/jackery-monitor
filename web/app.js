@@ -3255,6 +3255,7 @@ async function loadSolarCharge() {
     document.getElementById('solar-comfort-low').value = cfg.comfort_low_pct ?? 30;
     document.getElementById('solar-min-hold').value = cfg.min_hold_s ?? 30;
     document.getElementById('solar-surplus-buffer').value = cfg.surplus_buffer_w ?? 100;
+    document.getElementById('solar-on-hysteresis').value = cfg.on_hysteresis_pp ?? 3;
     document.getElementById('solar-safety-margin').value = cfg.safety_margin_pp ?? 5;
 
     // Runtime panel: plug state + today's diverted kWh + last decision reason.
@@ -3327,6 +3328,7 @@ document.getElementById('solar-form')?.addEventListener('submit', async (e) => {
     comfort_low_pct: parseInt(document.getElementById('solar-comfort-low').value, 10) || 30,
     min_hold_s: parseInt(document.getElementById('solar-min-hold').value, 10) || 30,
     surplus_buffer_w: parseInt(document.getElementById('solar-surplus-buffer').value, 10) || 100,
+    on_hysteresis_pp: parseInt(document.getElementById('solar-on-hysteresis').value, 10) || 3,
     safety_margin_pp: parseInt(document.getElementById('solar-safety-margin').value, 10) || 5,
   };
   try {
