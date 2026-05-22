@@ -95,6 +95,98 @@ class AutomationTablesMixin:
             for r in rows
         ]
 
+    # ---------- solar-charge decisions ----------
+    # Mirror of the smart-charge methods for the inverse controller.
+    # Kept separate (rather than a flag column on the same table) so
+    # query patterns stay simple and the two histories can be paged
+    # independently in the UI.
+    def record_solar_charge_decision(self, device_sn: str, plan: dict,
+                                     executed: bool) -> None:
+        """Persist one tick's worth of solar-charge decision. Idempotent
+        on (decided_at, device_sn)."""
+        if not device_sn or not plan:
+            return
+        row = (
+            int(plan.get("decided_at") or time.time()),
+            device_sn,
+            str(plan.get("mode") or "off")[:16],
+            str(plan.get("action") or "skip")[:16],
+            1 if executed else 0,
+            (plan.get("reason") or "")[:256],
+            plan.get("current_soc_pct"),
+            plan.get("predicted_sunrise_soc_pct"),
+            plan.get("baseline_predicted_sunrise_soc_pct"),
+            plan.get("target_sunrise_soc_pct"),
+            plan.get("solar_w"),
+            plan.get("load_w"),
+            plan.get("surplus_w"),
+            plan.get("car_load_w"),
+            (plan.get("plug_state_before") or "")[:8],
+        )
+        with self._conn() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO solar_charge_decisions
+                       (decided_at, device_sn, mode, action, executed, reason,
+                        current_soc_pct, predicted_sunrise_soc_pct,
+                        baseline_predicted_sunrise_soc_pct,
+                        target_sunrise_soc_pct,
+                        solar_w, load_w, surplus_w, car_load_w,
+                        plug_state_before)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                row,
+            )
+
+    def list_solar_charge_decisions(self, device_sn: str | None = None,
+                                    limit: int = 100,
+                                    since_ts: int = 0) -> list[dict]:
+        """Most-recent-first solar-charge decision log."""
+        params: list = []
+        sql = """SELECT decided_at, device_sn, mode, action, executed, reason,
+                        current_soc_pct, predicted_sunrise_soc_pct,
+                        baseline_predicted_sunrise_soc_pct,
+                        target_sunrise_soc_pct,
+                        solar_w, load_w, surplus_w, car_load_w,
+                        plug_state_before
+                 FROM solar_charge_decisions"""
+        clauses = []
+        if device_sn:
+            clauses.append("device_sn = ?")
+            params.append(device_sn)
+        if since_ts:
+            clauses.append("decided_at >= ?")
+            params.append(int(since_ts))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY decided_at DESC LIMIT ?"
+        params.append(int(limit))
+        with self._conn() as c:
+            rows = c.execute(sql, params).fetchall()
+        return [
+            {"decided_at": r[0], "device_sn": r[1], "mode": r[2],
+             "action": r[3], "executed": bool(r[4]), "reason": r[5],
+             "current_soc_pct": r[6], "predicted_sunrise_soc_pct": r[7],
+             "baseline_predicted_sunrise_soc_pct": r[8],
+             "target_sunrise_soc_pct": r[9],
+             "solar_w": r[10], "load_w": r[11], "surplus_w": r[12],
+             "car_load_w": r[13], "plug_state_before": r[14]}
+            for r in rows
+        ]
+
+    def solar_charge_diverted_wh_today(self, device_sn: str,
+                                       start_of_day_ts: int) -> float:
+        """Sum solar_charge_diverted_wh from the samples table for the
+        current local day. Used by the dashboard to show today's diverted
+        energy alongside today's solar production."""
+        if not device_sn:
+            return 0.0
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT COALESCE(SUM(solar_charge_diverted_wh), 0) "
+                "FROM samples WHERE device_sn = ? AND bucket >= ?",
+                (device_sn, int(start_of_day_ts)),
+            ).fetchone()
+        return float(r[0] if r else 0.0)
+
     def smart_charge_analytics(self, device_sn: str,
                                days: int = 14,
                                main_capacity_wh: int | None = None,

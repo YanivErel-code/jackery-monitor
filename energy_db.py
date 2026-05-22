@@ -138,6 +138,40 @@ CREATE TABLE IF NOT EXISTS smart_charge_decisions (
 CREATE INDEX IF NOT EXISTS idx_sc_decided ON smart_charge_decisions(decided_at);
 CREATE INDEX IF NOT EXISTS idx_sc_sunrise ON smart_charge_decisions(sunrise_ts);
 
+-- Mirror of smart_charge_decisions for the *solar* charge controller, which
+-- toggles a separate Kasa plug to divert surplus solar to an EV/heater/etc.
+-- Decision direction is inverted: smart_charge brings grid power IN to the
+-- Jackery during cheap TOU windows; solar_charge sends Jackery power OUT to
+-- a downstream load when solar is producing more than home demand and the
+-- overnight reserve is safe. Schema is intentionally similar so the
+-- dashboard analytics can reuse the same query patterns.
+CREATE TABLE IF NOT EXISTS solar_charge_decisions (
+    decided_at    INTEGER NOT NULL,
+    device_sn     TEXT NOT NULL,
+    mode          TEXT NOT NULL,       -- off | test | active
+    action        TEXT NOT NULL,       -- on | off | skip
+    executed      INTEGER NOT NULL DEFAULT 0,
+    reason        TEXT,
+    current_soc_pct                       REAL,
+    -- Predicted sunrise SOC assuming the controller keeps making the same
+    -- ON/OFF decisions going forward (the "with diversion" projection).
+    predicted_sunrise_soc_pct             REAL,
+    -- Counterfactual: predicted sunrise SOC if we leave the plug OFF for
+    -- the rest of the day. Used by compute_plan to decide whether
+    -- diverting is safe (must satisfy baseline >= target + safety margin).
+    baseline_predicted_sunrise_soc_pct    REAL,
+    target_sunrise_soc_pct                REAL,
+    -- Instantaneous values that drove THIS decision (snapshotted for audit
+    -- so a "why did it turn off at 3:47pm" review needs no time-machine).
+    solar_w                               REAL,
+    load_w                                REAL,
+    surplus_w                             REAL,  -- solar_w - load_w
+    car_load_w                            REAL,  -- configured assumption
+    plug_state_before                     TEXT,  -- "on" | "off"
+    PRIMARY KEY (decided_at, device_sn)
+);
+CREATE INDEX IF NOT EXISTS idx_solar_sc_decided ON solar_charge_decisions(decided_at);
+
 -- Daily denormalized summary: one row per (local-date, device) with the
 -- noteworthy moments labelled — sunset SOC + sunrise SOC, predicted vs
 -- actual. Filled progressively by the smart-charge tick: predicted values
@@ -356,6 +390,17 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 c.execute("ALTER TABLE samples ADD COLUMN ac_input_wh REAL NOT NULL DEFAULT 0")
             if "last_ac_input_w" not in existing:
                 c.execute("ALTER TABLE samples ADD COLUMN last_ac_input_w INTEGER")
+            # solar_charge_diverted_wh: portion of output_wh in this bucket
+            # that was intentionally routed to a downstream load by the
+            # solar_charge controller (EV charger, etc.). NOT subtracted
+            # from output_wh — output_wh stays raw, this is an annotation.
+            # forecaster.fit_load_profile subtracts it before fitting so
+            # the learned demand model isn't polluted by intentional
+            # diversion. Backfills with 0 on pre-existing buckets, which
+            # is correct (no diversion before this feature shipped).
+            if "solar_charge_diverted_wh" not in existing:
+                c.execute("ALTER TABLE samples ADD COLUMN "
+                          "solar_charge_diverted_wh REAL NOT NULL DEFAULT 0")
             # devices table: capacity override (added in v0.2.0+ for users with
             # extension batteries stacked on the 5000 Plus / etc.).
             existing_dev = {row[1] for row in c.execute(
@@ -421,19 +466,40 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                input_w: float, output_w: float,
                battery_pct: int | None = None,
                solar_w: float = 0.0,
-               ac_input_w: float = 0.0) -> None:
-        """Integrate (input_w, output_w, solar_w, ac_input_w) since last
-        reading for this device. ac_input_w is the AC/grid charging power
-        (the device's `acip` field), tracked separately so cost accounting
-        knows what was paid-for vs free."""
+               ac_input_w: float = 0.0,
+               solar_charge_diverted_w: float = 0.0) -> None:
+        """Integrate (input_w, output_w, solar_w, ac_input_w, diverted_w)
+        since last reading for this device.
+
+        `ac_input_w` is the AC/grid charging power (the device's `acip`
+        field), tracked separately so cost accounting knows what was
+        paid-for vs free.
+
+        `solar_charge_diverted_w` is the instantaneous draw of any
+        downstream load currently being driven by the solar_charge
+        controller (e.g. EV charger). It's a subset of `output_w`:
+        output_w already includes it, this argument annotates how much
+        of output is intentional diversion. The trapezoidal integration
+        gives the right partial-bucket fraction when the plug toggles
+        mid-bucket. forecaster.fit_load_profile subtracts the integrated
+        column before learning demand so diversion doesn't pollute the
+        load model. Pass 0 (default) when the controller is OFF or the
+        plug isn't part of the Jackery output chain."""
         if not device_sn:
             return
         prev = self._last.get(device_sn)
         self._last[device_sn] = (ts, float(input_w), float(output_w),
-                                  float(solar_w), float(ac_input_w))
+                                  float(solar_w), float(ac_input_w),
+                                  float(solar_charge_diverted_w))
         if prev is None:
             return  # need two samples to integrate
-        prev_ts, prev_in, prev_out, prev_solar, prev_ac = prev
+        # Back-compat: pre-feature ticks stored a 5-tuple. Defensively
+        # unpack as 6 with a 0 default.
+        if len(prev) == 5:
+            prev_ts, prev_in, prev_out, prev_solar, prev_ac = prev
+            prev_div = 0.0
+        else:
+            prev_ts, prev_in, prev_out, prev_solar, prev_ac, prev_div = prev
         dt = ts - prev_ts
         if dt <= 0 or dt > MAX_GAP_S:
             return
@@ -442,20 +508,24 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         out_wh = ((prev_out + output_w) / 2.0) * (dt / 3600.0)
         solar_wh = ((prev_solar + solar_w) / 2.0) * (dt / 3600.0)
         ac_wh = ((prev_ac + ac_input_w) / 2.0) * (dt / 3600.0)
+        div_wh = ((prev_div + solar_charge_diverted_w) / 2.0) * (dt / 3600.0)
         bucket = int(ts // BUCKET_S) * BUCKET_S
 
         with self._conn() as c:
             c.execute(
                 """INSERT INTO samples
                        (device_sn, bucket, input_wh, output_wh, solar_wh, ac_input_wh,
+                        solar_charge_diverted_wh,
                         last_input_w, last_output_w, last_solar_w, last_ac_input_w,
                         last_battery_pct, sample_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                    ON CONFLICT(device_sn, bucket) DO UPDATE SET
                      input_wh = input_wh + excluded.input_wh,
                      output_wh = output_wh + excluded.output_wh,
                      solar_wh = solar_wh + excluded.solar_wh,
                      ac_input_wh = ac_input_wh + excluded.ac_input_wh,
+                     solar_charge_diverted_wh = solar_charge_diverted_wh
+                                                + excluded.solar_charge_diverted_wh,
                      last_input_w = excluded.last_input_w,
                      last_output_w = excluded.last_output_w,
                      last_solar_w = excluded.last_solar_w,
@@ -464,7 +534,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                                                  last_battery_pct),
                      sample_count = sample_count + 1
                 """,
-                (device_sn, bucket, in_wh, out_wh, solar_wh, ac_wh,
+                (device_sn, bucket, in_wh, out_wh, solar_wh, ac_wh, div_wh,
                  int(input_w), int(output_w), int(solar_w), int(ac_input_w),
                  battery_pct),
             )
@@ -1180,6 +1250,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                            SUM(output_wh) AS out_wh,
                            SUM(solar_wh) AS sol_wh,
                            SUM(ac_input_wh) AS ac_wh,
+                           SUM(solar_charge_diverted_wh) AS div_wh,
                            AVG(last_input_w) AS in_w,
                            AVG(last_output_w) AS out_w,
                            AVG(last_solar_w) AS sol_w,
@@ -1211,11 +1282,19 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 ts_sorted = sorted(packs_by_ts)
         out = []
         for r in rows:
+            # solar_charge_diverted_wh is GROSS output that was intentionally
+            # routed to a downstream load (EV charger) by the solar-charge
+            # controller. Exposed as a separate field so the forecaster's
+            # load-profile fit can subtract it (real demand only) while
+            # other fits (drain model, charge efficiency) keep using the
+            # gross output_wh — they need total load, not net of diversion,
+            # for their slope math to work out.
             row = {"ts": r[0], "input_wh": r[1] or 0, "output_wh": r[2] or 0,
                    "solar_wh": r[3] or 0, "ac_input_wh": r[4] or 0,
-                   "input_w": int(r[5] or 0), "output_w": int(r[6] or 0),
-                   "solar_w": int(r[7] or 0), "ac_input_w": int(r[8] or 0),
-                   "battery_pct": int(r[9]) if r[9] is not None else None}
+                   "solar_charge_diverted_wh": r[5] or 0,
+                   "input_w": int(r[6] or 0), "output_w": int(r[7] or 0),
+                   "solar_w": int(r[8] or 0), "ac_input_w": int(r[9] or 0),
+                   "battery_pct": int(r[10]) if r[10] is not None else None}
             if ts_sorted and row["battery_pct"] is not None:
                 row["system_soc"] = _capacity_weighted_soc(
                     float(row["battery_pct"]), int(row["ts"]),

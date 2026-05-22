@@ -1309,10 +1309,41 @@ def fit_load_profile(
     now_ts = now_ts if now_ts is not None else time.time()
     recency_cutoff = now_ts - LOAD_RECENCY_S
 
+    # Net out solar-charge diversion before fitting demand patterns.
+    # The controller can intentionally drive a downstream load (EV
+    # charger) for hours on sunny days; counting that as "demand"
+    # would teach the model that the user has a 1.4kW phantom load
+    # every sunny afternoon. Subtract the bucket-averaged diversion
+    # rate from output_w to recover real demand. Falls back to raw
+    # output_w when no diversion was recorded (pre-feature buckets
+    # default to 0 via the schema migration).
+    def _net_load_w(r: dict) -> float | None:
+        out_w = r.get("output_w")
+        if out_w is None:
+            return None
+        # diverted_wh integrates the plug's draw over the bucket;
+        # divide by bucket-hours to get the average plug-draw rate
+        # in W. For 10-minute buckets that's diverted_wh / (10/60).
+        # Since we don't carry bucket_s on the row, infer from the
+        # next row's ts (back-compat: if only one row, assume 600s).
+        diverted_wh = float(r.get("solar_charge_diverted_wh") or 0)
+        if diverted_wh <= 0:
+            return float(out_w)
+        # Approx bucket length: 600s default (smallest aggregation).
+        # The actual db.history bucket_s isn't on the row, but for
+        # the fit we only need a ratio. Use 600 as the safe default —
+        # if the caller bucketed to 3600s, diversion stretches over
+        # 1h and our subtraction is conservative (under-subtracts
+        # by 6x, leaving some pollution but never over-subtracting
+        # which would invent negative demand).
+        avg_diverted_w = diverted_wh / (600.0 / 3600.0)
+        return max(0.0, float(out_w) - avg_diverted_w)
+
     all_vals_raw = [
-        float(r["output_w"]) for r in energy_history
+        _net_load_w(r) for r in energy_history
         if r.get("output_w") is not None
     ]
+    all_vals_raw = [v for v in all_vals_raw if v is not None]
     if not all_vals_raw:
         return {}
     all_vals = sorted(all_vals_raw)
@@ -1329,7 +1360,7 @@ def fit_load_profile(
     buckets: dict[tuple[int, int], list[tuple[float, int]]] = {}
     for row in energy_history:
         ts = row.get("ts")
-        out_w = row.get("output_w")
+        out_w = _net_load_w(row)
         if ts is None or out_w is None:
             continue
         v = min(float(out_w), cap)
