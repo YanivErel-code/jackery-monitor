@@ -729,10 +729,26 @@
     </section>
 
     <!-- ============== AUTOMATION TAB ============== -->
-    <section id="tab-automation" class="tab-panel" hidden>
+    <section id="tab-automation" class="tab-panel" hidden data-active-group="controllers">
+
+      <!-- Automation sub-tabs: group related cards so the tab isn't a
+           giant 9-card scroll. Each card carries a data-automation-group
+           attribute; the JS handler hides sections that don't match the
+           selected group. Layout: Controllers gets a 2-col grid on wide
+           screens (via CSS), everything else stacks. -->
+      <nav class="automation-subtabs" role="tablist" aria-label="Automation sections">
+        <button class="automation-subtab on" type="button" role="tab"
+                data-automation-tab="controllers">Controllers</button>
+        <button class="automation-subtab" type="button" role="tab"
+                data-automation-tab="devices">Devices</button>
+        <button class="automation-subtab" type="button" role="tab"
+                data-automation-tab="rules">Rules</button>
+        <button class="automation-subtab" type="button" role="tab"
+                data-automation-tab="insights">Insights</button>
+      </nav>
 
       <!-- KASA ACCOUNT section: cloud credentials for newer SMART devices -->
-      <section class="card">
+      <section class="card" data-automation-group="devices">
         <div class="card-header">
           <h2>Kasa account</h2>
           <span id="kasa-creds-status" class="hint">—</span>
@@ -760,7 +776,7 @@
       </section>
 
       <!-- AI INSIGHTS: daily Claude review of forecast/control performance -->
-      <section class="card device-card">
+      <section class="card device-card" data-automation-group="insights">
         <div class="card-header">
           <h2>AI insights <span id="alg-pending-badge" class="alg-badge" hidden>0</span></h2>
           <span id="alg-status" class="hint" hidden></span>
@@ -779,7 +795,7 @@
       </section>
 
       <!-- SMART CHARGE: per-device, decides when to enable a grid plug -->
-      <section class="card device-card">
+      <section class="card device-card" data-automation-group="controllers">
         <div class="card-header">
           <h2>Smart charge <small id="sc-device-label" class="hint" style="font-weight:400; margin-left:6px"></small></h2>
           <span id="sc-status" class="hint" hidden></span>
@@ -892,7 +908,7 @@
            BEFORE the projected sunrise SOC would dip into the safety
            buffer — house load stays prioritized via the forecast's
            learned load profile and the safety margin. -->
-      <section class="card device-card">
+      <section class="card device-card" data-automation-group="controllers">
         <div class="card-header">
           <h2>Excess diversion <small id="solar-device-label" class="hint" style="font-weight:400; margin-left:6px"></small></h2>
           <span id="solar-status" class="hint" hidden></span>
@@ -1000,7 +1016,8 @@
       </section>
 
       <!-- DEVICES section: add, test, save Kasa plugs separately from rules. -->
-      <section class="card">
+      <!-- (Kasa devices list — Devices sub-tab) -->
+      <section class="card" data-automation-group="devices">
         <div class="card-header">
           <h2>Kasa devices</h2>
           <span id="auto-status" class="hint" hidden></span>
@@ -1020,7 +1037,7 @@
       </section>
 
       <!-- Device editor: shown inline when adding/editing a Kasa device. -->
-      <section id="kasa-editor" class="card" hidden>
+      <section id="kasa-editor" class="card" data-automation-group="devices" hidden>
         <div class="card-header">
           <h2 id="kasa-editor-title">Add Kasa device</h2>
           <button id="kasa-editor-close" class="btn btn-ghost" type="button">Cancel</button>
@@ -1053,7 +1070,7 @@
       </section>
 
       <!-- RULES section: now a pure list — pick from saved devices, no IP entry. -->
-      <section class="card">
+      <section class="card" data-automation-group="rules">
         <div class="card-header">
           <h2>Battery-driven rules</h2>
           <span class="hint">Edge-triggered · fires once per crossing</span>
@@ -1075,7 +1092,7 @@
       </section>
 
       <!-- Rule editor: shown inline. Now picks from saved devices. -->
-      <section id="auto-editor" class="card" hidden>
+      <section id="auto-editor" class="card" data-automation-group="rules" hidden>
         <div class="card-header">
           <h2 id="auto-editor-title">New rule</h2>
           <button id="auto-editor-close" class="btn btn-ghost" type="button">Cancel</button>
@@ -1142,7 +1159,7 @@
       <!-- Rule history: shown inline when the user clicks "History" on a
            rule row. Lists every persisted firing for the rule plus paired
            ON/OFF intervals on the rule's Kasa plug, with total ON-time. -->
-      <section id="auto-history" class="card" hidden>
+      <section id="auto-history" class="card" data-automation-group="rules" hidden>
         <div class="card-header">
           <h2 id="auto-history-title">Rule history</h2>
           <div style="display:flex; gap:8px; align-items:center">
