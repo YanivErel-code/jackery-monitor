@@ -933,13 +933,13 @@
               <input id="solar-car-load-w" type="number" min="50" max="7000" step="50" value="1400" /> <small>W</small>
             </div>
           </div>
-          <div class="settings-row" style="display:none">
+          <div class="settings-row">
             <label class="settings-label" for="solar-comfort-high">
-              <span class="settings-label-text">Comfort-high SOC (legacy, ignored)</span>
-              <span class="settings-hint">No longer used by the forecast-driven gate — kept hidden for back-compat with persisted configs. The controller now decides solely on the projected sunrise SOC vs target+margin.</span>
+              <span class="settings-label-text">Restart SOC (minimum to start)</span>
+              <span class="settings-hint">Minimum battery SOC required to <em>start</em> a new diversion session. Once running, the session continues until the forecast gate or the hard floor below stops it — but a stopped session won't auto-resume until SOC recovers to this level. Prevents resuming at the edge of the hard floor after a forecast-overshoot. 50% is conservative; raise it for more buffer.</span>
             </label>
             <div class="settings-control">
-              <input id="solar-comfort-high" type="number" min="30" max="99" step="1" value="70" /> <small>%</small>
+              <input id="solar-comfort-high" type="number" min="30" max="99" step="1" value="50" /> <small>%</small>
             </div>
           </div>
           <div class="settings-row">
