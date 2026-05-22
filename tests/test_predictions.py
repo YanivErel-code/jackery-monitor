@@ -170,17 +170,25 @@ def test_backfill_daily_actuals_fills_missing_actuals(db):
     sunset_ts = now - 3 * 3600       # 3h ago, in the past
     sunrise_ts = now - 1 * 3600      # 1h ago, in the past
     future_sunrise_ts = now + 6 * 3600  # 6h ahead, still future
+    # Use dates relative to `now` so the test doesn't age out of the
+    # 14-day backfill window. Earlier this used hardcoded "2026-05-04"
+    # which silently fell off the cutoff once enough days had passed,
+    # making the test fail in CI but not locally if you happened to run
+    # it within ~2 weeks of the date the code was written.
+    import datetime as _dt
+    date1 = _dt.datetime.utcfromtimestamp(now - 86400).strftime("%Y-%m-%d")  # yesterday
+    date2 = _dt.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d")          # today
 
     # Row 1: sunset + sunrise both in the past; both actuals null at first.
     db.upsert_daily_summary(
-        device_sn=sn, local_date="2026-05-04",
+        device_sn=sn, local_date=date1,
         sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
         predicted_sunset_soc_pct=80.0,
         predicted_sunrise_soc_pct=45.0,
     )
     # Row 2: sunset past, sunrise still in the future.
     db.upsert_daily_summary(
-        device_sn=sn, local_date="2026-05-05",
+        device_sn=sn, local_date=date2,
         sunset_ts=sunset_ts, sunrise_ts=future_sunrise_ts,
         predicted_sunset_soc_pct=78.0,
         predicted_sunrise_soc_pct=42.0,
@@ -195,11 +203,11 @@ def test_backfill_daily_actuals_fills_missing_actuals(db):
     assert filled == 3
 
     rows = {r["date"]: r for r in db.list_daily_summary(sn, days=14)}
-    assert rows["2026-05-04"]["actual_sunset_soc_pct"] == 76.0
-    assert rows["2026-05-04"]["actual_sunrise_soc_pct"] == 49.0
-    assert rows["2026-05-05"]["actual_sunset_soc_pct"] == 76.0
+    assert rows[date1]["actual_sunset_soc_pct"] == 76.0
+    assert rows[date1]["actual_sunrise_soc_pct"] == 49.0
+    assert rows[date2]["actual_sunset_soc_pct"] == 76.0
     # Future sunrise still null — not yet eligible for back-fill.
-    assert rows["2026-05-05"]["actual_sunrise_soc_pct"] is None
+    assert rows[date2]["actual_sunrise_soc_pct"] is None
 
     # Idempotent: rerun does nothing because actuals are already filled.
     again = db.backfill_daily_actuals(sn, days=14)
