@@ -3939,6 +3939,20 @@ function applyStatus(s) {
   if (s.energy?.today) {
     $('today-out-kwh').textContent = fmtKwh(s.energy.today.output_wh);
     $('today-in-kwh').textContent  = fmtKwh(s.energy.today.input_wh);
+    // Excess-diversion line: show only when there's something to show.
+    // Threshold at 50Wh so a brief sensor blip doesn't surface the row;
+    // a real diversion session is kWh-scale.
+    const divWh = s.energy.today.solar_charge_diverted_wh || 0;
+    const divRow = $('today-diverted-row');
+    const divEl = $('today-diverted-kwh');
+    if (divRow && divEl) {
+      if (divWh >= 50) {
+        divRow.hidden = false;
+        divEl.textContent = fmtKwh(divWh);
+      } else {
+        divRow.hidden = true;
+      }
+    }
   }
   // Cost savings row in the TODAY card. Server only populates this when
   // the cost plan loads cleanly; keep the row hidden otherwise.

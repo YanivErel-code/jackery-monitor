@@ -239,6 +239,15 @@
           <div class="kpi-sub">
             <span id="today-in-kwh">—</span><small>kWh charged</small>
           </div>
+          <!-- Diverted to a downstream load by the Excess Diversion
+               controller. Hidden when zero so the card stays clean for
+               users who don't have the feature enabled. The diverted
+               energy IS already included in today-out-kwh above (the
+               Jackery delivered it via its AC output); this line
+               annotates what fraction was intentional surplus dump. -->
+          <div class="kpi-sub" id="today-diverted-row" hidden>
+            <span id="today-diverted-kwh">—</span><small>kWh diverted to excess load</small>
+          </div>
           <div class="savings-row" id="today-savings-row" hidden>
             <span class="sav-pos" title="Solar production valued at retail rate"><span id="today-solar-savings">—</span></span>
             <span class="sav-sep">·</span>
