@@ -385,6 +385,7 @@ function switchTab(name, opts = {}) {
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
+    restoreAutomationSubtab();
     loadAutomation(); loadSmartCharge(); loadSolarCharge(); loadAlgorithmAdvisor(); resumeAdvisorPollIfRunning();
     // User is now looking — clear the "new insights" dot.
     setAutomationDot(false);
@@ -452,6 +453,38 @@ function restoreSettingsSubtab() {
 
 document.querySelectorAll('.settings-subtab').forEach((btn) => {
   btn.addEventListener('click', () => selectSettingsSubtab(btn.dataset.settingsTab));
+});
+
+// ---- Automation sub-tabs: same pattern as Settings ------------------------
+// Four groups (controllers / devices / rules / insights). Each card under
+// #tab-automation carries data-automation-group; this handler hides the
+// non-matching ones and tracks the choice in localStorage so a reload
+// or tab switch lands the user back where they left off.
+const AUTOMATION_SUBTAB_KEY = 'jackery-automation-subtab';
+const AUTOMATION_SUBTABS = ['controllers', 'devices', 'rules', 'insights'];
+
+function selectAutomationSubtab(name) {
+  if (!AUTOMATION_SUBTABS.includes(name)) name = 'controllers';
+  const pane = document.getElementById('tab-automation');
+  if (pane) pane.dataset.activeGroup = name;
+  document.querySelectorAll('.automation-subtab').forEach((btn) => {
+    btn.classList.toggle('on', btn.dataset.automationTab === name);
+    btn.setAttribute('aria-selected', btn.dataset.automationTab === name ? 'true' : 'false');
+  });
+  document.querySelectorAll('#tab-automation [data-automation-group]').forEach((el) => {
+    el.toggleAttribute('hidden', el.dataset.automationGroup !== name);
+  });
+  try { localStorage.setItem(AUTOMATION_SUBTAB_KEY, name); } catch (_) {}
+}
+
+function restoreAutomationSubtab() {
+  let saved = null;
+  try { saved = localStorage.getItem(AUTOMATION_SUBTAB_KEY); } catch (_) {}
+  selectAutomationSubtab(saved || 'controllers');
+}
+
+document.querySelectorAll('.automation-subtab').forEach((btn) => {
+  btn.addEventListener('click', () => selectAutomationSubtab(btn.dataset.automationTab));
 });
 
 // ---- Settings cards: collapsible with persisted state ---------------------
