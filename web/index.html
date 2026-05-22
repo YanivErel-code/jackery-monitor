@@ -885,17 +885,20 @@
         </div>
       </section>
 
-      <!-- SOLAR CHARGE: per-device, inverse of smart-charge.
-           Diverts surplus solar to a downstream Kasa-controlled load
-           (typical: an EV charger) when battery is comfortable AND
-           solar exceeds home demand AND overnight reserve survives. -->
+      <!-- EXCESS DIVERSION: per-device, inverse of smart-charge.
+           Dumps surplus battery energy into a downstream Kasa-controlled
+           load (typical: an EV charger) when the forecast says the
+           overnight reserve will still be met. Stops the car charge
+           BEFORE the projected sunrise SOC would dip into the safety
+           buffer — house load stays prioritized via the forecast's
+           learned load profile and the safety margin. -->
       <section class="card device-card">
         <div class="card-header">
-          <h2>Solar charge <small id="solar-device-label" class="hint" style="font-weight:400; margin-left:6px"></small></h2>
+          <h2>Excess diversion <small id="solar-device-label" class="hint" style="font-weight:400; margin-left:6px"></small></h2>
           <span id="solar-status" class="hint" hidden></span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
-          Mirror of smart-charge in the opposite direction. When battery SOC is comfortably charged AND solar is generating more than home demand, this turns on a Kasa plug to dump the surplus into a downstream load (e.g. an L1 EV charger plugged into the Jackery's AC output). Toggles OFF when surplus collapses, SOC drops to the comfort-low floor, or the forecast says we'd miss the morning target.
+          When the forecast says you have headroom — predicted sunrise SOC comfortably above your target — this dumps the excess energy into a downstream load (e.g. an EV charger plugged into the Jackery's AC output) instead of letting it curtail at 100%. House load always wins: the controller stops the diversion the moment the projection would put sunrise at the safety floor, leaving the battery preserved for your normal usage. Solar is the typical source that creates the surplus, but the gate is forecast-driven — it'll divert overnight too if the next day's predicted solar refills the buffer.
           <strong>Test mode logs decisions but doesn't toggle the plug</strong> — use it for a few days to verify the controller's calls before flipping to active.
         </p>
         <form id="solar-form">
@@ -915,7 +918,7 @@
           <div class="settings-row">
             <label class="settings-label" for="solar-kasa-host">
               <span class="settings-label-text">Kasa plug</span>
-              <span class="settings-hint">The plug that switches the downstream load. Must be physically plugged into the Jackery's AC output so the diversion routes through the battery.</span>
+              <span class="settings-hint">The plug that switches the downstream load. Must be physically plugged into the Jackery's AC output so the diversion is fed by the battery.</span>
             </label>
             <div class="settings-control">
               <select id="solar-kasa-host"><option value="">— none —</option></select>
@@ -924,16 +927,16 @@
           <div class="settings-row">
             <label class="settings-label" for="solar-car-load-w">
               <span class="settings-label-text">Load draw (W)</span>
-              <span class="settings-hint">Watts the downstream device pulls when the plug is ON. L1 EV charger typical = 1400W (12A @ 120V). The controller uses this to decide when there's "enough surplus" (surplus must exceed this + buffer).</span>
+              <span class="settings-hint">Watts the downstream device pulls when the plug is ON. L1 EV charger typical = 1400W (12A @ 120V). Used by the forecast math to project how much SOC the diversion will consume by sunrise.</span>
             </label>
             <div class="settings-control">
               <input id="solar-car-load-w" type="number" min="50" max="7000" step="50" value="1400" /> <small>W</small>
             </div>
           </div>
-          <div class="settings-row">
+          <div class="settings-row" style="display:none">
             <label class="settings-label" for="solar-comfort-high">
-              <span class="settings-label-text">Comfort-high SOC</span>
-              <span class="settings-hint">Only consider turning ON when battery SOC is at or above this. 70% gives the battery headroom and ensures we're diverting real surplus, not robbing reserve.</span>
+              <span class="settings-label-text">Comfort-high SOC (legacy, ignored)</span>
+              <span class="settings-hint">No longer used by the forecast-driven gate — kept hidden for back-compat with persisted configs. The controller now decides solely on the projected sunrise SOC vs target+margin.</span>
             </label>
             <div class="settings-control">
               <input id="solar-comfort-high" type="number" min="30" max="99" step="1" value="70" /> <small>%</small>
@@ -941,35 +944,44 @@
           </div>
           <div class="settings-row">
             <label class="settings-label" for="solar-comfort-low">
-              <span class="settings-label-text">Comfort-low SOC (hard floor)</span>
-              <span class="settings-hint">Always turn OFF if SOC drops to this level, regardless of everything else. Protects the battery from over-discharge if the forecast is wrong.</span>
+              <span class="settings-label-text">Hard SOC floor</span>
+              <span class="settings-hint">Always turn OFF if current SOC drops to this level, regardless of what the forecast says. Last-resort guard against forecast error — keep this comfortably above zero.</span>
             </label>
             <div class="settings-control">
-              <input id="solar-comfort-low" type="number" min="5" max="90" step="1" value="30" /> <small>%</small>
+              <input id="solar-comfort-low" type="number" min="5" max="90" step="1" value="20" /> <small>%</small>
             </div>
           </div>
           <div class="settings-row">
             <label class="settings-label" for="solar-min-hold">
               <span class="settings-label-text">Min hold between toggles</span>
-              <span class="settings-hint">EVSE handshake takes 5-30s; rapid cycling stresses the charger and the car's BMS. 30s default is tight but workable; larger values reduce chatter during partly cloudy weather.</span>
+              <span class="settings-hint">EVSE handshake takes 5-30s; rapid cycling stresses the charger and the car's BMS. 30s default is tight but workable; larger values reduce chatter when the forecast wobbles around the threshold.</span>
             </label>
             <div class="settings-control">
               <input id="solar-min-hold" type="number" min="10" max="3600" step="10" value="30" /> <small>s</small>
             </div>
           </div>
-          <div class="settings-row">
+          <div class="settings-row" style="display:none">
             <label class="settings-label" for="solar-surplus-buffer">
-              <span class="settings-label-text">Surplus buffer (hysteresis)</span>
-              <span class="settings-hint">Dead zone around the load draw to absorb sensor noise. ON when surplus ≥ load + buffer; OFF when surplus &lt; load - buffer. Bigger = less chatter, slower reaction to clouds.</span>
+              <span class="settings-label-text">Surplus buffer (legacy, ignored)</span>
+              <span class="settings-hint">No longer used. The new forecast-driven gate uses on_hysteresis_pp (below) instead.</span>
             </label>
             <div class="settings-control">
               <input id="solar-surplus-buffer" type="number" min="0" max="1000" step="10" value="100" /> <small>W</small>
             </div>
           </div>
           <div class="settings-row">
+            <label class="settings-label" for="solar-on-hysteresis">
+              <span class="settings-label-text">ON hysteresis (pp)</span>
+              <span class="settings-hint">Gap between OFF and ON thresholds: OFF fires at target+margin, ON requires target+margin+hysteresis. Prevents toggle chatter as the forecast wobbles tick-to-tick. 3pp default is comfortable.</span>
+            </label>
+            <div class="settings-control">
+              <input id="solar-on-hysteresis" type="number" min="0" max="30" step="1" value="3" /> <small>pp</small>
+            </div>
+          </div>
+          <div class="settings-row">
             <label class="settings-label" for="solar-safety-margin">
               <span class="settings-label-text">Sunrise safety margin</span>
-              <span class="settings-hint">Predicted sunrise SOC must remain at least this many pp above the smart-charge target before diverting. Bigger = more pessimistic about forecast error.</span>
+              <span class="settings-hint">Predicted sunrise SOC must remain at least this many pp above your target before/while diverting. The controller stops the diversion when the projection drops to target+margin, leaving this buffer above the actual target to absorb forecast error. Bigger = safer / more conservative.</span>
             </label>
             <div class="settings-control">
               <input id="solar-safety-margin" type="number" min="0" max="50" step="1" value="5" /> <small>pp</small>
