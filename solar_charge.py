@@ -322,7 +322,8 @@ def compute_plan(
     car_load = float(config.get("car_load_w") or 1400)
     comfort_high = float(config.get("comfort_high_pct") or 70)
     comfort_low = float(config.get("comfort_low_pct") or 30)
-    min_hold = float(config.get("min_hold_s") or 30)
+    # Note: `min_hold_s` is read inside gate_min_hold (separate function)
+    # so compute_plan stays pure — pure decision in, dirty toggle gate out.
     buffer_w = float(config.get("surplus_buffer_w") or 100)
     safety_pp = float(config.get("safety_margin_pp") or 5)
 
