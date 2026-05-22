@@ -51,6 +51,7 @@ import kasa_creds
 import location as device_location
 import settings as user_settings
 import smart_charge
+import solar_charge
 import weather_client
 from automation import AutomationEngine, AutomationError
 from device_client import (
@@ -417,6 +418,12 @@ async def poll_loop() -> None:
                     )
                 for sn, t, name, model_code in samples_to_write:
                     state.energy.upsert_device(sn, name, model_code, None)
+                    # If the solar-charge controller has the plug ON for
+                    # this device, annotate the sample with the configured
+                    # car_load_w so the integrator credits the right
+                    # fraction-of-bucket to diversion. fit_load_profile
+                    # subtracts this before learning demand patterns.
+                    diverted_w = _solar_charge_current_diverted_w(sn)
                     state.energy.record(
                         sn, ts,
                         float(t.get("input_power_w") or 0),
@@ -424,6 +431,7 @@ async def poll_loop() -> None:
                         int(t.get("battery_percent") or 0),
                         solar_w=float(t.get("solar_input_w") or 0),
                         ac_input_w=float(t.get("ac_input_w") or 0),
+                        solar_charge_diverted_w=diverted_w,
                     )
 
                 # Hydrate the live chart from the energy DB on the first
@@ -1673,6 +1681,198 @@ async def smart_charge_loop():
         await asyncio.sleep(bo.next_sleep(5 * 60))
 
 
+# ---------- Solar-charge (inverse controller: Jackery → car) ----------
+def _solar_charge_current_diverted_w(device_sn: str | None) -> float:
+    """Return the instantaneous solar-charge diversion rate (W) for this
+    device, based on the controller's cached plug state. Called from the
+    server's per-poll sample-write so the integrator credits diverted
+    energy to the right bucket. Returns 0 when the controller is off,
+    mode != active, or the plug isn't currently ON."""
+    if not device_sn:
+        return 0.0
+    try:
+        cfg = solar_charge.get_config(device_sn)
+        if cfg.get("mode") != "active":
+            return 0.0
+        rs = solar_charge.get_runtime(device_sn)
+        if not rs.plug_is_on:
+            return 0.0
+        return float(cfg.get("car_load_w") or 0)
+    except Exception:
+        return 0.0
+
+
+def _solar_charge_target_sunrise_soc(device_sn: str | None) -> float:
+    """Reuse smart_charge's target as the solar-charge floor (per the
+    user's spec: 'use the same target the user already set'). Falls
+    back to 40% if smart_charge has no config yet."""
+    try:
+        sc = smart_charge.get_config(device_sn) if device_sn else {}
+        return float(sc.get("target_sunrise_soc_pct") or 40)
+    except Exception:
+        return 40.0
+
+
+async def _solar_charge_evaluate(record: bool = True,
+                                 device_sn: str | None = None):
+    """Pull inputs the solar-charge controller needs, compute a Plan, and
+    (in active mode) toggle the configured Kasa plug. Mirrors
+    _smart_charge_evaluate but with inverted intent: divert surplus
+    instead of import grid power."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return None
+    cfg = solar_charge.get_config(device_sn)
+    if cfg["mode"] == "off":
+        return None
+
+    # Pull current telemetry + forecast. Mirror the smart_charge path
+    # closely so both controllers see the same view of reality.
+    active_sn = state.device.device_sn if state.device else None
+    if device_sn == active_sn:
+        model_code = getattr(state.device, "model_code", None)
+        status = state.last_status or {}
+        main_soc = float(status.get("battery_percent") or 50)
+        solar_w = float(status.get("solar_input_w") or 0)
+        load_w = float(status.get("output_power_w") or 0)
+        # last_status is refreshed on every successful poll; if we have
+        # one, treat telemetry as fresh enough for the controller. The
+        # actual cloud-stall timeout is enforced via cloud_ts elsewhere.
+        telemetry_age_s = max(0.0,
+                              time.time() - float(state.cloud_ts or time.time()))
+    else:
+        cloud = state.last_cloud_meta or {}
+        devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
+        entry = devs_t.get(device_sn) or {}
+        t = entry.get("telemetry") or {}
+        main_soc = float(t.get("battery_percent") or 50)
+        solar_w = float(t.get("solar_input_w") or 0)
+        load_w = float(t.get("output_power_w") or 0)
+        # Per-device timestamps aren't tracked separately; use the
+        # active-device cloud_ts as proxy.
+        telemetry_age_s = max(0.0,
+                              time.time() - float(state.cloud_ts or time.time()))
+        devs = (cloud.get("devices") or []) if isinstance(cloud, dict) else []
+        meta = next((d for d in devs if str(d.get("device_sn")) == device_sn), {})
+        model_code = meta.get("model_code")
+
+    # Forecast for the safety check. Reuse the same build_forecast call
+    # path as smart_charge; the load profile is already cleaned of past
+    # diversion via the fit_load_profile fix.
+    loc = device_location.get() or {}
+    predicted_sunrise = None
+    if loc.get("latitude"):
+        try:
+            weather = await weather_client.fetch_irradiance(
+                loc["latitude"], loc["longitude"])
+            if not weather.get("error"):
+                starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
+                main_wh, pack_wh = _capacity_hints(device_sn)
+                energy_hist = state.energy.history(
+                    device_sn, hours=14 * 24, bucket_s=3600,
+                    main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+                )
+                capacity = _total_capacity_wh(device_sn, model_code)
+                fcast = forecaster.build_forecast(
+                    energy_history=energy_hist,
+                    weather_hourly=weather["hourly"],
+                    starting_soc_pct=starting_soc,
+                    capacity_wh=capacity,
+                    ac_charge_floor_pct=None,  # baseline: no AC charging
+                )
+                if fcast.get("ready"):
+                    # Use predicted sunrise SOC as both with-divert and
+                    # baseline (see solar_charge.py docs for the v1
+                    # approximation rationale).
+                    fc_hours = fcast.get("forecast") or []
+                    if fc_hours:
+                        # Find the last bucket in the next ~24h: that's
+                        # roughly tomorrow morning's projected SOC.
+                        future = [h for h in fc_hours
+                                  if (h.get("ts") or 0) >= time.time()]
+                        if future:
+                            # Walk forward looking for the first sunrise
+                            # transition. Same helper smart_charge uses.
+                            sunrise_ts = smart_charge._find_next_sunrise(future)
+                            if sunrise_ts:
+                                predicted_sunrise = smart_charge._predicted_sunrise_soc(
+                                    future, sunrise_ts)
+        except Exception as e:
+            log.debug("solar_charge forecast fetch failed: %s", e)
+
+    target = _solar_charge_target_sunrise_soc(device_sn)
+    rs = solar_charge.get_runtime(device_sn)
+    plug_state_before = "on" if rs.plug_is_on else "off"
+
+    plan = solar_charge.compute_plan(
+        config=cfg,
+        current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
+        solar_w=solar_w, load_w=load_w,
+        telemetry_age_s=telemetry_age_s,
+        target_sunrise_soc_pct=target,
+        predicted_sunrise_soc_with_diversion=predicted_sunrise,
+        predicted_sunrise_soc_baseline=predicted_sunrise,
+    )
+    plan = solar_charge.gate_min_hold(
+        plan,
+        last_toggle_ts=rs.last_toggle_ts,
+        min_hold_s=cfg.get("min_hold_s") or 30,
+        plug_state_before=plug_state_before,
+    )
+
+    executed = False
+    if record and cfg["mode"] == "active" and plan.action in ("on", "off"):
+        host = cfg.get("kasa_device_host")
+        if host:
+            try:
+                await kasa_client.set_state(host, plan.action == "on")
+                executed = True
+                solar_charge._update_runtime(
+                    device_sn,
+                    plug_is_on=(plan.action == "on"),
+                    last_toggle_ts=time.time(),
+                )
+            except Exception as e:
+                log.warning("solar_charge Kasa toggle failed: %s", e)
+
+    if record:
+        try:
+            state.energy.record_solar_charge_decision(
+                device_sn=device_sn,
+                plan=plan.to_dict(),
+                executed=executed,
+            )
+        except Exception as e:
+            log.warning("solar_charge: failed to record decision: %s", e)
+    return plan
+
+
+async def solar_charge_loop():
+    """Periodic tick — every 30 seconds, evaluate solar-charge for every
+    device with a per-device config saved (mode != off). Tighter than
+    smart_charge's 5-minute cadence because solar conditions change fast
+    (cloud cover) and the controller needs to react before draining the
+    battery."""
+    bo = _backoff.LoopBackoff(max_s=10 * 60)
+    while True:
+        try:
+            configs = solar_charge.get_all_configs()
+            for sn, cfg in configs.items():
+                if cfg.get("mode") == "off":
+                    continue
+                try:
+                    await _solar_charge_evaluate(record=True, device_sn=sn)
+                except Exception as e:
+                    log.warning("solar_charge tick failed for %s: %s", sn, e)
+            bo.reset()
+        except Exception as e:
+            bo.record_failure()
+            log.warning("solar_charge loop iteration failed: %s", e)
+        # 30s base cadence; bo backs off only on hard failures.
+        await asyncio.sleep(bo.next_sleep(30))
+
+
 # Per-device probe cadence after a failure: 5 min, 10, 20, 30, 30, ...
 # Capped so we don't drift to every-few-hours and miss a recovery for
 # an hour after the plug comes back. After a success, resets to 5 min.
@@ -1814,6 +2014,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(connect_device())
     state.poll_task = asyncio.create_task(poll_loop())
     state.smart_charge_task = asyncio.create_task(smart_charge_loop())
+    state.solar_charge_task = asyncio.create_task(solar_charge_loop())
     # Daily AI-insights auto-run is intentionally NOT started here.
     # The /api/algorithm/review_now endpoint still works for on-demand
     # reviews; this commit just removes the background daily trigger.
@@ -1836,6 +2037,8 @@ async def lifespan(app: FastAPI):
         state.poll_task.cancel()
     if getattr(state, "smart_charge_task", None):
         state.smart_charge_task.cancel()
+    if getattr(state, "solar_charge_task", None):
+        state.solar_charge_task.cancel()
     if getattr(state, "kasa_reconciler_task", None):
         state.kasa_reconciler_task.cancel()
     if getattr(state, "forecast_recorder_task", None):
@@ -2720,6 +2923,97 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
         "config": saved,
         "conflicting_rules": _smart_charge_rule_conflicts(saved, device_sn),
     }
+
+
+@app.get("/api/solar_charge/config")
+def api_solar_charge_get(device_sn: str | None = None):
+    """Per-device solar-charge config. Defaults to the active device
+    when device_sn is omitted. Kasa devices are fetched separately via
+    /api/kasa/saved so the UI can let the user pick which plug controls
+    the downstream load."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    cfg = solar_charge.get_config(device_sn)
+    return {"device_sn": device_sn, "config": cfg}
+
+
+@app.post("/api/solar_charge/config")
+async def api_solar_charge_set(req: Request, device_sn: str | None = None):
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(status_code=400,
+                            detail="no active device — pass device_sn explicitly")
+    saved = solar_charge.set_config(body if isinstance(body, dict) else {},
+                                    device_sn=device_sn)
+    return {"device_sn": device_sn, "config": saved}
+
+
+@app.get("/api/solar_charge/status")
+def api_solar_charge_status(device_sn: str | None = None):
+    """Current solar-charge state for the dashboard card. Includes
+    today's diverted energy and the last few decision-history rows."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "config": solar_charge.DEFAULT_CONFIG,
+                "runtime": None, "diverted_wh_today": 0,
+                "recent_decisions": []}
+    cfg = solar_charge.get_config(device_sn)
+    rs = solar_charge.get_runtime(device_sn)
+    # Today's diverted energy: sum from start-of-local-day.
+    tz_off = device_location.get_tz_offset() or 0
+    now = int(time.time())
+    local_now = now + tz_off
+    local_midnight = local_now - (local_now % 86400)
+    sod_ts = local_midnight - tz_off
+    diverted_today = state.energy.solar_charge_diverted_wh_today(
+        device_sn, sod_ts)
+    recent = state.energy.list_solar_charge_decisions(
+        device_sn=device_sn, limit=20)
+    return {
+        "device_sn": device_sn,
+        "config": cfg,
+        "runtime": {
+            "plug_is_on": rs.plug_is_on,
+            "last_toggle_ts": rs.last_toggle_ts,
+        },
+        "diverted_wh_today": diverted_today,
+        "recent_decisions": recent,
+    }
+
+
+@app.get("/api/solar_charge/history")
+def api_solar_charge_history(device_sn: str | None = None,
+                              limit: int = 200,
+                              hours: int = 24):
+    """Decision-log history for the solar-charge controller. Defaults to
+    the last 24h, capped at `limit` rows."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "decisions": []}
+    since_ts = int(time.time()) - max(1, int(hours)) * 3600
+    rows = state.energy.list_solar_charge_decisions(
+        device_sn=device_sn, limit=max(1, min(1000, int(limit))),
+        since_ts=since_ts)
+    return {"device_sn": device_sn, "decisions": rows}
+
+
+@app.post("/api/solar_charge/evaluate_now")
+async def api_solar_charge_evaluate_now(device_sn: str | None = None):
+    """Manually trigger one solar-charge evaluation (no Kasa toggle —
+    record=False). Returns the resulting Plan so the user can see what
+    the controller would decide right now."""
+    plan = await _solar_charge_evaluate(record=False, device_sn=device_sn)
+    if plan is None:
+        return {"device_sn": device_sn, "plan": None,
+                "reason": "controller off or no active device"}
+    return {"device_sn": device_sn, "plan": plan.to_dict()}
 
 
 @app.post("/api/automation/rules/disable")
