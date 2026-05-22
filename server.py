@@ -1768,7 +1768,8 @@ async def _solar_charge_evaluate(record: bool = True,
     # path as smart_charge; the load profile is already cleaned of past
     # diversion via the fit_load_profile fix.
     loc = device_location.get() or {}
-    predicted_sunrise = None
+    predicted_sunrise_baseline = None
+    predicted_sunrise_with_div = None
     if loc.get("latitude"):
         try:
             weather = await weather_client.fetch_irradiance(
@@ -1781,30 +1782,45 @@ async def _solar_charge_evaluate(record: bool = True,
                     main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
                 )
                 capacity = _total_capacity_wh(device_sn, model_code)
-                fcast = forecaster.build_forecast(
+
+                # Two forecasts: BASELINE (controller off, natural drain)
+                # vs WITH-DIVERSION (controller keeps the car charging until
+                # SOC would drop below comfort_low). The controller's gate
+                # uses with-diversion — that's the projection that actually
+                # tells us "if I keep running, will I make sunrise?" The
+                # baseline stays for display/audit.
+                fcast_baseline = forecaster.build_forecast(
                     energy_history=energy_hist,
                     weather_hourly=weather["hourly"],
                     starting_soc_pct=starting_soc,
                     capacity_wh=capacity,
-                    ac_charge_floor_pct=None,  # baseline: no AC charging
+                    ac_charge_floor_pct=None,
                 )
-                if fcast.get("ready"):
-                    # Use predicted sunrise SOC as both with-divert and
-                    # baseline (see solar_charge.py docs for the v1
-                    # approximation rationale).
+                fcast_with_div = forecaster.build_forecast(
+                    energy_history=energy_hist,
+                    weather_hourly=weather["hourly"],
+                    starting_soc_pct=starting_soc,
+                    capacity_wh=capacity,
+                    ac_charge_floor_pct=None,
+                    extra_load_w=float(cfg.get("car_load_w") or 1400),
+                    extra_load_floor_pct=float(cfg.get("comfort_low_pct") or 20),
+                )
+
+                def _sunrise_from(fcast):
+                    if not fcast.get("ready"):
+                        return None
                     fc_hours = fcast.get("forecast") or []
-                    if fc_hours:
-                        # Find the last bucket in the next ~24h: that's
-                        # roughly tomorrow morning's projected SOC.
-                        future = [h for h in fc_hours
-                                  if (h.get("ts") or 0) >= time.time()]
-                        if future:
-                            # Walk forward looking for the first sunrise
-                            # transition. Same helper smart_charge uses.
-                            sunrise_ts = smart_charge._find_next_sunrise(future)
-                            if sunrise_ts:
-                                predicted_sunrise = smart_charge._predicted_sunrise_soc(
-                                    future, sunrise_ts)
+                    future = [h for h in fc_hours
+                              if (h.get("ts") or 0) >= time.time()]
+                    if not future:
+                        return None
+                    sunrise_ts = smart_charge._find_next_sunrise(future)
+                    if not sunrise_ts:
+                        return None
+                    return smart_charge._predicted_sunrise_soc(future, sunrise_ts)
+
+                predicted_sunrise_baseline = _sunrise_from(fcast_baseline)
+                predicted_sunrise_with_div = _sunrise_from(fcast_with_div)
         except Exception as e:
             log.debug("solar_charge forecast fetch failed: %s", e)
 
@@ -1819,8 +1835,8 @@ async def _solar_charge_evaluate(record: bool = True,
         ac_input_w=ac_input_w,
         telemetry_age_s=telemetry_age_s,
         target_sunrise_soc_pct=target,
-        predicted_sunrise_soc_with_diversion=predicted_sunrise,
-        predicted_sunrise_soc_baseline=predicted_sunrise,
+        predicted_sunrise_soc_with_diversion=predicted_sunrise_with_div,
+        predicted_sunrise_soc_baseline=predicted_sunrise_baseline,
     )
     plan = solar_charge.gate_min_hold(
         plan,

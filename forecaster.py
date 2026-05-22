@@ -1474,6 +1474,8 @@ def simulate_soc(
     *,
     ac_charge_floor_pct: float | None = None,
     charge_efficiency: float | None = None,
+    extra_load_w: float | None = None,
+    extra_load_floor_pct: float | None = None,
 ) -> list[dict[str, Any]]:
     """Walk SOC forward through the forecast window.
 
@@ -1491,19 +1493,49 @@ def simulate_soc(
     was being grid-charged overnight by the smart-charge automation,
     and produced a persistent negative bias at short lead times. Pass
     None to keep the original "solar-only" behavior.
+
+    `extra_load_w`: add this many watts to the natural load profile on
+    every future hour where the controller is projected to be on. Used
+    by solar_charge's "with-diversion" projection so the controller's
+    gate sees what would *actually* happen if the car charger kept
+    running, not just the natural baseline. Pair with
+    `extra_load_floor_pct`: at any hour, if simulated SOC would drop
+    below that floor, the extra load is dropped (the controller's hard
+    SOC floor would have caught it). That way the diversion gets
+    credited only for the hours the controller would actually keep it
+    on. Pass `extra_load_w=None` for the legacy "natural drain only"
+    behavior.
     """
     eff = CHARGE_EFFICIENCY if charge_efficiency is None else float(charge_efficiency)
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
     floor = (max(0.0, min(100.0, float(ac_charge_floor_pct)))
              if ac_charge_floor_pct is not None else None)
+    extra_w = float(extra_load_w or 0)
+    extra_floor = (float(extra_load_floor_pct)
+                   if extra_load_floor_pct is not None else None)
     out: list[dict[str, Any]] = []
     for h in forecast_hours:
         solar = float(h.get("solar_w") or 0)
         load = float(h.get("load_w") or 0)
+        # Per-hour decision on whether the diversion controller would be
+        # ON for this hour: only if applying it wouldn't drop SOC below
+        # extra_load_floor_pct. Mirrors the controller's hard-floor
+        # protection so the simulator naturally tells us how many hours
+        # of diversion fit before the controller would have to stop.
+        applied_extra = 0.0
+        if extra_w > 0:
+            tentative_load = load + extra_w
+            tentative_net = solar - tentative_load
+            if tentative_net > 0:
+                tentative_net *= eff
+            tentative_soc = soc + tentative_net / capacity_wh * 100.0
+            tentative_soc = max(0.0, min(100.0, tentative_soc))
+            if extra_floor is None or tentative_soc >= extra_floor:
+                applied_extra = extra_w
         # 1 hour interval, simple Euler step. Apply CHARGE_EFFICIENCY when
         # net inflow positive — discharge already accounts for inverter
         # losses on the load side.
-        net = solar - load
+        net = solar - (load + applied_extra)
         if net > 0:
             net *= eff
         soc += net / capacity_wh * 100.0
@@ -1514,7 +1546,8 @@ def simulate_soc(
         # but cleanly addresses the "predicted 0% / actual 92%" cliff.
         if floor is not None and soc < floor:
             soc = floor
-        out.append({**h, "predicted_soc": round(soc, 1)})
+        out.append({**h, "predicted_soc": round(soc, 1),
+                    "extra_load_w_applied": round(applied_extra, 1)})
     return out
 
 
@@ -1586,6 +1619,8 @@ def build_forecast(
     horizon_hours: int = 120,
     *,
     ac_charge_floor_pct: float | None = None,
+    extra_load_w: float | None = None,
+    extra_load_floor_pct: float | None = None,
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
@@ -1694,6 +1729,8 @@ def build_forecast(
         starting_soc_pct, capacity_wh, forecast_hours,
         ac_charge_floor_pct=ac_charge_floor_pct,
         charge_efficiency=charge_eff,
+        extra_load_w=extra_load_w,
+        extra_load_floor_pct=extra_load_floor_pct,
     )
     return {
         "ready": True,
