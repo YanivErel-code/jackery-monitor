@@ -1846,23 +1846,96 @@ async def _solar_charge_evaluate(record: bool = True,
 
     rs = solar_charge.get_runtime(device_sn)
     plug_state_before = "on" if rs.plug_is_on else "off"
+    now_ts = time.time()
 
-    plan = solar_charge.compute_plan(
-        config=cfg,
-        current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
-        solar_w=solar_w, load_w=load_w,
-        ac_input_w=ac_input_w,
-        telemetry_age_s=telemetry_age_s,
-        target_sunrise_soc_pct=target,
-        predicted_sunrise_soc_with_diversion=predicted_sunrise_with_div,
-        predicted_sunrise_soc_baseline=predicted_sunrise_baseline,
-    )
-    plan = solar_charge.gate_min_hold(
-        plan,
-        last_toggle_ts=rs.last_toggle_ts,
-        min_hold_s=cfg.get("min_hold_s") or 30,
-        plug_state_before=plug_state_before,
-    )
+    # --- No-load detection ---
+    # Two gates:
+    #  (1) If we're in a no-load cooldown after a recent failed verify,
+    #      short-circuit to a "skip" plan so the controller doesn't
+    #      immediately retry. The cooldown is configurable and exists
+    #      so we don't slam the plug ON every tick when nothing's
+    #      plugged in.
+    #  (2) If a verification window is open (plug toggled ON recently
+    #      and the deadline has passed), check whether output_w actually
+    #      jumped enough to indicate a real load. If not, force OFF +
+    #      set cooldown. Verification is bypassed when the controller
+    #      already wants OFF for other reasons (no point checking load
+    #      if we're stopping anyway).
+    no_load_override_plan = None
+    if rs.no_load_cooldown_until and rs.no_load_cooldown_until > now_ts:
+        remaining = rs.no_load_cooldown_until - now_ts
+        no_load_override_plan = solar_charge.Plan(
+            action="skip", reason=(
+                f"no-load cooldown active ({remaining:.0f}s remaining); "
+                "nothing was drawing when the plug was last on — will retry"
+            ),
+            mode=cfg["mode"], decided_at=int(now_ts),
+            current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
+            target_sunrise_soc_pct=target, solar_w=solar_w, load_w=load_w,
+            car_load_w=cfg.get("car_load_w"),
+            plug_state_before=plug_state_before,
+        )
+
+    if no_load_override_plan is None:
+        plan = solar_charge.compute_plan(
+            config=cfg,
+            current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
+            solar_w=solar_w, load_w=load_w,
+            ac_input_w=ac_input_w,
+            telemetry_age_s=telemetry_age_s,
+            target_sunrise_soc_pct=target,
+            predicted_sunrise_soc_with_diversion=predicted_sunrise_with_div,
+            predicted_sunrise_soc_baseline=predicted_sunrise_baseline,
+        )
+        plan = solar_charge.gate_min_hold(
+            plan,
+            last_toggle_ts=rs.last_toggle_ts,
+            min_hold_s=cfg.get("min_hold_s") or 30,
+            plug_state_before=plug_state_before,
+        )
+    else:
+        plan = no_load_override_plan
+
+    # Verification check: if we recently toggled ON and the verify
+    # deadline has passed, look at output_w now vs pre-toggle. If the
+    # load didn't show up, force OFF + cooldown. This wins over the
+    # plan we just computed.
+    if (rs.plug_is_on
+            and rs.verify_pre_output_w is not None
+            and rs.verify_deadline_ts
+            and now_ts >= rs.verify_deadline_ts):
+        threshold = float(cfg.get("no_load_threshold_w") or 500)
+        delta = load_w - rs.verify_pre_output_w
+        if delta < threshold:
+            cooldown_s = float(cfg.get("no_load_cooldown_s") or 900)
+            log.info("solar_charge: no-load detected for %s (delta %.0fW < "
+                     "%.0fW threshold) — forcing OFF, cooldown %.0fs",
+                     device_sn, delta, threshold, cooldown_s)
+            plan = solar_charge.Plan(
+                action="off", reason=(
+                    f"no-load detected: output_w jumped only {delta:.0f}W "
+                    f"after plug ON (threshold {threshold:.0f}W); "
+                    f"cooling down {cooldown_s:.0f}s before retry"
+                ),
+                mode=cfg["mode"], decided_at=int(now_ts),
+                current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
+                target_sunrise_soc_pct=target, solar_w=solar_w, load_w=load_w,
+                car_load_w=cfg.get("car_load_w"),
+                plug_state_before=plug_state_before,
+            )
+            solar_charge._update_runtime(
+                device_sn,
+                verify_pre_output_w=None,
+                verify_deadline_ts=0.0,
+                no_load_cooldown_until=now_ts + cooldown_s,
+            )
+        else:
+            # Verification passed — clear the verify state.
+            solar_charge._update_runtime(
+                device_sn,
+                verify_pre_output_w=None,
+                verify_deadline_ts=0.0,
+            )
 
     executed = False
     if record and cfg["mode"] == "active" and plan.action in ("on", "off"):
@@ -1871,11 +1944,31 @@ async def _solar_charge_evaluate(record: bool = True,
             try:
                 await kasa_client.set_state(host, plan.action == "on")
                 executed = True
-                solar_charge._update_runtime(
-                    device_sn,
-                    plug_is_on=(plan.action == "on"),
-                    last_toggle_ts=time.time(),
-                )
+                # If we just turned ON, schedule a no-load verification
+                # check. Snapshot the CURRENT load_w as the pre-toggle
+                # baseline; one cloud-poll cycle later, the next tick
+                # will compare and detect a missing car.
+                if plan.action == "on":
+                    verify_delay = float(cfg.get("no_load_verify_delay_s") or 90)
+                    solar_charge._update_runtime(
+                        device_sn,
+                        plug_is_on=True,
+                        last_toggle_ts=now_ts,
+                        verify_pre_output_w=load_w,
+                        verify_deadline_ts=now_ts + verify_delay,
+                    )
+                else:
+                    # Voluntary OFF — clear any pending verify state and
+                    # the no-load cooldown (we're stopping for a different
+                    # reason, no need to wait before next attempt).
+                    solar_charge._update_runtime(
+                        device_sn,
+                        plug_is_on=False,
+                        last_toggle_ts=now_ts,
+                        verify_pre_output_w=None,
+                        verify_deadline_ts=0.0,
+                        no_load_cooldown_until=0.0,
+                    )
             except Exception as e:
                 log.warning("solar_charge Kasa toggle failed: %s", e)
 

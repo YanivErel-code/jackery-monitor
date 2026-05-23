@@ -104,6 +104,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # target to keep the plug ON. Bigger = safer (more pessimistic
     # about forecast error), smaller = more aggressive diversion.
     "safety_margin_pp": 5,
+    # No-load detection: after the controller toggles the plug ON, wait
+    # `no_load_verify_delay_s` then compare Jackery output_power_w to
+    # the pre-toggle baseline. If delta < `no_load_threshold_w`, we
+    # conclude nothing is plugged into the outlet (car not connected,
+    # EVSE idle, etc.) — force the plug OFF and set a cooldown of
+    # `no_load_cooldown_s` before trying again. Defaults: verify after
+    # 90s (one cloud-poll cycle), threshold 500W (>~third of car_load
+    # = unambiguously something drawing), cooldown 15min.
+    "no_load_verify_delay_s": 90,
+    "no_load_threshold_w": 500,
+    "no_load_cooldown_s": 900,
 }
 
 # When solar drops below this for SUNSET_SUSTAIN_S seconds, treat it as
@@ -163,6 +174,9 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     _int_in_range("surplus_buffer_w", 0, 1000)
     _int_in_range("on_hysteresis_pp", 0, 30)
     _int_in_range("safety_margin_pp", 0, 50)
+    _int_in_range("no_load_verify_delay_s", 30, 600)
+    _int_in_range("no_load_threshold_w", 50, 5000)
+    _int_in_range("no_load_cooldown_s", 60, 7200)
     # Defensive sanity: comfort_low must be < comfort_high or we'd
     # paint an unreachable state (plug can never be on).
     if out["comfort_low_pct"] >= out["comfort_high_pct"]:
@@ -247,6 +261,17 @@ class RuntimeState:
     plug_is_on: bool = False
     last_toggle_ts: float = 0.0
     sunset_since: float = 0.0  # 0 = solar above threshold
+    # No-load verification state. When the controller toggles the plug
+    # ON, it records the Jackery's output_power_w right before the
+    # toggle (verify_pre_output_w) and the timestamp by which the load
+    # MUST have shown up to count as "car is plugged in"
+    # (verify_deadline_ts). After the deadline, the next tick checks
+    # whether current output_w jumped enough vs the pre-toggle value;
+    # if not, the plug is forced OFF and no_load_cooldown_until is set
+    # to prevent immediate re-trigger. Cleared on voluntary OFF.
+    verify_pre_output_w: float | None = None
+    verify_deadline_ts: float = 0.0
+    no_load_cooldown_until: float = 0.0
 
 
 _runtime: dict[str, RuntimeState] = {}
