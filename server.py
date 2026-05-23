@@ -1767,6 +1767,12 @@ async def _solar_charge_evaluate(record: bool = True,
     # Forecast for the safety check. Reuse the same build_forecast call
     # path as smart_charge; the load profile is already cleaned of past
     # diversion via the fit_load_profile fix.
+    # Target sunrise SOC (from smart_charge config — single source of
+    # truth for both controllers). Read it up front because the
+    # with-diversion forecast uses target+margin+hysteresis as the
+    # simulator's "stop diverting" floor.
+    target = _solar_charge_target_sunrise_soc(device_sn)
+
     loc = device_location.get() or {}
     predicted_sunrise_baseline = None
     predicted_sunrise_with_div = None
@@ -1796,6 +1802,20 @@ async def _solar_charge_evaluate(record: bool = True,
                     capacity_wh=capacity,
                     ac_charge_floor_pct=None,
                 )
+                # The simulator's floor for distributing extra_load_w is
+                # the controller's ON threshold (target + margin +
+                # hysteresis). That's the level the simulator's
+                # optimal-distribution trough should land at — leaving
+                # just enough headroom that the controller's gate sees
+                # the prediction as still safe. Using comfort_low here
+                # would let the sim drive the trough to the hard floor,
+                # which is too aggressive and creates the "predict 14%
+                # therefore stay OFF forever" trap.
+                sim_floor = (
+                    float(target)
+                    + float(cfg.get("safety_margin_pp") or 5)
+                    + float(cfg.get("on_hysteresis_pp") or 3)
+                )
                 fcast_with_div = forecaster.build_forecast(
                     energy_history=energy_hist,
                     weather_hourly=weather["hourly"],
@@ -1803,7 +1823,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     capacity_wh=capacity,
                     ac_charge_floor_pct=None,
                     extra_load_w=float(cfg.get("car_load_w") or 1400),
-                    extra_load_floor_pct=float(cfg.get("comfort_low_pct") or 20),
+                    extra_load_floor_pct=sim_floor,
                 )
 
                 def _sunrise_from(fcast):
@@ -1824,7 +1844,6 @@ async def _solar_charge_evaluate(record: bool = True,
         except Exception as e:
             log.debug("solar_charge forecast fetch failed: %s", e)
 
-    target = _solar_charge_target_sunrise_soc(device_sn)
     rs = solar_charge.get_runtime(device_sn)
     plug_state_before = "on" if rs.plug_is_on else "off"
 

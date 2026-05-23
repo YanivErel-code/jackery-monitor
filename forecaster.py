@@ -1513,25 +1513,61 @@ def simulate_soc(
     extra_w = float(extra_load_w or 0)
     extra_floor = (float(extra_load_floor_pct)
                    if extra_load_floor_pct is not None else None)
-    out: list[dict[str, Any]] = []
+    n = len(forecast_hours)
+
+    # Pre-compute the natural-only (no-extra) cumulative SOC trajectory
+    # so the per-hour extra-load decision below knows what the WORST
+    # natural-only SOC would be over the remaining window. Without this
+    # look-ahead, the simulator's greedy "apply if next-hour SOC is OK"
+    # check kept the controller running until the IMMEDIATE next hour
+    # would breach the floor — then natural drain continued unchecked
+    # and the trough landed well below the user's target. With this,
+    # the simulator self-throttles: each hour, apply extra only if the
+    # entire rest-of-window natural trajectory (from this point) would
+    # still stay above the floor. Effectively models the controller's
+    # actual ON/OFF behavior tick-by-tick.
+    nat_hourly_pp = []
     for h in forecast_hours:
+        net = float(h.get("solar_w") or 0) - float(h.get("load_w") or 0)
+        if net > 0:
+            net *= eff
+        nat_hourly_pp.append(net / capacity_wh * 100.0)
+    # cum_nat[i] = cumulative natural SOC delta from start to start of hour i
+    cum_nat = [0.0] * (n + 1)
+    for i in range(n):
+        cum_nat[i + 1] = cum_nat[i] + nat_hourly_pp[i]
+    # min_cum_from[i] = min of cum_nat[j] over all j in i..n (inclusive)
+    # Used to compute the worst-case (lowest) natural-only SOC reachable
+    # from hour i onward, given a known starting SOC at that point.
+    min_cum_from = [cum_nat[n]] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        min_cum_from[i] = min(cum_nat[i], min_cum_from[i + 1])
+
+    out: list[dict[str, Any]] = []
+    for i, h in enumerate(forecast_hours):
         solar = float(h.get("solar_w") or 0)
         load = float(h.get("load_w") or 0)
-        # Per-hour decision on whether the diversion controller would be
-        # ON for this hour: only if applying it wouldn't drop SOC below
-        # extra_load_floor_pct. Mirrors the controller's hard-floor
-        # protection so the simulator naturally tells us how many hours
-        # of diversion fit before the controller would have to stop.
         applied_extra = 0.0
-        if extra_w > 0:
-            tentative_load = load + extra_w
-            tentative_net = solar - tentative_load
+        if extra_w > 0 and extra_floor is not None:
+            # Tentatively apply extra this hour and compute SOC at end
+            # of the hour.
+            tentative_net = solar - (load + extra_w)
             if tentative_net > 0:
                 tentative_net *= eff
             tentative_soc = soc + tentative_net / capacity_wh * 100.0
             tentative_soc = max(0.0, min(100.0, tentative_soc))
-            if extra_floor is None or tentative_soc >= extra_floor:
+            # From start of hour i+1 onward, assume natural-only (the
+            # controller stops). Worst-case SOC achieved:
+            #   min_future = tentative_soc + (min_cum_from[i+1] - cum_nat[i+1])
+            # i.e. the lowest natural-only trajectory starting from
+            # tentative_soc at hour i+1.
+            min_future_soc = (tentative_soc
+                              + (min_cum_from[i + 1] - cum_nat[i + 1]))
+            if min_future_soc >= extra_floor:
                 applied_extra = extra_w
+        elif extra_w > 0 and extra_floor is None:
+            # No floor constraint — apply extra every hour.
+            applied_extra = extra_w
         # 1 hour interval, simple Euler step. Apply CHARGE_EFFICIENCY when
         # net inflow positive — discharge already accounts for inverter
         # losses on the load side.
