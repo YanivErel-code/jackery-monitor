@@ -268,6 +268,23 @@ document.querySelectorAll('.switch').forEach((btn) => {
   btn.addEventListener('click', async () => {
     const port = btn.dataset.port;
     if (!port) return;
+    // If the AC button is in watchdog-error state, route the click to
+    // the dismiss endpoint instead of toggling. The watchdog will start
+    // a fresh retry sequence on the next AC=OFF observation.
+    if (port === 'ac' && btn.classList.contains('wd-err')) {
+      const viewSnDismiss = activeJackeryDevice()?.device_sn || null;
+      try {
+        const r = await fetch('/api/inverter_watchdog/dismiss' +
+          (viewSnDismiss ? `?device_sn=${encodeURIComponent(viewSnDismiss)}` : ''),
+          { method: 'POST' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        btn.classList.remove('wd-err');
+        btn.title = '';
+      } catch (e) {
+        alert(`Failed to dismiss watchdog error: ${e.message || e}`);
+      }
+      return;
+    }
     const lbl = $(`sw-${port}`);
     const currentState = (lbl?.textContent || '').trim();
     if (currentState !== 'ON' && currentState !== 'OFF') {
@@ -3999,6 +4016,34 @@ function applyStatus(s) {
     if (v === true)       { sw.classList.add('on');  lbl.textContent = 'ON';  }
     else if (v === false) { sw.classList.remove('on'); lbl.textContent = 'OFF'; }
     else                  { sw.classList.remove('on'); lbl.textContent = '—'; }
+  }
+
+  // Inverter recovery watchdog decoration on the AC button.
+  // (Pure decoration — the server is doing the actual retry MQTT
+  // commands; this just communicates the state visually.)
+  //   - consecutive_attempts > 0, no error  → yellow wd-warn + tooltip
+  //   - error_message latched               → red wd-err + tooltip; click
+  //                                            dismisses the error
+  //   - idle                                → clear both
+  // Namespaced .wd-* so they don't collide with .switch.warn (smart-
+  // charge active-mode indicator on other buttons).
+  const acSw = document.querySelector('.switch[data-port="ac"]');
+  const wd = s.inverter_watchdog;
+  if (acSw) {
+    if (wd && wd.error_message) {
+      acSw.classList.remove('wd-warn');
+      acSw.classList.add('wd-err');
+      acSw.title = `${wd.error_message}\n\nClick AC to dismiss this error.`;
+    } else if (wd && wd.consecutive_attempts > 0) {
+      acSw.classList.remove('wd-err');
+      acSw.classList.add('wd-warn');
+      acSw.title = (
+        `Inverter recovery in progress: retry ${wd.consecutive_attempts}/5. ` +
+        `Sending AC-on every 10s; will surface an error after 5 attempts.`);
+    } else {
+      acSw.classList.remove('wd-err', 'wd-warn');
+      acSw.title = '';
+    }
   }
 
   // Device tab

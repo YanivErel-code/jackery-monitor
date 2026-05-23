@@ -1533,6 +1533,20 @@ main {
    button explains why. */
 .switch.warn { border-color: #fbbc04; }
 .switch.warn:hover { border-color: #fbbc04; }
+/* Inverter recovery watchdog. Namespaced .wd-* so they don't collide
+   with .switch.warn (used by smart-charge "active mode" tooltip).
+     .wd-warn: yellow border while retries are in flight (1-5 attempts)
+     .wd-err:  red border + pulse after 5 attempts exhausted; click
+               dismisses and a fresh AC=OFF observation restarts retries */
+.switch.wd-warn { border-color: #fbbc04; }
+.switch.wd-warn:hover { border-color: #fbbc04; }
+.switch.wd-err { border-color: #ef4444; background: rgba(239,68,68,.08); animation: switch-err-pulse 2s ease-in-out infinite; }
+.switch.wd-err:hover { border-color: #ef4444; }
+.switch.wd-err .sw-state { color: #ef4444; }
+@keyframes switch-err-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+  50%      { box-shadow: 0 0 0 4px rgba(239,68,68,.18); }
+}
 
 /* ============== Settings tab ============== */
 .settings-fields {

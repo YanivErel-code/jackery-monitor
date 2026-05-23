@@ -52,6 +52,7 @@ import location as device_location
 import settings as user_settings
 import smart_charge
 import solar_charge
+import inverter_watchdog
 import weather_client
 from automation import AutomationEngine, AutomationError
 from device_client import (
@@ -418,6 +419,16 @@ async def poll_loop() -> None:
                     )
                 for sn, t, name, model_code in samples_to_write:
                     state.energy.upsert_device(sn, name, model_code, None)
+                    # Inverter recovery watchdog: AC port should stay ON
+                    # always; OFF means the inverter tripped on overload.
+                    # Drive the recovery state machine — on "retry" we
+                    # send the AC-on MQTT command. Best-effort; never let
+                    # this fail the poll-write path.
+                    try:
+                        await _inverter_watchdog_tick(sn, t)
+                    except Exception as e:
+                        log.debug("inverter_watchdog tick failed for %s: %s",
+                                   sn, e)
                     # If the solar-charge controller has the plug ON for
                     # this device, estimate the diverted_w as the JUMP
                     # in output_w above the pre-toggle house-load
@@ -909,6 +920,12 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     if cloud_out is not None:
         cloud_out["selected_device_id"] = view_id
 
+    # Inverter recovery watchdog snapshot. Always present so the UI can
+    # clear stale decoration without an extra fetch when AC recovers.
+    watchdog_state = None
+    if view_id:
+        watchdog_state = inverter_watchdog.state_to_dict(
+            inverter_watchdog.get_state(view_id))
     return {
         "connection_status": state.connection_status,
         "connection_error": state.connection_error,
@@ -926,6 +943,7 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
         "source": state.last_source,
         "cloud": cloud_out,
         "energy": energy,
+        "inverter_watchdog": watchdog_state,
     }
 
 
@@ -1682,6 +1700,46 @@ async def smart_charge_loop():
             bo.record_failure()
             log.warning("smart_charge loop iteration failed: %s", e)
         await asyncio.sleep(bo.next_sleep(5 * 60))
+
+
+# ---------- Inverter recovery watchdog (AC-port auto-restart) ----------
+async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
+    """Drive the inverter-recovery state machine for one device.
+
+    Called from the poll_loop per-device write-sample loop, so we
+    re-evaluate every cloud poll tick (default 2s). When the state
+    machine says "retry", fire an AC-on MQTT command via the cloud
+    client. Best-effort: any failure logs at debug and bails — the
+    inverter recovery layer must never break telemetry persistence."""
+    if not device_sn:
+        return
+    ac_on = bool(telemetry.get("ac_on"))
+    rs = inverter_watchdog.get_state(device_sn)
+    prior_attempts = rs.consecutive_attempts
+    prior_error = rs.error_message
+    action = inverter_watchdog.evaluate(rs, ac_on)
+    # Edge-triggered logging: only log on state transitions so the
+    # event log stays clean while we're idle.
+    if action == "retry":
+        log.warning(
+            "inverter_watchdog: AC=OFF for %s — sending AC-on (attempt %d/%d)",
+            device_sn, rs.consecutive_attempts, inverter_watchdog.DEFAULT_MAX_ATTEMPTS,
+        )
+        setter = getattr(state.client, "set_output", None)
+        if setter:
+            try:
+                await setter("ac", True, device_sn=device_sn)
+            except Exception as e:
+                log.warning("inverter_watchdog: AC-on MQTT command failed for %s: %s",
+                             device_sn, e)
+    elif action == "error" and not prior_error:
+        log.error(
+            "inverter_watchdog: %s exhausted %d retries; AC stayed OFF — "
+            "manual intervention required",
+            device_sn, inverter_watchdog.DEFAULT_MAX_ATTEMPTS,
+        )
+    elif action == "idle" and (prior_attempts > 0 or prior_error):
+        log.info("inverter_watchdog: %s recovered (AC back ON)", device_sn)
 
 
 # ---------- Solar-charge (inverse controller: Jackery → car) ----------
@@ -4327,7 +4385,43 @@ async def api_set_output(body: dict):
         await setter(port, on, device_sn=device_sn)
     except DeviceClientError as e:
         raise HTTPException(400, str(e)) from e
+    # If the user just toggled AC OFF, mark the watchdog so it doesn't
+    # fight the action by re-clicking ON 10s later. The grace window
+    # (DEFAULT_USER_GRACE_S) covers an intentional brief OFF; after it
+    # expires the watchdog assumes the user forgot and re-engages.
+    if port == "ac" and not on:
+        target_sn = device_sn or (state.device.device_sn if state.device else None)
+        if target_sn:
+            inverter_watchdog.record_user_off(
+                inverter_watchdog.get_state(target_sn))
     return {"ok": True, "port": port, "on": on, "device_sn": device_sn}
+
+
+@app.get("/api/inverter_watchdog/status")
+def api_inverter_watchdog_status(device_sn: str | None = None):
+    """Per-device watchdog snapshot for the UI. Returns attempts so far
+    (0 = idle), error_message (set after max retries exhausted), and
+    timestamps. UI uses error_message to decorate the AC button."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "state": None}
+    rs = inverter_watchdog.get_state(device_sn)
+    return {"device_sn": device_sn,
+            "state": inverter_watchdog.state_to_dict(rs)}
+
+
+@app.post("/api/inverter_watchdog/dismiss")
+def api_inverter_watchdog_dismiss(device_sn: str | None = None):
+    """Reset the watchdog error. The next AC=OFF observation will start
+    a fresh retry sequence. Called from the UI's dismiss click on the
+    AC button's error badge."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device — pass device_sn explicitly")
+    inverter_watchdog.dismiss_error(inverter_watchdog.get_state(device_sn))
+    return {"ok": True, "device_sn": device_sn}
 
 
 @app.post("/api/pause_polling")
