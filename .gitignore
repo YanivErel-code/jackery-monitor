@@ -18,10 +18,20 @@ env/
 # Local data — energy aggregator SQLite lives here, never commit user data
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 data/
 energy.db
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
+htmlcov/
+
+# Claude Code per-project state
+.claude/
 
 # Docker volumes / build artifacts
 .docker-data/
