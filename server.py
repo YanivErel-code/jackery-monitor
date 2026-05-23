@@ -1928,8 +1928,40 @@ async def _solar_charge_evaluate(record: bool = True,
             log.debug("solar_charge forecast fetch failed: %s", e)
 
     rs = solar_charge.get_runtime(device_sn)
-    plug_state_before = "on" if rs.plug_is_on else "off"
     now_ts = time.time()
+
+    # --- Reconcile runtime with the bridge's inverter-protect trip ---
+    # The bridge fires the Kasa plug OFF directly when output_power_w
+    # crosses the threshold (sub-second from MQTT push). It does NOT
+    # update solar_charge.RuntimeState — that's a separate process.
+    # Without this reconcile, the controller would keep believing
+    # plug_is_on=True for the rest of the cooldown window, logging
+    # "already on; skip" decisions while the plug is actually OFF.
+    #
+    # Trust the overload timestamp: if it's newer than our last toggle,
+    # the bridge took over more recently than we did. Treat as OFF.
+    # Also clear verify_pre_output_w (no-load detection isn't valid for
+    # an out-of-band OFF) and no_load_cooldown_until (the OFF wasn't a
+    # no-load event).
+    overload_state = solar_charge.read_overload_state()
+    overload_entry = overload_state.get(device_sn, {})
+    last_overload_ts = float(overload_entry.get("last_overload_ts") or 0)
+    if last_overload_ts > rs.last_toggle_ts and rs.plug_is_on:
+        log.info("solar_charge: reconciling runtime for %s — bridge fired "
+                 "inverter-protect trip at ts=%.0f (load=%.0fW); marking "
+                 "plug OFF in controller runtime",
+                 device_sn, last_overload_ts,
+                 float(overload_entry.get("load_w") or 0))
+        solar_charge._update_runtime(
+            device_sn,
+            plug_is_on=False,
+            last_toggle_ts=last_overload_ts,
+            verify_pre_output_w=None,
+            verify_deadline_ts=0.0,
+            no_load_cooldown_until=0.0,
+        )
+        rs = solar_charge.get_runtime(device_sn)  # re-read updated state
+    plug_state_before = "on" if rs.plug_is_on else "off"
 
     # --- No-load detection ---
     # Two gates:
@@ -1980,12 +2012,11 @@ async def _solar_charge_evaluate(record: bool = True,
         # OFF on the MQTT push the moment output_power_w exceeded the
         # per-device threshold (sub-second). This gate prevents the
         # eval loop from turning it back on until cooldown elapses
-        # since the LAST high-load sample.
-        overload_state = solar_charge.read_overload_state()
-        entry = overload_state.get(device_sn, {})
+        # since the LAST high-load sample. `last_overload_ts` was read
+        # at the top of this function (used to reconcile runtime first).
         plan = solar_charge.gate_inverter_protect(
             plan,
-            last_overload_ts=float(entry.get("last_overload_ts") or 0),
+            last_overload_ts=last_overload_ts,
             cooldown_s=float(cfg.get("inverter_protect_cooldown_s") or 1800),
         )
     else:
