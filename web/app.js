@@ -3356,6 +3356,7 @@ async function loadSolarCharge() {
     document.getElementById('solar-surplus-buffer').value = cfg.surplus_buffer_w ?? 100;
     document.getElementById('solar-on-hysteresis').value = cfg.on_hysteresis_pp ?? 3;
     document.getElementById('solar-safety-margin').value = cfg.safety_margin_pp ?? 5;
+    document.getElementById('solar-max-system-load').value = cfg.max_system_load_w ?? 800;
     document.getElementById('solar-inverter-protect-load').value = cfg.inverter_protect_load_w ?? 2100;
     document.getElementById('solar-inverter-protect-cooldown').value = cfg.inverter_protect_cooldown_s ?? 1800;
 
@@ -3429,6 +3430,7 @@ document.getElementById('solar-form')?.addEventListener('submit', async (e) => {
     surplus_buffer_w: parseInt(document.getElementById('solar-surplus-buffer').value, 10) || 100,
     on_hysteresis_pp: parseInt(document.getElementById('solar-on-hysteresis').value, 10) || 3,
     safety_margin_pp: parseInt(document.getElementById('solar-safety-margin').value, 10) || 5,
+    max_system_load_w: parseInt(document.getElementById('solar-max-system-load').value, 10) || 800,
     inverter_protect_load_w: parseInt(document.getElementById('solar-inverter-protect-load').value, 10) || 2100,
     inverter_protect_cooldown_s: parseInt(document.getElementById('solar-inverter-protect-cooldown').value, 10) || 1800,
   };

@@ -2008,6 +2008,15 @@ async def _solar_charge_evaluate(record: bool = True,
             min_hold_s=cfg.get("min_hold_s") or 30,
             plug_state_before=plug_state_before,
         )
+        # Pre-engage load ceiling. Refuse OFF→ON flips when current
+        # system load is already at/above the configured ceiling.
+        # Prevents engaging right as a heavy appliance fires.
+        plan = solar_charge.gate_load_ceiling(
+            plan,
+            load_w=load_w,
+            plug_state_before=plug_state_before,
+            max_system_load_w=float(cfg.get("max_system_load_w") or 800),
+        )
         # Inverter overload cooldown gate. The bridge fired the plug
         # OFF on the MQTT push the moment output_power_w exceeded the
         # per-device threshold (sub-second). This gate prevents the

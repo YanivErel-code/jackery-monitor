@@ -344,6 +344,100 @@ def test_overload_state_roundtrip(tmp_path, monkeypatch):
     assert solar_charge.read_overload_state() == {}
 
 
+# ---------- Pre-engage load ceiling ----------
+def _on_plan_with_car():
+    """Build an ON plan via compute_plan with a non-trivial car_load_w
+    so the gate's reason includes a real number."""
+    cfg = _cfg(car_load_w=1400)
+    return solar_charge.compute_plan(
+        config=cfg, current_soc_pct=80, solar_w=0, load_w=0,
+        telemetry_age_s=10, target_sunrise_soc_pct=20,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        now_ts=1_700_000_000.0,
+    )
+
+
+def test_load_ceiling_blocks_off_to_on_when_load_at_ceiling():
+    plan = _on_plan_with_car()
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=800.0, plug_state_before="off",
+        max_system_load_w=800.0)
+    assert out.action == "skip"
+    assert "ceiling 800W" in out.reason
+    assert "~1400W" in out.reason
+
+
+def test_load_ceiling_blocks_off_to_on_when_load_above():
+    plan = _on_plan_with_car()
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=1500.0, plug_state_before="off",
+        max_system_load_w=800.0)
+    assert out.action == "skip"
+    assert "1500W" in out.reason
+
+
+def test_load_ceiling_passes_through_when_load_below():
+    plan = _on_plan_with_car()
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=500.0, plug_state_before="off",
+        max_system_load_w=800.0)
+    assert out.action == "on"
+
+
+def test_load_ceiling_passes_through_when_plug_already_on():
+    """Once engaged, load_w includes the diversion's own draw, so
+    'load too high' would be a false-positive block."""
+    plan = _on_plan_with_car()
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=2000.0, plug_state_before="on",  # plug already on
+        max_system_load_w=800.0)
+    assert out.action == "on"
+
+
+def test_load_ceiling_no_effect_on_off_plan():
+    """The gate never touches OFF plans — never want to upgrade an
+    explicit safety decision."""
+    plan = _eval(current_soc=10, predicted_sunrise=80.0)  # SOC hits hard floor
+    assert plan.action == "off"
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=2000.0, plug_state_before="off",
+        max_system_load_w=800.0)
+    assert out.action == "off"
+
+
+def test_load_ceiling_no_effect_on_skip_plan():
+    plan = _eval(current_soc=50, predicted_sunrise=80.0)  # SOC < comfort_high
+    assert plan.action == "skip"
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=2000.0, plug_state_before="off",
+        max_system_load_w=800.0)
+    assert out.action == "skip"
+
+
+def test_load_ceiling_passes_through_when_load_w_missing():
+    """No fresh telemetry → other gates handle, this one stays out."""
+    plan = _on_plan_with_car()
+    out = solar_charge.gate_load_ceiling(
+        plan, load_w=None, plug_state_before="off",
+        max_system_load_w=800.0)
+    assert out.action == "on"
+
+
+def test_max_system_load_w_config_bounds():
+    cfg = solar_charge._validate_config({
+        "mode": "active",
+        "max_system_load_w": 50,  # below 100 → falls back
+    })
+    assert cfg["max_system_load_w"] == solar_charge.DEFAULT_CONFIG[
+        "max_system_load_w"]
+    cfg = solar_charge._validate_config({
+        "mode": "active",
+        "max_system_load_w": 1200,
+    })
+    assert cfg["max_system_load_w"] == 1200
+
+
 def test_overload_state_resilient_to_corrupt_file(tmp_path, monkeypatch):
     """Garbage on disk reads as empty rather than crashing the eval loop."""
     p = tmp_path / "overload.json"

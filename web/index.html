@@ -1017,6 +1017,15 @@
             </div>
           </div>
           <div class="settings-row">
+            <label class="settings-label" for="solar-max-system-load">
+              <span class="settings-label-text">Pre-engage load ceiling</span>
+              <span class="settings-hint">Refuse to turn the plug ON when the current system output is already at or above this watt-figure. Prevents engaging right as a heavy appliance fires (e.g. house at 750W + 1400W car would push you to 2150W, immediately tripping the inverter-protect threshold). The check is one-shot — only applies to OFF→ON flips; once engaged, the diversion's own draw is excluded from the gate. Default 800W gives comfortable headroom under the 2100W inverter-protect default.</span>
+            </label>
+            <div class="settings-control">
+              <input id="solar-max-system-load" type="number" min="100" max="4500" step="50" value="800" /> <small>W</small>
+            </div>
+          </div>
+          <div class="settings-row">
             <label class="settings-label" for="solar-inverter-protect-load">
               <span class="settings-label-text">Inverter overload threshold</span>
               <span class="settings-hint">If the Jackery's total output (house + diversion) climbs to this watt-figure, the bridge fires the diversion plug OFF immediately (sub-second, via the MQTT push handler) and keeps it off for the cooldown below. Default 2100W is a conservative soft cap — the Jackery 5000+ is rated 5000W continuous but this prevents the inverter from running hot for long stretches. Tune up if you have heavier baseline house loads.</span>

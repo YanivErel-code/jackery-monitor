@@ -137,6 +137,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # baseline house loads you don't want false-tripping on.
     "inverter_protect_load_w": 2100,
     "inverter_protect_cooldown_s": 1800,
+    # Pre-engage load ceiling. Refuse to flip the plug OFF→ON when
+    # the current system load_w is at or above this value. Prevents
+    # the common foot-gun of engaging diversion right as a heavy
+    # appliance kicks in (microwave, dryer, EV onboard charger) and
+    # immediately tripping inverter-protect: 800W house + 1400W car
+    # = 2200W which is over the 2100W default trip. The gate is a
+    # no-op when the plug is already ON (load_w then includes the
+    # diversion itself, so blocking would be wrong). Default 800W
+    # leaves comfortable headroom under the 2100W trip threshold.
+    "max_system_load_w": 800,
 }
 
 # When solar drops below this for SUNSET_SUSTAIN_S seconds, treat it as
@@ -201,6 +211,7 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     _int_in_range("no_load_cooldown_s", 60, 7200)
     _int_in_range("inverter_protect_load_w", 500, 4500)
     _int_in_range("inverter_protect_cooldown_s", 60, 86400)
+    _int_in_range("max_system_load_w", 100, 4500)
     # Defensive sanity: comfort_low must be < comfort_high or we'd
     # paint an unreachable state (plug can never be on).
     if out["comfort_low_pct"] >= out["comfort_high_pct"]:
@@ -617,6 +628,40 @@ def clear_overload_state() -> None:
             pass
         except Exception as e:
             log.warning("solar_charge clear_overload_state failed (%s)", e)
+
+
+def gate_load_ceiling(plan: Plan, load_w: float | None,
+                      plug_state_before: str,
+                      max_system_load_w: float) -> Plan:
+    """Refuse OFF→ON plug flips when current system load is already
+    at/above the ceiling. Prevents the controller from engaging right
+    as a heavy appliance fires and immediately tripping inverter-protect.
+
+    No-op when:
+      - plan.action != "on" (nothing to gate)
+      - plug_state_before == "on" (already engaged; load_w includes the
+        diversion's own draw, blocking would be wrong)
+      - load_w is None (no fresh telemetry; let other gates handle)
+      - load_w < max_system_load_w (room to engage safely)
+
+    Pure function. Caller passes the threshold from config so this
+    stays test-friendly without reading global state."""
+    if plan.action != "on":
+        return plan
+    if plug_state_before == "on":
+        return plan
+    if load_w is None:
+        return plan
+    if load_w < max_system_load_w:
+        return plan
+    car_w = plan.car_load_w if plan.car_load_w is not None else 0.0
+    plan.action = "skip"
+    plan.reason = (
+        f"system load {load_w:.0f}W ≥ ceiling {max_system_load_w:.0f}W — "
+        f"engaging diversion (~{car_w:.0f}W) would risk pushing total "
+        f"toward the inverter-protect threshold; deferring: {plan.reason}"
+    )
+    return plan
 
 
 def gate_inverter_protect(plan: Plan, last_overload_ts: float,
