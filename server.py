@@ -1925,6 +1925,10 @@ async def _solar_charge_evaluate(record: bool = True,
     # deadline has passed, look at output_w now vs pre-toggle. If the
     # load didn't show up, force OFF + cooldown. This wins over the
     # plan we just computed.
+    no_load_off_fired = False  # set when the OFF is due to no-load; the
+                                # toggle path below uses this to KEEP the
+                                # cooldown that was just set (the generic
+                                # voluntary-OFF branch clears it).
     if (rs.plug_is_on
             and rs.verify_pre_output_w is not None
             and rs.verify_deadline_ts
@@ -1954,6 +1958,7 @@ async def _solar_charge_evaluate(record: bool = True,
                 verify_deadline_ts=0.0,
                 no_load_cooldown_until=now_ts + cooldown_s,
             )
+            no_load_off_fired = True
         else:
             # Verification passed — clear the deadline flag (we've
             # confirmed the load showed up). KEEP verify_pre_output_w
@@ -1988,17 +1993,30 @@ async def _solar_charge_evaluate(record: bool = True,
                         verify_deadline_ts=now_ts + verify_delay,
                     )
                 else:
-                    # Voluntary OFF — clear any pending verify state and
-                    # the no-load cooldown (we're stopping for a different
-                    # reason, no need to wait before next attempt).
-                    solar_charge._update_runtime(
-                        device_sn,
-                        plug_is_on=False,
-                        last_toggle_ts=now_ts,
-                        verify_pre_output_w=None,
-                        verify_deadline_ts=0.0,
-                        no_load_cooldown_until=0.0,
-                    )
+                    # Plug went OFF. Two flavors:
+                    #  (a) no-load detector forced it (no_load_off_fired)
+                    #      → KEEP the cooldown that was just set above
+                    #  (b) any other reason (forecast undershoot, SOC
+                    #      hit comfort_low, grid charging, etc.)
+                    #      → clear cooldown so the next valid ON gate
+                    #        isn't blocked
+                    if no_load_off_fired:
+                        # Keep no_load_cooldown_until untouched; just
+                        # update the plug state + last_toggle_ts.
+                        solar_charge._update_runtime(
+                            device_sn,
+                            plug_is_on=False,
+                            last_toggle_ts=now_ts,
+                        )
+                    else:
+                        solar_charge._update_runtime(
+                            device_sn,
+                            plug_is_on=False,
+                            last_toggle_ts=now_ts,
+                            verify_pre_output_w=None,
+                            verify_deadline_ts=0.0,
+                            no_load_cooldown_until=0.0,
+                        )
             except Exception as e:
                 log.warning("solar_charge Kasa toggle failed: %s", e)
 
