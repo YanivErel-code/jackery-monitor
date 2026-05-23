@@ -68,6 +68,14 @@ from typing import Any
 log = logging.getLogger("solar_charge")
 
 CONFIG_PATH = os.environ.get("JACKERY_SOLAR_CHARGE_FILE", "/data/solar_charge.json")
+# Shared file used to coordinate the inverter-overload trip between
+# bridge (writer; fires from the MQTT push handler when output_power_w
+# exceeds threshold) and server (reader; gates re-engagement in the
+# 30s eval loop). Lives in /data so both containers see the same view.
+OVERLOAD_STATE_PATH = os.environ.get(
+    "JACKERY_SOLAR_CHARGE_OVERLOAD_FILE",
+    "/data/solar_charge_overload.json",
+)
 
 # Default-of-defaults for fresh installs. The Settings UI lets the user
 # tune everything per device.
@@ -115,6 +123,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "no_load_verify_delay_s": 90,
     "no_load_threshold_w": 500,
     "no_load_cooldown_s": 900,
+    # Inverter overload protection. If the Jackery's instantaneous
+    # output_power_w climbs to/above `inverter_protect_load_w`, the
+    # bridge fires the diversion plug OFF immediately (push-driven,
+    # sub-second) and stamps an overload timestamp in a shared file
+    # (/data/solar_charge_overload.json). The eval loop then refuses
+    # to re-engage until `inverter_protect_cooldown_s` has elapsed
+    # since the LAST overload sample — so the inverter gets a clean
+    # 30 min below threshold before the load returns. Default 2100W
+    # is a conservative soft cap well below the 5000+'s 5000W
+    # continuous rating; the Jackery has its own hardware-level
+    # protection at higher thresholds. Tune up if you have heavier
+    # baseline house loads you don't want false-tripping on.
+    "inverter_protect_load_w": 2100,
+    "inverter_protect_cooldown_s": 1800,
 }
 
 # When solar drops below this for SUNSET_SUSTAIN_S seconds, treat it as
@@ -177,6 +199,8 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     _int_in_range("no_load_verify_delay_s", 30, 600)
     _int_in_range("no_load_threshold_w", 50, 5000)
     _int_in_range("no_load_cooldown_s", 60, 7200)
+    _int_in_range("inverter_protect_load_w", 500, 4500)
+    _int_in_range("inverter_protect_cooldown_s", 60, 86400)
     # Defensive sanity: comfort_low must be < comfort_high or we'd
     # paint an unreachable state (plug can never be on).
     if out["comfort_low_pct"] >= out["comfort_high_pct"]:
@@ -523,4 +547,104 @@ def gate_min_hold(plan: Plan, last_toggle_ts: float,
         plan.action = "skip"
         plan.reason = (f"min_hold not elapsed ({elapsed:.0f}s < {min_hold_s:.0f}s) "
                        f"— would have gone {desired_state}: {plan.reason}")
+    return plan
+
+
+# ---------- Inverter overload protection (shared between bridge + server) ----------
+_overload_lock = threading.Lock()
+
+
+def read_overload_state() -> dict[str, dict[str, Any]]:
+    """Return the per-device overload-state map.
+
+    Shape: {device_sn: {"last_overload_ts": float, "load_w": float}}.
+    Missing file or unreadable contents → empty dict (fail-open is fine;
+    the gate is a safety belt, not a primary control loop). Atomic via
+    POSIX rename in the writer."""
+    with _overload_lock:
+        try:
+            with open(OVERLOAD_STATE_PATH) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            log.warning("solar_charge overload state unreadable (%s); "
+                        "treating as empty", e)
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for sn, entry in data.items():
+        if isinstance(entry, dict):
+            out[str(sn)] = entry
+    return out
+
+
+def stamp_overload(device_sn: str, load_w: float,
+                   now_ts: float | None = None) -> None:
+    """Record an inverter-overload event for `device_sn`. Called from the
+    bridge's MQTT push handler the instant output_power_w crosses the
+    threshold. The server's eval loop reads this to gate re-engagement."""
+    ts = float(now_ts if now_ts is not None else time.time())
+    with _overload_lock:
+        try:
+            with open(OVERLOAD_STATE_PATH) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except FileNotFoundError:
+            data = {}
+        except Exception as e:
+            log.warning("solar_charge overload state unreadable on stamp "
+                        "(%s); overwriting", e)
+            data = {}
+        data[str(device_sn)] = {"last_overload_ts": ts, "load_w": float(load_w)}
+        os.makedirs(os.path.dirname(OVERLOAD_STATE_PATH) or ".", exist_ok=True)
+        tmp = OVERLOAD_STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, OVERLOAD_STATE_PATH)
+
+
+def clear_overload_state() -> None:
+    """Wipe the overload-state file. Called at server startup (hydrate)
+    to enforce the 'restart resets cooldown' invariant the user picked.
+    Best-effort: missing file is fine."""
+    with _overload_lock:
+        try:
+            os.unlink(OVERLOAD_STATE_PATH)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.warning("solar_charge clear_overload_state failed (%s)", e)
+
+
+def gate_inverter_protect(plan: Plan, last_overload_ts: float,
+                          cooldown_s: float,
+                          now_ts: float | None = None) -> Plan:
+    """Refuse `on` actions while the inverter-protect cooldown is active.
+
+    The bridge fires the kasa OFF directly on the MQTT push tick that
+    detected the overload; this gate's job is to prevent the eval loop
+    from turning it back on for `cooldown_s` after the LAST overload
+    sample. Pass `off`/`skip` plans through unchanged — we never want
+    to OVERRIDE a controller decision to stay off.
+
+    Pure function. last_overload_ts=0 (file missing or never stamped)
+    is a no-op pass-through."""
+    if plan.action != "on":
+        return plan
+    if not last_overload_ts:
+        return plan
+    now = float(now_ts if now_ts is not None else time.time())
+    elapsed = now - float(last_overload_ts)
+    if elapsed < cooldown_s:
+        remaining = cooldown_s - elapsed
+        plan.action = "skip"
+        plan.reason = (
+            f"inverter-protect cooldown active "
+            f"({remaining/60:.0f} min remaining of {cooldown_s/60:.0f} min) "
+            f"— load exceeded threshold {elapsed/60:.0f} min ago; "
+            f"holding plug OFF: {plan.reason}"
+        )
     return plan

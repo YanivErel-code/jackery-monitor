@@ -76,6 +76,8 @@ import settings as user_settings  # noqa: E402  -- after env reads above
 from device_client import (  # noqa: E402  shares the model_code -> "portable"/"box" heuristic with the server
     device_type_for,
 )
+import solar_charge  # noqa: E402  shared config + overload-state file (writer-side)
+import kasa_client  # noqa: E402  for the inverter-protect fast-trip from MQTT push
 
 # ---- credential storage (multi-backend) ----
 #
@@ -392,6 +394,96 @@ def get_events(limit: int = 100, since: float = 0.0) -> list[dict]:
     return out
 
 
+# ---- Inverter overload protection (push-driven fast-trip) ----
+# When MQTT pushes a fresh output_power_w that meets/exceeds the
+# per-device threshold, fire the diversion plug OFF immediately and
+# stamp the overload-state file. The server's eval loop reads that
+# file and refuses to re-engage for `inverter_protect_cooldown_s`.
+#
+# Reaction time is bounded by the MQTT-push handler invocation
+# (~hundreds of milliseconds round-trip from device → broker → us)
+# plus the Kasa LAN call (~50–200ms), so end-to-end ≈ 0.3–1s.
+#
+# The Kasa OFF command is debounced to once per 10s per device — the
+# overload-state file is still stamped on EVERY tick above threshold
+# (so the server's cooldown timer keeps re-arming while the overload
+# persists, not just resetting from the first sample). Stamping is a
+# cheap file write; the LAN call to Kasa is the part worth throttling.
+#
+# Config is cached for INVERTER_PROTECT_CFG_TTL_S because this runs on
+# every MQTT push — re-reading + re-validating /data/solar_charge.json
+# at that rate burns lock contention with set_config writes. Stale
+# threshold for a few seconds after the user changes it is fine; the
+# protection trip can wait one TTL.
+INVERTER_PROTECT_CFG_TTL_S = 5.0
+_last_inverter_trip_fired_at: dict[str, float] = {}
+_inverter_protect_cfg_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _inverter_protect_cfg(device_sn: str) -> dict | None:
+    """Cached config read for the fast-trip path. Returns None on any
+    error or if the device has no configured row yet."""
+    now = time.time()
+    cached = _inverter_protect_cfg_cache.get(device_sn)
+    if cached and (now - cached[0]) < INVERTER_PROTECT_CFG_TTL_S:
+        return cached[1]
+    try:
+        cfg = solar_charge.get_config(device_sn)
+    except Exception:
+        return None
+    _inverter_protect_cfg_cache[device_sn] = (now, cfg)
+    return cfg
+
+
+async def _inverter_protect_check(device_sn: str, load_w: float | None) -> None:
+    """Fast-trip the diversion plug if output_power_w >= threshold.
+
+    Best-effort: any config-read, file-write, or Kasa failure logs an
+    event and returns. We do NOT propagate errors back to the MQTT push
+    handler — that path must stay responsive even if the inverter
+    protection layer has trouble talking to its dependencies."""
+    if not device_sn or load_w is None:
+        return
+    cfg = _inverter_protect_cfg(device_sn)
+    if not cfg or cfg.get("mode") == "off":
+        return
+    host = cfg.get("kasa_device_host")
+    if not host:
+        return
+    try:
+        threshold = float(cfg.get("inverter_protect_load_w") or 2100)
+    except (TypeError, ValueError):
+        return
+    if float(load_w) < threshold:
+        return
+    now = time.time()
+    # Stamp ALWAYS — the server's cooldown starts from the LAST overload
+    # sample, so as long as load stays high we keep extending the window.
+    try:
+        solar_charge.stamp_overload(device_sn, float(load_w), now_ts=now)
+    except Exception as e:
+        event("warn", "inverter_protect",
+              f"failed to stamp overload state: {e}",
+              device_sn=device_sn)
+    # Debounce the Kasa OFF call to once per 10s per device. The plug
+    # is already OFF after the first call; repeating it every push for
+    # 30 min of high load is wasted LAN traffic.
+    last_fired = _last_inverter_trip_fired_at.get(device_sn, 0.0)
+    if now - last_fired < 10.0:
+        return
+    _last_inverter_trip_fired_at[device_sn] = now
+    event("warn", "inverter_protect",
+          f"INVERTER OVERLOAD: output {load_w:.0f}W ≥ {threshold:.0f}W "
+          f"threshold — forcing diversion plug OFF (Kasa {host})",
+          device_sn=device_sn, load_w=float(load_w), threshold=threshold)
+    try:
+        await kasa_client.set_state(host, False)
+    except Exception as e:
+        event("error", "inverter_protect",
+              f"failed to fire Kasa OFF on overload: {e}",
+              device_sn=device_sn, host=host)
+
+
 # ---- shared state ----
 class State:
     def __init__(self) -> None:
@@ -505,6 +597,18 @@ async def cloud_loop() -> None:
         raw.update(props)
         state.telemetry_by_sn[device_sn] = cloud_props_to_telemetry(raw)
         state.ts_by_sn[device_sn] = time.time()
+        # Inverter overload protection: as soon as a fresh output_power_w
+        # comes through MQTT, check whether it crossed the per-device
+        # threshold. If so, fire the diversion plug OFF immediately and
+        # stamp the shared overload-state file so the server's eval loop
+        # holds it off through the cooldown window. Best-effort — never
+        # let this block or fail the rest of the push handler.
+        try:
+            telemetry = state.telemetry_by_sn[device_sn]
+            await _inverter_protect_check(
+                device_sn, telemetry.get("output_power_w"))
+        except Exception as e:
+            log.warning("inverter_protect check raised (ignored): %s", e)
         # Mirror onto the active-device fields if this push is for the
         # device the dashboard is viewing.
         active_sn = (state.cloud_device or {}).get("device_sn")

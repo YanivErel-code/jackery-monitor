@@ -1918,6 +1918,18 @@ async def _solar_charge_evaluate(record: bool = True,
             min_hold_s=cfg.get("min_hold_s") or 30,
             plug_state_before=plug_state_before,
         )
+        # Inverter overload cooldown gate. The bridge fired the plug
+        # OFF on the MQTT push the moment output_power_w exceeded the
+        # per-device threshold (sub-second). This gate prevents the
+        # eval loop from turning it back on until cooldown elapses
+        # since the LAST high-load sample.
+        overload_state = solar_charge.read_overload_state()
+        entry = overload_state.get(device_sn, {})
+        plan = solar_charge.gate_inverter_protect(
+            plan,
+            last_overload_ts=float(entry.get("last_overload_ts") or 0),
+            cooldown_s=float(cfg.get("inverter_protect_cooldown_s") or 1800),
+        )
     else:
         plan = no_load_override_plan
 
@@ -2060,6 +2072,14 @@ async def _solar_charge_hydrate_runtime():
     except Exception as e:
         log.debug("solar_charge hydrate: get_all_configs failed: %s", e)
         return
+    # Restart resets the inverter-protect cooldown (user picked "no
+    # persistence" — matches the rest of the runtime-reset semantics).
+    # The forced-OFF below means even if a cooldown was active before
+    # restart, we re-engage cleanly from the next eval tick.
+    try:
+        solar_charge.clear_overload_state()
+    except Exception as e:
+        log.debug("solar_charge hydrate: clear_overload_state failed: %s", e)
     for sn, cfg in configs.items():
         host = cfg.get("kasa_device_host")
         if not host or cfg.get("mode") == "off":

@@ -1016,6 +1016,24 @@
               <input id="solar-safety-margin" type="number" min="0" max="50" step="1" value="5" /> <small>pp</small>
             </div>
           </div>
+          <div class="settings-row">
+            <label class="settings-label" for="solar-inverter-protect-load">
+              <span class="settings-label-text">Inverter overload threshold</span>
+              <span class="settings-hint">If the Jackery's total output (house + diversion) climbs to this watt-figure, the bridge fires the diversion plug OFF immediately (sub-second, via the MQTT push handler) and keeps it off for the cooldown below. Default 2100W is a conservative soft cap — the Jackery 5000+ is rated 5000W continuous but this prevents the inverter from running hot for long stretches. Tune up if you have heavier baseline house loads.</span>
+            </label>
+            <div class="settings-control">
+              <input id="solar-inverter-protect-load" type="number" min="500" max="4500" step="50" value="2100" /> <small>W</small>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="solar-inverter-protect-cooldown">
+              <span class="settings-label-text">Inverter overload cooldown</span>
+              <span class="settings-hint">After the threshold is crossed, hold the plug OFF for at least this long after the LAST high-load sample. The clock keeps resetting while load stays above threshold, so the inverter only gets to re-engage after a clean cooldown. Default 30 min.</span>
+            </label>
+            <div class="settings-control">
+              <input id="solar-inverter-protect-cooldown" type="number" min="60" max="86400" step="60" value="1800" /> <small>s</small>
+            </div>
+          </div>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
             <button class="btn btn-primary" type="submit">Save</button>
             <button id="solar-evaluate" class="btn btn-ghost" type="button">Evaluate now</button>

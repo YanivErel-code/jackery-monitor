@@ -245,3 +245,114 @@ def test_config_rejects_inverted_comfort_bands():
 def test_config_unknown_mode_falls_back_to_off():
     cfg = solar_charge._validate_config({"mode": "nope"})
     assert cfg["mode"] == "off"
+
+
+# ---------- Inverter overload protection ----------
+def _on_plan(now_ts=1_700_000_000.0):
+    """Build a fresh ON plan via compute_plan so tests use real shapes."""
+    return _eval(current_soc=80, predicted_sunrise=80.0, now_ts=now_ts)
+
+
+def test_inverter_protect_passes_through_when_no_overload():
+    plan = _on_plan()
+    out = solar_charge.gate_inverter_protect(
+        plan, last_overload_ts=0, cooldown_s=1800,
+        now_ts=1_700_000_000.0)
+    assert out.action == "on"
+
+
+def test_inverter_protect_blocks_on_within_cooldown():
+    plan = _on_plan(now_ts=1_700_000_500.0)
+    # Overload stamped 100s ago; cooldown 1800s → still active.
+    out = solar_charge.gate_inverter_protect(
+        plan, last_overload_ts=1_700_000_400.0, cooldown_s=1800,
+        now_ts=1_700_000_500.0)
+    assert out.action == "skip"
+    assert "inverter-protect cooldown" in out.reason
+
+
+def test_inverter_protect_releases_after_cooldown():
+    plan = _on_plan(now_ts=1_700_002_000.0)
+    # Overload stamped 1900s ago; cooldown 1800s → expired.
+    out = solar_charge.gate_inverter_protect(
+        plan, last_overload_ts=1_700_000_100.0, cooldown_s=1800,
+        now_ts=1_700_002_000.0)
+    assert out.action == "on"
+
+
+def test_inverter_protect_never_overrides_off():
+    """An OFF plan must stay OFF — we never want the protect gate to
+    upgrade a safety decision into a 'skip'."""
+    plan = _eval(current_soc=10, predicted_sunrise=80.0)
+    assert plan.action == "off"
+    out = solar_charge.gate_inverter_protect(
+        plan, last_overload_ts=1_700_000_400.0, cooldown_s=1800,
+        now_ts=1_700_000_500.0)
+    assert out.action == "off"
+
+
+def test_inverter_protect_never_overrides_skip():
+    """A skip plan stays a skip — no point upgrading 'already in
+    desired state' into a different reason."""
+    plan = _eval(current_soc=50, predicted_sunrise=80.0)  # SOC < comfort_high → skip
+    assert plan.action == "skip"
+    out = solar_charge.gate_inverter_protect(
+        plan, last_overload_ts=1_700_000_400.0, cooldown_s=1800,
+        now_ts=1_700_000_500.0)
+    assert out.action == "skip"
+
+
+def test_inverter_protect_config_bounds():
+    """load_w accepts 500–4500W; cooldown_s accepts 60s–86400s."""
+    cfg = solar_charge._validate_config({
+        "mode": "active",
+        "inverter_protect_load_w": 100,       # below 500; falls back
+        "inverter_protect_cooldown_s": 30,    # below 60; falls back
+    })
+    assert cfg["inverter_protect_load_w"] == solar_charge.DEFAULT_CONFIG[
+        "inverter_protect_load_w"]
+    assert cfg["inverter_protect_cooldown_s"] == solar_charge.DEFAULT_CONFIG[
+        "inverter_protect_cooldown_s"]
+    cfg = solar_charge._validate_config({
+        "mode": "active",
+        "inverter_protect_load_w": 2500,
+        "inverter_protect_cooldown_s": 3600,
+    })
+    assert cfg["inverter_protect_load_w"] == 2500
+    assert cfg["inverter_protect_cooldown_s"] == 3600
+
+
+def test_overload_state_roundtrip(tmp_path, monkeypatch):
+    """stamp_overload → read_overload_state → clear_overload_state."""
+    p = tmp_path / "overload.json"
+    monkeypatch.setattr(solar_charge, "OVERLOAD_STATE_PATH", str(p))
+    assert solar_charge.read_overload_state() == {}
+    solar_charge.stamp_overload("SN-A", 2400.0, now_ts=1234.5)
+    state = solar_charge.read_overload_state()
+    assert state["SN-A"]["last_overload_ts"] == 1234.5
+    assert state["SN-A"]["load_w"] == 2400.0
+    # Second device adds without clobbering the first.
+    solar_charge.stamp_overload("SN-B", 3000.0, now_ts=5000.0)
+    state = solar_charge.read_overload_state()
+    assert set(state.keys()) == {"SN-A", "SN-B"}
+    # Re-stamping the same device updates in place.
+    solar_charge.stamp_overload("SN-A", 2200.0, now_ts=6000.0)
+    state = solar_charge.read_overload_state()
+    assert state["SN-A"]["last_overload_ts"] == 6000.0
+    assert state["SN-A"]["load_w"] == 2200.0
+    solar_charge.clear_overload_state()
+    assert solar_charge.read_overload_state() == {}
+
+
+def test_overload_state_resilient_to_corrupt_file(tmp_path, monkeypatch):
+    """Garbage on disk reads as empty rather than crashing the eval loop."""
+    p = tmp_path / "overload.json"
+    monkeypatch.setattr(solar_charge, "OVERLOAD_STATE_PATH", str(p))
+    p.write_text("{ not valid json")
+    assert solar_charge.read_overload_state() == {}
+    # And we can still write through afterwards — corrupt file gets
+    # overwritten by stamp_overload's atomic rename.
+    solar_charge.stamp_overload("SN-A", 2400.0, now_ts=1234.5)
+    assert solar_charge.read_overload_state() == {
+        "SN-A": {"last_overload_ts": 1234.5, "load_w": 2400.0}
+    }
