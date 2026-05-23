@@ -419,11 +419,14 @@ async def poll_loop() -> None:
                 for sn, t, name, model_code in samples_to_write:
                     state.energy.upsert_device(sn, name, model_code, None)
                     # If the solar-charge controller has the plug ON for
-                    # this device, annotate the sample with the configured
-                    # car_load_w so the integrator credits the right
-                    # fraction-of-bucket to diversion. fit_load_profile
-                    # subtracts this before learning demand patterns.
-                    diverted_w = _solar_charge_current_diverted_w(sn)
+                    # this device, estimate the diverted_w as the JUMP
+                    # in output_w above the pre-toggle house-load
+                    # baseline. fit_load_profile subtracts this before
+                    # learning demand patterns. See the helper's
+                    # docstring for why we use the delta-from-baseline
+                    # method vs. the configured car_load_w.
+                    diverted_w = _solar_charge_current_diverted_w(
+                        sn, current_output_w=float(t.get("output_power_w") or 0))
                     state.energy.record(
                         sn, ts,
                         float(t.get("input_power_w") or 0),
@@ -1682,12 +1685,27 @@ async def smart_charge_loop():
 
 
 # ---------- Solar-charge (inverse controller: Jackery → car) ----------
-def _solar_charge_current_diverted_w(device_sn: str | None) -> float:
+def _solar_charge_current_diverted_w(device_sn: str | None,
+                                     current_output_w: float = 0.0) -> float:
     """Return the instantaneous solar-charge diversion rate (W) for this
-    device, based on the controller's cached plug state. Called from the
-    server's per-poll sample-write so the integrator credits diverted
-    energy to the right bucket. Returns 0 when the controller is off,
-    mode != active, or the plug isn't currently ON."""
+    device. Estimated from the JUMP in Jackery output_w above the
+    house-load baseline captured at the moment the controller toggled
+    the plug ON (rs.verify_pre_output_w).
+
+    Why not just `car_load_w` while plug is ON?  Because the controller
+    only knows the plug's electrical state (ON/OFF), not whether
+    anything is actually plugged in and drawing. If the car isn't
+    connected, output_w stays at house-load levels and we should
+    record `diverted_wh = 0`, not `car_load_w × dt`. The delta-from-
+    baseline method gives an honest estimate that's 0 in the no-load
+    case and ≈ car_load_w when the car is actually drawing.
+
+    Falls back to `car_load_w` if no baseline is cached (e.g. after a
+    container restart that wiped runtime state — better to over-count
+    briefly than under-count by treating a real session as zero).
+    Returns 0 when the controller is off / not in active mode / plug
+    off — those callers will pass `solar_charge_diverted_w=0` to
+    record()."""
     if not device_sn:
         return 0.0
     try:
@@ -1697,6 +1715,13 @@ def _solar_charge_current_diverted_w(device_sn: str | None) -> float:
         rs = solar_charge.get_runtime(device_sn)
         if not rs.plug_is_on:
             return 0.0
+        # Delta-from-baseline estimate (the truthful one).
+        if rs.verify_pre_output_w is not None:
+            return max(0.0, float(current_output_w) - float(rs.verify_pre_output_w))
+        # Fallback: container restarted mid-session and we lost the
+        # baseline. Use the configured car_load_w; the per-bucket
+        # output_wh clamp in record() will at least cap us at the
+        # physical maximum.
         return float(cfg.get("car_load_w") or 0)
     except Exception:
         return 0.0
@@ -1930,10 +1955,15 @@ async def _solar_charge_evaluate(record: bool = True,
                 no_load_cooldown_until=now_ts + cooldown_s,
             )
         else:
-            # Verification passed — clear the verify state.
+            # Verification passed — clear the deadline flag (we've
+            # confirmed the load showed up). KEEP verify_pre_output_w
+            # though: the bridge poll loop uses it as the running
+            # house-load baseline so diverted_w can be estimated as
+            # output_w - baseline rather than the configured car_load_w
+            # (which over-counts when house load drops or under-counts
+            # when it spikes). Cleared on voluntary OFF below.
             solar_charge._update_runtime(
                 device_sn,
-                verify_pre_output_w=None,
                 verify_deadline_ts=0.0,
             )
 
