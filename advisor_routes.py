@@ -260,8 +260,26 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         "fitted_inverter_overhead_pct": (round(fitted_overhead_pct, 4)
                                          if fitted_overhead_pct is not None else None),
         "fitted_drain_n_windows": fitted_drain_n,
-        "fitted_idle_overhead_w": (round(fitted_parasitic_w, 1)
-                                   if fitted_parasitic_w is not None else None),
+        # Per-pack BMS baseline term (constant; PER_PACK_BASELINE_W × pack_count).
+        # Added separately from fitted_parasitic_w so the advisor can reason
+        # about the two contributions independently. effective_parasitic_w =
+        # fitted_parasitic_w + pack_baseline_w is what the simulator actually
+        # uses as the constant drain baseline; that's the field worth comparing
+        # to empirical reconciliations.
+        "per_pack_baseline_w": forecaster.PER_PACK_BASELINE_W,
+        "pack_baseline_w": round(forecaster.per_pack_baseline_w(pack_count), 1),
+        "effective_parasitic_w": (
+            round((fitted_parasitic_w or 0)
+                  + forecaster.per_pack_baseline_w(pack_count), 1)
+        ),
+        # Legacy alias — kept so older narrator code doesn't break, but now
+        # holds the EFFECTIVE figure (main + pack) since callers comparing
+        # against empirical observations want the full baseline.
+        "fitted_idle_overhead_w": (
+            round((fitted_parasitic_w or 0)
+                  + forecaster.per_pack_baseline_w(pack_count), 1)
+            if fitted_parasitic_w is not None else None
+        ),
         "fitted_idle_overhead_n_windows": fitted_drain_n,
         # `forecast_accuracy_summary` (no suffix) is the PRIMARY headline
         # the advisor should reason from: post-fix predictions only,
@@ -296,6 +314,40 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     """Return the rolling list of fixes the advisor needs to know about
     when interpreting historical samples / predictions / decisions."""
     return [
+        {
+            "ts_iso": "2026-05-23T23:55:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Drain model extended to drain_w = parasitic_w + "
+                "pack_count * PER_PACK_BASELINE_W + load_w * (1 + "
+                "overhead_pct) — a NEW constant term that scales with "
+                "expansion pack count. Default PER_PACK_BASELINE_W = "
+                "60W; on the user's 5-pack 5000+ that's 300W of "
+                "previously-unmodeled BMS/balancing draw. Closes the "
+                "~320W gap you flagged 2026-05-23T23:23:09 (parasitic_w "
+                "fitting at 39.7W vs empirical ~410W). "
+                "fit_drain_model now accepts `pack_count` and "
+                "SUBTRACTS pack_count*PER_PACK_BASELINE_W from each "
+                "window's observed drain before attributing residual "
+                "to (parasitic_w, overhead_pct), so the fit's "
+                "parasitic_w now cleanly captures the main-unit-only "
+                "residual. build_forecast adds the pack baseline back "
+                "to produce `effective_parasitic_w` for the simulator. "
+                "Bundle fields exposed: `pack_count`, `pack_baseline_w`, "
+                "`effective_parasitic_w`. `fitted_idle_overhead_w` "
+                "(legacy alias) now holds the EFFECTIVE figure (main + "
+                "packs) since that's what to compare against empirical "
+                "reconciliations. Single-unit devices (pack_count=0) "
+                "behave exactly as before — regression-guarded with "
+                "test_fit_drain_model_pack_count_zero_unchanged. "
+                "Empirically on the user's rig: pre-fix predicted "
+                "sunrise SOC ~80% (cause of 5/22's 20%-actual blowout); "
+                "post-fix ~44-52% — much more conservative and matches "
+                "the observed drain. Remaining 110W residual gap "
+                "(empirical 410W vs new model 300W) may need bumping "
+                "PER_PACK_BASELINE_W to 70-80W after more days of data."
+            ),
+        },
         {
             "ts_iso": "2026-04-30T14:30:00+00:00",
             "subsystem": "smart_charge",
