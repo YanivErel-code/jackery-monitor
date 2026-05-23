@@ -72,12 +72,12 @@ PORT = int(os.environ.get("BRIDGE_PORT", "8766"))
 # /data/settings.json; the env vars are still consulted as fallback defaults
 # inside the settings module. We read them per-loop-iteration so a settings
 # change applies on the next cycle without a bridge restart.
+import kasa_client  # noqa: E402  for the inverter-protect fast-trip from MQTT push
 import settings as user_settings  # noqa: E402  -- after env reads above
+import solar_charge  # noqa: E402  shared config + overload-state file (writer-side)
 from device_client import (  # noqa: E402  shares the model_code -> "portable"/"box" heuristic with the server
     device_type_for,
 )
-import solar_charge  # noqa: E402  shared config + overload-state file (writer-side)
-import kasa_client  # noqa: E402  for the inverter-protect fast-trip from MQTT push
 
 # ---- credential storage (multi-backend) ----
 #

@@ -46,13 +46,13 @@ import backup_discover
 import cost as cost_module
 import energy_db
 import forecaster
+import inverter_watchdog
 import kasa_client
 import kasa_creds
 import location as device_location
 import settings as user_settings
 import smart_charge
 import solar_charge
-import inverter_watchdog
 import weather_client
 from automation import AutomationEngine, AutomationError
 from device_client import (
