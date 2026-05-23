@@ -509,6 +509,18 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         solar_wh = ((prev_solar + solar_w) / 2.0) * (dt / 3600.0)
         ac_wh = ((prev_ac + ac_input_w) / 2.0) * (dt / 3600.0)
         div_wh = ((prev_div + solar_charge_diverted_w) / 2.0) * (dt / 3600.0)
+        # Physical-reality clamp: diverted energy in this interval CAN'T
+        # exceed total output energy. If the Jackery delivered 500W
+        # during this dt but the solar_charge controller (which doesn't
+        # know whether anything's actually plugged in) was reporting
+        # 1300W diverted, the smaller value is the truth: you can't
+        # divert more than the inverter actually pushed out. Pre-fix,
+        # the controller would happily record full car_load_w while
+        # the plug was electrically ON but nothing was drawing —
+        # leading to "diverted=21Wh, output=7Wh" buckets that
+        # over-counted today's diversion by 5+ kWh in a single
+        # overnight session.
+        div_wh = min(div_wh, out_wh)
         bucket = int(ts // BUCKET_S) * BUCKET_S
 
         with self._conn() as c:
