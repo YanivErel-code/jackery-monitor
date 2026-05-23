@@ -3815,6 +3815,9 @@ function applyStatus(s) {
     const acBtn = $('ac-charge-toggle');
     if (acBtn) acBtn.hidden = true;
     refreshAcChargeButton().catch(() => {});
+    const solBtn = $('solar-charge-toggle');
+    if (solBtn) solBtn.hidden = true;
+    refreshSolarChargeButton().catch(() => {});
   }
 
   // Pack data piggy-backs on the WS payload — the bridge has it pushed
@@ -4016,120 +4019,141 @@ function applyStatus(s) {
 }
 
 // ============================================================
-// AC CHARGING — manual override of the smart-charge plug.
-// Renders only when the user has assigned a Kasa plug to this
-// device's smart-charge config. Inlined as the 5th button in the
-// Outputs row; auto-hides when no plug is configured. When
-// smart-charge mode is 'active' the button gets a yellow border
-// and a tooltip explaining the loop will re-decide on the next
-// 5-min tick (Q4-A: warn but don't block).
+// KASA PLUG TOGGLE (factory) — backs both the AC-charge and the
+// Excess-diversion (solar_charge) buttons in the Power panel.
+//
+// Each button is bound to one controller's per-device config
+// endpoint (smart_charge or solar_charge) and renders only when
+// the user has assigned a Kasa plug to that controller. Inlined
+// as the 5th/6th button in the Power row; auto-hides when no
+// plug is configured.
+//
+// When the controller's mode is 'active' the button gets a
+// yellow border + tooltip explaining the loop will re-decide on
+// the next tick (Q4-A: warn but don't block). For smart_charge
+// the loop is 5 min; for solar_charge it's 30s.
+//
+// Error path: the kasa backend already retries 3x
+// (kasa_client._with_retry), so when a click bubbles back here
+// the plug is genuinely unreachable. We:
+//   1. Re-sync to actual plug state so the button reflects truth
+//      (may have succeeded server-side even if the response was
+//      lost) — user can immediately click again to retry.
+//   2. Surface the error as a tooltip + yellow border, NOT as a
+//      replacement button label. State stays readable.
 // ============================================================
-let _acChargeBusy = false;
-let _acChargeLastDeviceSn = null;
+function makeKasaPlugToggle({ buttonId, stateId, controllerName,
+                             configPath, revertWindow }) {
+  let busy = false;
+  const btn = document.getElementById(buttonId);
 
-async function refreshAcChargeButton() {
-  const btn = $('ac-charge-toggle');
-  if (!btn) return;
-  const deviceSn = activeJackeryDevice()?.device_sn;
-  if (!deviceSn) { btn.hidden = true; return; }
-  let cfg = null;
-  try {
-    const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`);
-    if (r.ok) cfg = (await r.json()).config;
-  } catch (e) { /* ignore */ }
-  const host = cfg?.kasa_device_host;
-  if (!host) { btn.hidden = true; return; }
-  btn.hidden = false;
-  const mode = cfg.mode || 'off';
-  if (mode === 'active') {
-    btn.classList.add('warn');
-    btn.title = `Plug ${host} · smart-charge ${mode}\nWarning: your manual toggle may be reverted within 5 min.`;
-  } else {
-    btn.classList.remove('warn');
-    btn.title = `Plug ${host} · smart-charge ${mode}`;
-  }
-  // Read plug state. Failures = unknown (—).
-  const stateEl = $('ac-charge-state');
-  if (!_acChargeBusy) {
+  async function readHost() {
+    const deviceSn = activeJackeryDevice()?.device_sn;
+    if (!deviceSn) return { deviceSn: null, cfg: null };
     try {
-      const r = await fetch(`/api/kasa/status?host=${encodeURIComponent(host)}`);
-      if (r.ok) {
-        const j = await r.json();
-        const isOn = !!j.is_on;
-        btn.classList.toggle('on', isOn);
-        if (stateEl) stateEl.textContent = isOn ? 'ON' : 'OFF';
-      } else {
+      const r = await fetch(`${configPath}?device_sn=${encodeURIComponent(deviceSn)}`);
+      if (r.ok) return { deviceSn, cfg: (await r.json()).config };
+    } catch (e) { /* ignore */ }
+    return { deviceSn, cfg: null };
+  }
+
+  async function refresh() {
+    if (!btn) return;
+    const { deviceSn, cfg } = await readHost();
+    if (!deviceSn) { btn.hidden = true; return; }
+    const host = cfg?.kasa_device_host;
+    if (!host) { btn.hidden = true; return; }
+    btn.hidden = false;
+    const mode = cfg.mode || 'off';
+    if (mode === 'active') {
+      btn.classList.add('warn');
+      btn.title = `Plug ${host} · ${controllerName} ${mode}\nWarning: your manual toggle may be reverted within ${revertWindow}.`;
+    } else {
+      btn.classList.remove('warn');
+      btn.title = `Plug ${host} · ${controllerName} ${mode}`;
+    }
+    // Read plug state. Failures = unknown (—). Skip while the
+    // user's mid-click so optimistic state isn't clobbered.
+    const stateEl = document.getElementById(stateId);
+    if (!busy) {
+      try {
+        const r = await fetch(`/api/kasa/status?host=${encodeURIComponent(host)}`);
+        if (r.ok) {
+          const isOn = !!(await r.json()).is_on;
+          btn.classList.toggle('on', isOn);
+          if (stateEl) stateEl.textContent = isOn ? 'ON' : 'OFF';
+        } else {
+          btn.classList.remove('on');
+          if (stateEl) stateEl.textContent = '—';
+        }
+      } catch (e) {
         btn.classList.remove('on');
         if (stateEl) stateEl.textContent = '—';
       }
-    } catch (e) {
-      btn.classList.remove('on');
-      if (stateEl) stateEl.textContent = '—';
     }
   }
-}
 
-document.getElementById('ac-charge-toggle')?.addEventListener('click', async () => {
-  if (_acChargeBusy) return;
-  const deviceSn = activeJackeryDevice()?.device_sn;
-  if (!deviceSn) return;
-  let host = null;
-  try {
-    const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`);
-    if (r.ok) host = (await r.json()).config?.kasa_device_host;
-  } catch (e) { return; }
-  if (!host) return;
-  const btn = $('ac-charge-toggle');
-  const stateEl = $('ac-charge-state');
-  const wantOn = !btn?.classList.contains('on');
-  _acChargeBusy = true;
-  if (btn) btn.classList.add('pending');
-  if (stateEl) stateEl.textContent = wantOn ? 'ON…' : 'OFF…';
-  try {
-    const r = await fetch('/api/kasa/test', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ host, on: wantOn }),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(j.detail || `HTTP ${r.status}`);
-    }
-    // Optimistic update + clear any stale error decoration left over
-    // from a prior failed click. refreshAcChargeButton fires on the
-    // next 30s tick to confirm the actual plug state.
-    if (btn) {
+  btn?.addEventListener('click', async () => {
+    if (busy) return;
+    const { cfg } = await readHost();
+    const host = cfg?.kasa_device_host;
+    if (!host) return;
+    const stateEl = document.getElementById(stateId);
+    const wantOn = !btn.classList.contains('on');
+    busy = true;
+    btn.classList.add('pending');
+    if (stateEl) stateEl.textContent = wantOn ? 'ON…' : 'OFF…';
+    try {
+      const r = await fetch('/api/kasa/test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ host, on: wantOn }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.detail || `HTTP ${r.status}`);
+      }
+      // Optimistic update + clear stale error decoration. refresh()
+      // fires on the next 30s tick to confirm the actual plug state.
       btn.classList.toggle('on', wantOn);
       btn.classList.remove('pending', 'warn');
-    }
-    if (stateEl) stateEl.textContent = wantOn ? 'ON' : 'OFF';
-    _acChargeBusy = false;
-    refreshAcChargeButton().catch(() => {}); // re-sync title + state
-  } catch (e) {
-    // Backend already retried 3x (kasa_client._with_retry) before
-    // bubbling up here, so by the time we see this the plug is
-    // genuinely unreachable or returning an auth error. Two fixes
-    // for the "stuck on err / refresh required" pain:
-    //   1. Re-sync to actual plug state so the button reflects truth
-    //      (may have succeeded server-side even if the response was
-    //      lost) — user can immediately click again to retry.
-    //   2. Surface the error as a tooltip + yellow border, NOT as a
-    //      replacement button label. State stays readable.
-    _acChargeBusy = false;
-    if (btn) btn.classList.remove('pending');
-    await refreshAcChargeButton().catch(() => {});
-    if (btn) {
+      if (stateEl) stateEl.textContent = wantOn ? 'ON' : 'OFF';
+      busy = false;
+      refresh().catch(() => {});
+    } catch (e) {
+      busy = false;
+      btn.classList.remove('pending');
+      await refresh().catch(() => {});
       btn.classList.add('warn');
       btn.title = `Last toggle failed: ${e.message || e}\nClick to retry. Hover for details.`;
     }
-  }
-});
+  });
 
-// Periodic refresh — plug state changes infrequently so 30s is plenty.
-setInterval(refreshAcChargeButton, 30_000);
-// Initial render — fire once at module load AND once when applyStatus
-// resolves an active device, so the button shows up without waiting 30s.
-refreshAcChargeButton().catch(() => {});
+  // Periodic refresh — plug state changes infrequently so 30s is plenty.
+  setInterval(refresh, 30_000);
+  // Initial render — fire once at module load AND once when applyStatus
+  // resolves an active device, so the button shows up without waiting 30s.
+  refresh().catch(() => {});
+
+  return { refresh };
+}
+
+const acChargeToggle = makeKasaPlugToggle({
+  buttonId: 'ac-charge-toggle',
+  stateId: 'ac-charge-state',
+  controllerName: 'smart-charge',
+  configPath: '/api/smart_charge/config',
+  revertWindow: '5 min',
+});
+const solarChargeToggle = makeKasaPlugToggle({
+  buttonId: 'solar-charge-toggle',
+  stateId: 'solar-charge-state',
+  controllerName: 'solar-charge',
+  configPath: '/api/solar_charge/config',
+  revertWindow: '30s',
+});
+const refreshAcChargeButton = acChargeToggle.refresh;
+const refreshSolarChargeButton = solarChargeToggle.refresh;
 
 // ============================================================
 // POWER FLOW DIAGRAM (Tesla-app style)
