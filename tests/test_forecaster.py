@@ -853,6 +853,118 @@ def test_fit_drain_model_recovers_parasitic_via_multi_hour_runs():
     )
 
 
+def test_per_pack_baseline_helper():
+    """Pure helper: pack_count × 60W, with 0/negative clamped to 0."""
+    assert forecaster.per_pack_baseline_w(0) == 0.0
+    assert forecaster.per_pack_baseline_w(1) == forecaster.PER_PACK_BASELINE_W
+    assert forecaster.per_pack_baseline_w(5) == 5 * forecaster.PER_PACK_BASELINE_W
+    assert forecaster.per_pack_baseline_w(-1) == 0.0
+
+
+def test_fit_drain_model_pack_count_zero_unchanged():
+    """Single-unit devices (pack_count=0) behave exactly as before —
+    pack_baseline=0 means observed_drain is unchanged through the fit.
+    This is the regression guard that proves the change is backwards
+    compatible with single-unit devices like the HomePower 3000."""
+    base = 1_700_000_000
+    history = []
+    # Same shape as test_fit_drain_model_recovers_parasitic_and_overhead:
+    # true drain = 300 + load × 1.10, single unit (no packs).
+    for i, load_w in enumerate([200, 400, 600, 800, 1000, 1200,
+                                 200, 500, 700, 900, 1100, 1300]):
+        true_drain = 300 + load_w * 1.10
+        pp_drop = true_drain / 30000 * 100
+        soc0 = 99
+        soc1 = round(soc0 - pp_drop, 0)
+        history.append({"ts": base + i * 3 * 3600,
+                        "battery_pct": soc0, "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": base + i * 3 * 3600 + 3600,
+                        "battery_pct": int(soc1), "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+    parasitic_no_packs, overhead_no_packs, n_no_packs = forecaster.fit_drain_model(
+        history, capacity_wh=30000, pack_count=0,
+    )
+    # Default (no kwarg) must produce identical result.
+    parasitic_default, overhead_default, n_default = forecaster.fit_drain_model(
+        history, capacity_wh=30000,
+    )
+    assert parasitic_no_packs == parasitic_default
+    assert overhead_no_packs == overhead_default
+    assert n_no_packs == n_default
+
+
+def test_fit_drain_model_pack_count_shifts_parasitic_down():
+    """Multi-pack rig: same observed drain, fit attributes 5×60=300W to
+    pack baseline so the main-unit parasitic_w fitted from the residual
+    is ~300W lower than the pack_count=0 case. The two fits should
+    differ by approximately PER_PACK_BASELINE_W × pack_count."""
+    base = 1_700_000_000
+    history = []
+    # True empirical drain on a 5-pack rig: 600W main parasitic +
+    # 5×60=300W pack baseline + load×1.10 = 900 + load×1.10.
+    for i, load_w in enumerate([200, 400, 600, 800, 1000, 1200,
+                                 200, 500, 700, 900, 1100, 1300]):
+        true_drain = 900 + load_w * 1.10
+        pp_drop = true_drain / 30000 * 100
+        soc0 = 99
+        soc1 = round(soc0 - pp_drop, 0)
+        history.append({"ts": base + i * 3 * 3600,
+                        "battery_pct": soc0, "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+        history.append({"ts": base + i * 3 * 3600 + 3600,
+                        "battery_pct": int(soc1), "output_wh": load_w,
+                        "solar_wh": 0, "ac_input_wh": 0})
+    # With pack_count=0, the fit would have attributed the FULL 900W
+    # baseline to parasitic_w (but probably gets clamped at 1000 or
+    # falls back). With pack_count=5, the pack term picks up 300W and
+    # the residual ~600W lands in parasitic_w cleanly.
+    parasitic_packs, overhead_packs, n_packs = forecaster.fit_drain_model(
+        history, capacity_wh=30000, pack_count=5,
+    )
+    assert n_packs >= 5
+    # Expect ~600W main parasitic (allowing quantization slop).
+    assert 450 <= parasitic_packs <= 750, (
+        f"got parasitic_w={parasitic_packs}; should land near 600W with "
+        f"5×{forecaster.PER_PACK_BASELINE_W}W subtracted as pack baseline"
+    )
+
+
+def test_build_forecast_effective_parasitic_includes_pack_baseline():
+    """Sanity: build_forecast surfaces effective_parasitic_w as the
+    sum of fitted main-unit parasitic + pack contribution."""
+    base = 1_700_000_000
+    history = []
+    # Build enough history to satisfy MIN_FORECAST_HISTORY_HOURS.
+    for i in range(40):
+        history.append({
+            "ts": base + i * 3600,
+            "battery_pct": max(20, 99 - i * 2),
+            "output_wh": 400,
+            "solar_wh": 0,
+            "ac_input_wh": 0,
+        })
+    weather = [{"ts": base + 40 * 3600 + h * 3600, "ghi_w_m2": 0,
+                "cloud_cover_pct": 100} for h in range(24)]
+    res = forecaster.build_forecast(
+        energy_history=history,
+        weather_hourly=weather,
+        starting_soc_pct=50,
+        capacity_wh=30000,
+        now_ts=base + 40 * 3600,
+        pack_count=5,
+    )
+    assert res["ready"]
+    assert "pack_baseline_w" in res
+    assert "effective_parasitic_w" in res
+    assert res["pack_count"] == 5
+    assert res["pack_baseline_w"] == 5 * forecaster.PER_PACK_BASELINE_W
+    assert (res["effective_parasitic_w"]
+            == res["parasitic_w"] + res["pack_baseline_w"])
+    # Back-compat: idle_overhead_w now reflects the effective figure.
+    assert res["idle_overhead_w"] == res["effective_parasitic_w"]
+
+
 def test_fit_drain_model_filters_short_runs_for_parasitic_median():
     """Verify the ≥4h length filter: short noisy runs are excluded
     from the parasitic median when enough long runs exist. Earlier

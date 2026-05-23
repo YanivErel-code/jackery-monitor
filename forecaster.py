@@ -237,13 +237,31 @@ INVERTER_OVERHEAD_PCT = DEFAULT_INVERTER_OVERHEAD_PCT
 DEFAULT_IDLE_OVERHEAD_W = 50.0  # was 200 (flat); now 10pct of 500W typical
 IDLE_OVERHEAD_W = DEFAULT_IDLE_OVERHEAD_W
 
-# Constant parasitic baseline (W). Captures BMS, idle inverter, pack-balancing
-# current, DC-bus draw, and any other steady-state load that doesn't scale
-# with AC throughput. Fit per-device by `fit_drain_model`; the default is a
-# conservative "small backup unit" baseline. For multi-pack rigs the fitted
-# value is typically 200-500W (advisor flagged a 430W gap on the user's
-# 5000+ on 2026-05-04 that the pure-percentage model couldn't represent).
+# Constant parasitic baseline (W). Captures BMS, idle inverter, and DC-bus
+# draw on the MAIN unit (single-pack baseline). Pack-balancing draw is now
+# tracked separately via PER_PACK_BASELINE_W below — see fit_drain_model.
+# Fit per-device by `fit_drain_model`; the default is a conservative
+# "small backup unit" baseline.
 DEFAULT_PARASITIC_W = 50.0
+
+# Per-expansion-pack BMS/balancing draw (W). Multi-pack LiFePO4 rigs add a
+# roughly-constant baseline draw per pack — independent BMS, balancing
+# current between cells, contactor coils. Empirically ~60W per pack on the
+# 5000+ (5 packs ≈ 300W). The advisor flagged the gap on 2026-05-23: a
+# clean 5h overnight window on the 5-pack rig showed parasitic ≈ 410W
+# vs the fit's ≈ 40W, the gap being 5×60W ≈ 300W of per-pack contribution
+# that fit_drain_model couldn't capture by taking the median of bimodal
+# (quiet vs BMS-active nights) implied parasitics. Modeling it as a
+# separate constant times pack_count attributes the right share to packs
+# vs the main unit's parasitic_w, and the median across windows then
+# captures the cleaner main-unit-only residual.
+PER_PACK_BASELINE_W = 60.0
+
+
+def per_pack_baseline_w(pack_count: int) -> float:
+    """Total pack-side baseline draw for a rig with `pack_count` expansion
+    packs. Returns 0 for single-unit devices (pack_count=0)."""
+    return float(max(0, int(pack_count))) * PER_PACK_BASELINE_W
 
 # Minimum p90/p10 load ratio to trust the joint OLS fit of (parasitic_w,
 # overhead_pct). When loads are narrow — e.g. a device that runs the same
@@ -600,19 +618,27 @@ def fit_drain_model(
     default_parasitic_w: float = DEFAULT_PARASITIC_W,
     default_overhead_pct: float = DEFAULT_INVERTER_OVERHEAD_PCT,
     min_windows: int = 5,
+    pack_count: int = 0,
 ) -> tuple[float, float, int]:
     """Joint 2-parameter fit of the drain model::
 
-        drain_w ≈ parasitic_w + load_w * (1 + overhead_pct)
+        drain_w ≈ parasitic_w + (pack_count * PER_PACK_BASELINE_W)
+                 + load_w * (1 + overhead_pct)
 
     The pure-percentage model (`fit_inverter_overhead_pct`) systematically
-    misses the steady-state baseline draw — BMS, idle inverter, pack
-    balancing current, DC-bus losses. For multi-pack setups that
-    baseline can be 200-500W and is too large to absorb into a
-    "percentage of throughput" framing without the fit's 50% sanity
-    clamp rejecting every window. The advisor flagged a 430W
-    unaccounted gap on the user's 5000+ on 2026-05-04 that boiled down
-    to exactly this model limitation.
+    misses the steady-state baseline draw — main-unit BMS, idle inverter,
+    DC-bus losses. The advisor flagged a 430W unaccounted gap on the
+    user's 5000+ on 2026-05-04 that boiled down to exactly this model
+    limitation, AND a residual gap on 2026-05-23 that turned out to be
+    PER-PACK BMS/balancing scaling with the expansion pack count.
+
+    `pack_count` (default 0) is the number of expansion packs on this
+    device. When > 0, we SUBTRACT `pack_count * PER_PACK_BASELINE_W`
+    from each window's observed drain BEFORE attributing the residual
+    to (parasitic_w, overhead_pct). That way the fit's parasitic_w
+    captures the MAIN UNIT's residual only, and the per-pack
+    contribution is attributed cleanly as a separate constant term
+    that build_forecast adds back when feeding the simulator.
 
     Returns ``(parasitic_w, overhead_pct, n_windows)``. Falls back to
     ``(default_parasitic_w, default_overhead_pct, n)`` when the fit
@@ -674,6 +700,7 @@ def fit_drain_model(
     # the median up. Single-unit devices have no pack data → this gate
     # never fires for them.
     require_system_soc = any(_row_has_system_soc(r) for r in rows)
+    pack_baseline_w = per_pack_baseline_w(pack_count)
     pairs: list[tuple[float, float]] = []
     for i in range(len(rows) - 1):
         a, b = rows[i], rows[i + 1]
@@ -704,7 +731,12 @@ def fit_drain_model(
         reported_load_w = (a.get("output_wh") or 0) / dt_h
         if reported_load_w < MIN_OUT_W:
             continue
-        pairs.append((reported_load_w, observed_drain_w))
+        # Subtract the per-pack constant before attributing the rest to
+        # (parasitic_w, overhead_pct). Clamp to 0 so a noisy window
+        # where pack baseline > observed drain doesn't go negative and
+        # bias the fit downward.
+        adjusted_drain_w = max(0.0, observed_drain_w - pack_baseline_w)
+        pairs.append((reported_load_w, adjusted_drain_w))
 
     n = len(pairs)
     if n < min_windows:
@@ -751,8 +783,12 @@ def fit_drain_model(
         long_runs = [t for t in run_triples if t[2] >= 4.0]
         median_pool = long_runs if len(long_runs) >= 2 else run_triples
         if len(median_pool) >= 2:
+            # Subtract pack baseline from observed drain before
+            # attributing the rest to (parasitic + load*overhead). Same
+            # reasoning as the joint-fit path above: cleanly separate
+            # main-unit parasitic from per-pack contribution.
             implied = sorted(
-                d - load * (1.0 + default_overhead_pct)
+                max(0.0, d - pack_baseline_w) - load * (1.0 + default_overhead_pct)
                 for load, d, _ in median_pool
             )
             parasitic_w = implied[len(implied) // 2]
@@ -1657,6 +1693,7 @@ def build_forecast(
     ac_charge_floor_pct: float | None = None,
     extra_load_w: float | None = None,
     extra_load_floor_pct: float | None = None,
+    pack_count: int = 0,
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
@@ -1691,8 +1728,14 @@ def build_forecast(
     # consistently flagged as an "unaccounted gap" on multi-pack rigs
     # (e.g. 430W on the user's 5000+ on 2026-05-04).
     parasitic_w, overhead_pct, overhead_n = fit_drain_model(
-        energy_history, capacity_wh,
+        energy_history, capacity_wh, pack_count=pack_count,
     )
+    # Effective parasitic for the simulator: main-unit residual (from
+    # the fit, with pack contribution already subtracted) PLUS the
+    # constant per-pack BMS baseline. Single-unit devices (pack_count=0)
+    # get pack_baseline=0 and behave exactly as before.
+    pack_baseline_w = per_pack_baseline_w(pack_count)
+    effective_parasitic_w = parasitic_w + pack_baseline_w
     # Per-device charge efficiency, same idea: fit from the ratio of
     # observed SOC gain to reported input_wh on clean charging windows.
     charge_eff, charge_eff_n = fit_charge_efficiency(energy_history, capacity_wh)
@@ -1742,7 +1785,7 @@ def build_forecast(
             solar_w = solar_cap
             capped = True
         load_w = expected_load_w(profile, ts,
-                                  idle_overhead_w=parasitic_w,
+                                  idle_overhead_w=effective_parasitic_w,
                                   inverter_overhead_pct=overhead_pct)
         forecast_hours.append({
             "ts": ts,
@@ -1788,19 +1831,26 @@ def build_forecast(
         # load profile, replacing the old 2*mean heuristic that biased
         # busy-hour predictions upward.
         "output_w_p95": round(out_p95, 1),
-        # Hybrid drain model: parasitic_w (constant baseline) +
-        # base_load * (1 + inverter_overhead_pct). _n reports how many
-        # clean discharge windows fed the joint fit — when small, both
-        # values are population defaults (50W parasitic, 10% overhead).
+        # Hybrid drain model: parasitic_w (main-unit constant baseline)
+        # + pack_baseline_w (per-pack BMS, scales with expansion pack
+        # count) + base_load * (1 + inverter_overhead_pct). _n reports
+        # how many clean discharge windows fed the joint fit — when
+        # small, parasitic_w + overhead_pct are population defaults
+        # (50W, 10%); pack_baseline_w is computed from pack_count
+        # regardless of fit confidence.
         "parasitic_w": round(parasitic_w, 1),
+        "pack_baseline_w": round(pack_baseline_w, 1),
+        "pack_count": int(pack_count),
+        "effective_parasitic_w": round(effective_parasitic_w, 1),
         "inverter_overhead_pct": round(overhead_pct, 4),
         "inverter_overhead_n_windows": overhead_n,
         "inverter_overhead_source": overhead_source,
         # Back-compat: legacy clients read `idle_overhead_w` expecting an
-        # absolute watt figure. Surface the fitted parasitic_w directly
-        # under that name (it's now the right interpretation), and keep
-        # _n_windows wired to the same fit count.
-        "idle_overhead_w": round(parasitic_w, 1),
+        # absolute watt figure. Surface the EFFECTIVE parasitic (main +
+        # packs) under that name since callers feeding it back into
+        # expected_load_w expect the full baseline, not just the main
+        # share.
+        "idle_overhead_w": round(effective_parasitic_w, 1),
         "idle_overhead_n_windows": overhead_n,
         # Auto-fitted per-device charge efficiency (input_wh → stored_wh
         # ratio). Same n_windows convention as idle_overhead.

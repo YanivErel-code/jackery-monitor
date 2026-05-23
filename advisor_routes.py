@@ -90,8 +90,18 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
             device_sn, hours=14 * 24, bucket_s=3600,
             main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
         )
+        # Mirror the canonical call in build_forecast — pass pack_count
+        # so the per-pack BMS baseline is correctly attributed during
+        # the fit. Without it, multi-pack rigs over-attribute pack
+        # contribution to parasitic_w (or get clamped to 0 by the
+        # negative-clamp when pack baseline > implied parasitic).
+        try:
+            from server import _pack_count_for  # type: ignore
+            pack_count = _pack_count_for(device_sn)
+        except Exception:
+            pack_count = 0
         fitted_parasitic_w, fitted_overhead_pct, fitted_drain_n = (
-            forecaster.fit_drain_model(ehist, capacity)
+            forecaster.fit_drain_model(ehist, capacity, pack_count=pack_count)
         )
     except Exception as e:
         log.debug("advisor: drain model fit failed: %s", e)

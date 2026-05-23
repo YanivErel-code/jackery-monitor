@@ -689,6 +689,15 @@ def _total_capacity_wh(device_sn: str | None,
     return main_wh
 
 
+def _pack_count_for(device_sn: str | None) -> int:
+    """Number of expansion packs attached to this device (0 if none).
+    Threaded into forecaster.fit_drain_model / build_forecast so the
+    per-pack BMS/balancing baseline is attributed correctly."""
+    if not device_sn:
+        return 0
+    return len(state.battery_packs_by_sn.get(device_sn, []))
+
+
 def _in_progress_savings_row() -> dict | None:
     """A synthetic energy_db.history row covering [last_db_record, now]
     so the cost display reflects current grid/output use without waiting
@@ -1416,6 +1425,7 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
             # overhead on devices with significant constant draw.
             _parasitic_w, pct, n = forecaster.fit_drain_model(
                 _cached_history(device_sn), cap,
+                pack_count=_pack_count_for(device_sn),
             )
             source = "fit" if n >= 5 else "default"
             state.energy.set_device_param(
@@ -1432,6 +1442,7 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
             cap = _resolved_capacity_wh(device_sn)
             parasitic, _pct, n = forecaster.fit_drain_model(
                 _cached_history(device_sn), cap,
+                pack_count=_pack_count_for(device_sn),
             )
             source = "fit" if n >= 5 else "default"
             state.energy.set_device_param(
@@ -1569,12 +1580,14 @@ async def _smart_charge_evaluate(record: bool = True,
         main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
     )
     capacity = _total_capacity_wh(device_sn, model_code)
+    pack_count = _pack_count_for(device_sn)
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
+        pack_count=pack_count,
     )
     # Counterfactual — same forecast computed without the AC charge
     # floor injected. Used by compute_plan to decide if AC is actually
@@ -1586,6 +1599,7 @@ async def _smart_charge_evaluate(record: bool = True,
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
         ac_charge_floor_pct=None,
+        pack_count=pack_count,
     )
     # If we don't have enough history yet to fit a trustworthy forecast,
     # don't act on it — return a no-op plan so the controller stays in
@@ -1884,6 +1898,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     starting_soc_pct=starting_soc,
                     capacity_wh=capacity,
                     ac_charge_floor_pct=None,
+                    pack_count=_pack_count_for(device_sn),
                 )
                 # The simulator's floor for distributing extra_load_w is
                 # the controller's ON threshold (target + margin +
@@ -1907,6 +1922,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     ac_charge_floor_pct=None,
                     extra_load_w=float(cfg.get("car_load_w") or 1400),
                     extra_load_floor_pct=sim_floor,
+                    pack_count=_pack_count_for(device_sn),
                 )
 
                 def _sunrise_from(fcast):
@@ -2748,6 +2764,7 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
+        pack_count=_pack_count_for(device_sn),
     )
     # Only persist when the forecast is actually fit — recording an
     # empty placeholder would corrupt prediction-accuracy analytics.
