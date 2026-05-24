@@ -120,13 +120,20 @@ def test_predictions_made_at_only_bumps_when_writing_predictions(db):
     must remain T1, not jump to T2."""
     sn = "SN-MADE-AT"
     db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    import datetime as _dt
     import time as _time
     t1 = int(_time.time()) - 3600
     sunset_ts = t1 - 60  # already in the past relative to t2
     sunrise_ts = t1 - 30
+    # Use yesterday (UTC) so the row falls inside the days=14 window
+    # regardless of when the test runs. Hardcoding a fixed date made
+    # this test flaky at UTC midnight rollover — the date eventually
+    # ages out of any fixed lookback window.
+    local_date = (_dt.datetime.utcfromtimestamp(_time.time() - 86400)
+                  .strftime("%Y-%m-%d"))
     # Step 1: write the prediction. predictions_made_at should ≈ now.
     db.upsert_daily_summary(
-        device_sn=sn, local_date="2026-05-09",
+        device_sn=sn, local_date=local_date,
         sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
         predicted_sunset_soc_pct=80.0,
         predicted_sunrise_soc_pct=42.0,
@@ -140,7 +147,7 @@ def test_predictions_made_at_only_bumps_when_writing_predictions(db):
     # be detectable. predictions_made_at should NOT change.
     _time.sleep(1.1)
     db.upsert_daily_summary(
-        device_sn=sn, local_date="2026-05-09",
+        device_sn=sn, local_date=local_date,
         sunset_ts=None, sunrise_ts=None,
         predicted_sunset_soc_pct=None,
         actual_sunset_soc_pct=78.0,
