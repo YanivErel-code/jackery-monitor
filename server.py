@@ -754,6 +754,58 @@ def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
     return totals
 
 
+def _record_packs_or_keep_cache(device_sn: str, packs: list, ts: float) -> None:
+    """Cache writer for battery_packs that's resilient to transient
+    cloud blips.
+
+    The Jackery cloud sometimes returns an empty pack list with no
+    error during warm-up (right after auth, during MQTT subscribe,
+    occasional API hiccups). A naive `state.battery_packs_by_sn[sn] =
+    packs` overwrites a populated cache with [], which then:
+      - wipes the advisor's pack_count (forecast drain model regresses)
+      - hides the Battery Packs card in the UI
+      - makes _total_capacity_wh fall back to the override or model
+        default, missing pack capacity
+
+    Heuristic for treating an empty result as genuine vs transient:
+      - cache already empty AND DB has no pack rows for this SN → record
+        empty (this is a single-unit device like the HomePower 3000)
+      - cache already empty AND DB has pack rows → transient blip;
+        re-seed the cache from DB instead of recording empty
+      - cache has packs → ALWAYS treat empty as transient; keep cache
+
+    The last case means a user who physically removes packs has to
+    restart the container OR clear the DB rows to drop the cache —
+    that's an acceptable trade for not flickering on every cloud blip.
+    """
+    if packs:
+        state.battery_packs_by_sn[device_sn] = packs
+        state.last_packs_ts_by_sn[device_sn] = ts
+        return
+    existing = state.battery_packs_by_sn.get(device_sn)
+    if existing:
+        log.debug("battery_packs: RPC returned empty for %s but cache "
+                  "has %d packs — treating as transient, keeping cache",
+                  device_sn, len(existing))
+        return
+    try:
+        db_rows = state.energy.latest_battery_packs(device_sn)
+    except Exception:
+        db_rows = []
+    if db_rows:
+        log.info("battery_packs: RPC returned empty for %s, cache empty "
+                 "but DB has %d packs — re-seeding cache from DB",
+                 device_sn, len(db_rows))
+        state.battery_packs_by_sn[device_sn] = [
+            _db_pack_to_cloud_shape(r) for r in db_rows
+        ]
+        state.last_packs_ts_by_sn[device_sn] = ts
+        return
+    # No cache, no DB rows — this device genuinely has no packs.
+    state.battery_packs_by_sn[device_sn] = []
+    state.last_packs_ts_by_sn[device_sn] = ts
+
+
 async def _refresh_packs_for(device_sn: str, ts: float) -> None:
     """Pull the latest expansion-pack telemetry for `device_sn` and
     update the in-memory cache + (throttled) the energy DB. Throttled
@@ -783,8 +835,8 @@ async def _refresh_packs_for(device_sn: str, ts: float) -> None:
         # the sensor would never produce if it were working. Drop them;
         # downstream code already handles missing values gracefully.
         packs = _sanitize_pack_telemetry(packs)
-        state.battery_packs_by_sn[device_sn] = packs
-        state.last_packs_ts_by_sn[device_sn] = ts
+    _record_packs_or_keep_cache(device_sn, packs, ts)
+    if packs:
         # DB persist throttled separately — the cache is fresh on every
         # iteration but the daily-learning trace only needs minute
         # resolution.
@@ -792,12 +844,6 @@ async def _refresh_packs_for(device_sn: str, ts: float) -> None:
         if ts - last_db >= BATTERY_PACK_DB_PERSIST_S:
             state.energy.record_battery_packs(device_sn, packs, int(ts))
             state.last_packs_db_ts_by_sn[device_sn] = ts
-    else:
-        # Empty list with no error means the device has no expansion
-        # packs (e.g. HomePower 3000). Record that explicitly so the UI
-        # hides the pack card for this device.
-        state.battery_packs_by_sn[device_sn] = []
-        state.last_packs_ts_by_sn[device_sn] = ts
 
 
 def _energy_db_row_to_chart_point(p: dict) -> dict:
@@ -3829,21 +3875,16 @@ async def api_devices_battery_packs(device_sn: str | None = None,
     rpc_err = (result or {}).get("error")
     if rpc_err:
         log.warning("battery_packs API RPC returned error: %s", rpc_err)
-    # Cache the result regardless of which device — switching back later
-    # should hit the cache instantly. Only record empty results explicitly
-    # (no_packs sentinel) so the cache doesn't claim a device has no packs
-    # just because the RPC failed.
-    if packs:
-        state.battery_packs_by_sn[device_sn] = packs
-        state.last_packs_ts_by_sn[device_sn] = time.time()
-        try:
-            state.energy.record_battery_packs(device_sn, packs)
-        except Exception as e:
-            log.debug("record_battery_packs failed: %s", e)
-    elif not rpc_err:
-        # Successful RPC with empty packs = device has no expansion packs.
-        state.battery_packs_by_sn[device_sn] = []
-        state.last_packs_ts_by_sn[device_sn] = time.time()
+    # Cache the result. The helper distinguishes transient empty
+    # (cloud blip) from genuine empty (single-unit device) by
+    # consulting the DB — see _record_packs_or_keep_cache.
+    if not rpc_err:
+        _record_packs_or_keep_cache(device_sn, packs, time.time())
+        if packs:
+            try:
+                state.energy.record_battery_packs(device_sn, packs)
+            except Exception as e:
+                log.debug("record_battery_packs failed: %s", e)
     return {"device_sn": device_sn,
             "packs": packs,
             "main_soc_pct": main_pct,
