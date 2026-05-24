@@ -692,10 +692,31 @@ def _total_capacity_wh(device_sn: str | None,
 def _pack_count_for(device_sn: str | None) -> int:
     """Number of expansion packs attached to this device (0 if none).
     Threaded into forecaster.fit_drain_model / build_forecast so the
-    per-pack BMS/balancing baseline is attributed correctly."""
+    per-pack BMS/balancing baseline is attributed correctly.
+
+    Reads the live in-memory cache first; if the cache is empty for
+    this SN but the DB has persisted pack rows, fall back to the DB
+    count. Otherwise a hydrate-skip / cache-wipe / cold-start edge
+    case could silently zero out pack_count and disable the per-pack
+    drain correction. The advisor flagged this exact scenario on
+    2026-05-24T17:39: rendered header showed '0 expansion packs' while
+    the drain model (which reads the same source from a different code
+    path) saw 5 packs."""
     if not device_sn:
         return 0
-    return len(state.battery_packs_by_sn.get(device_sn, []))
+    cached = len(state.battery_packs_by_sn.get(device_sn, []))
+    if cached > 0:
+        return cached
+    try:
+        db_rows = state.energy.latest_battery_packs(device_sn)
+    except Exception:
+        return 0
+    if db_rows:
+        log.info("_pack_count_for: cache empty for %s but DB has %d "
+                 "packs — using DB count (cache will re-seed on next "
+                 "refresh tick)", device_sn, len(db_rows))
+        return len(db_rows)
+    return 0
 
 
 def _in_progress_savings_row() -> dict | None:
