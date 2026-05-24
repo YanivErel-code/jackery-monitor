@@ -13,11 +13,19 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Force any Node-20-based JS action (e.g. actions/setup-python@v5) onto
+    # the runner's Node 24 ahead of GitHub's June 2026 forced switchover.
+    # Silences the "running on Node.js 20 may not work as expected" warning
+    # without needing a coordinated bump on every action major.
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      # checkout@v5 is Node-24-native; setup-python@v5 still uses Node 20
+      # natively but the env var above forces it onto Node 24.
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5

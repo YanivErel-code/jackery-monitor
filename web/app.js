@@ -13,6 +13,17 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Canonical HTML escape. Use this whenever interpolating untrusted data
+// (API responses, error messages, cloud-probed values) into innerHTML.
+// Several sections also define a local `safe = ...` shim — those are
+// kept for now to avoid a 100+ site rename, but they behave identically.
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 // ---------- state ----------
 let lastStatus = null;
 let lastDevices = [];
@@ -927,7 +938,7 @@ async function loadDeviceParams() {
     const j = await r.json();
     renderDeviceParams(j.params || [], dev.device_sn);
   } catch (e) {
-    list.innerHTML = `<div class="hint">Failed to load: ${e.message || e}</div>`;
+    list.innerHTML = `<div class="hint">Failed to load: ${escapeHtml(e.message || e)}</div>`;
   }
 }
 
@@ -1061,7 +1072,7 @@ async function inspectParam(btn, deviceSn) {
         </div>
       </div>`;
   } catch (e) {
-    panel.innerHTML = `<div class="hint" style="padding:8px 12px;color:#ef4444">Failed: ${e.message || e}</div>`;
+    panel.innerHTML = `<div class="hint" style="padding:8px 12px;color:#ef4444">Failed: ${escapeHtml(e.message || e)}</div>`;
   }
 }
 
@@ -1453,7 +1464,7 @@ async function loadSavedKasa() {
     _savedKasaDevices = j.devices || [];
     renderSavedKasa(_savedKasaDevices);
   } catch (e) {
-    list.innerHTML = `<div class="auto-empty">Failed to load: ${e.message || e}</div>`;
+    list.innerHTML = `<div class="auto-empty">Failed to load: ${escapeHtml(e.message || e)}</div>`;
   }
   _scheduleSavedKasaPoll();
 }
@@ -1694,7 +1705,7 @@ async function loadRules() {
     _allRules = j.rules || [];
     renderRulesWithFilter();
   } catch (e) {
-    list.innerHTML = `<div class="auto-empty">Failed to load: ${e.message || e}</div>`;
+    list.innerHTML = `<div class="auto-empty">Failed to load: ${escapeHtml(e.message || e)}</div>`;
   }
 }
 
@@ -2069,7 +2080,7 @@ $('kasa-discover')?.addEventListener('click', async () => {
     }
     status.hidden = true;
   } catch (e) {
-    wrap.innerHTML = `<div>Discovery failed: ${e.message || e}</div>`;
+    wrap.innerHTML = `<div>Discovery failed: ${escapeHtml(e.message || e)}</div>`;
     status.hidden = true;
   }
 });
@@ -2087,7 +2098,7 @@ async function loadLogs() {
     const j = await r.json();
     renderLogs(j.events || []);
   } catch (e) {
-    list.innerHTML = `<div class="logs-empty">Failed to load: ${e.message || e}</div>`;
+    list.innerHTML = `<div class="logs-empty">Failed to load: ${escapeHtml(e.message || e)}</div>`;
   }
   // Restart auto-refresh timer based on the checkbox state
   if (_logsTimer) { clearInterval(_logsTimer); _logsTimer = null; }
@@ -2152,16 +2163,16 @@ function _dbgRender(title, rows, columns) {
   if (!out) return;
   out.hidden = false;
   if (!rows || !rows.length) {
-    out.innerHTML = `<div class="dbg-block"><h3>${title}</h3><p class="hint">No data.</p></div>` + out.innerHTML;
+    out.innerHTML = `<div class="dbg-block"><h3>${escapeHtml(title)}</h3><p class="hint">No data.</p></div>` + out.innerHTML;
     return;
   }
   const cols = columns || Object.keys(rows[0]);
-  const head = cols.map(c => `<th>${c}</th>`).join('');
+  const head = cols.map(c => `<th>${escapeHtml(c)}</th>`).join('');
   const body = rows.map(r => `<tr>${cols.map(c => `<td>${_dbgFmt(r[c])}</td>`).join('')}</tr>`).join('');
   const ts = new Date().toLocaleTimeString();
   out.innerHTML = `
     <div class="dbg-block">
-      <h3>${title} <small class="hint">(${ts})</small></h3>
+      <h3>${escapeHtml(title)} <small class="hint">(${ts})</small></h3>
       <div class="dbg-table-wrap">
         <table class="dbg-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
       </div>
@@ -2173,8 +2184,8 @@ function _dbgFmt(v) {
   if (typeof v === 'number' && Number.isFinite(v)) {
     return Math.abs(v) < 1 && v !== 0 ? v.toFixed(3) : v.toString();
   }
-  if (typeof v === 'object') return `<code>${JSON.stringify(v).slice(0,80)}</code>`;
-  return String(v);
+  if (typeof v === 'object') return `<code>${escapeHtml(JSON.stringify(v).slice(0,80))}</code>`;
+  return escapeHtml(String(v));
 }
 
 function _dbgSummary(title, lines) {
@@ -2182,10 +2193,13 @@ function _dbgSummary(title, lines) {
   if (!out) return;
   out.hidden = false;
   const ts = new Date().toLocaleTimeString();
+  // Callers pass already-formatted strings (often containing intentional
+  // <code> / <strong>), so don't escape `l` itself. Title comes from
+  // the caller too but is always a literal here.
   const items = lines.map(l => `<div>${l}</div>`).join('');
   out.innerHTML = `
     <div class="dbg-block">
-      <h3>${title} <small class="hint">(${ts})</small></h3>
+      <h3>${escapeHtml(title)} <small class="hint">(${ts})</small></h3>
       <div class="dbg-summary">${items}</div>
     </div>` + out.innerHTML;
 }
@@ -2346,7 +2360,7 @@ $('dbg-cloud-probe')?.addEventListener('click', async () => {
   out.innerHTML = `
     <div class="dbg-block">
       <h3>Cloud probe <small class="hint">(${ts})</small></h3>
-      <pre class="dbg-pre">${JSON.stringify(j.results || j, null, 2)}</pre>
+      <pre class="dbg-pre">${escapeHtml(JSON.stringify(j.results || j, null, 2))}</pre>
     </div>` + out.innerHTML;
 });
 
@@ -2412,7 +2426,7 @@ $('dbg-copy-all')?.addEventListener('click', async () => {
     out.innerHTML = `
       <div class="dbg-block">
         <h3>All debug data <small class="hint">(${new Date().toLocaleTimeString()})</small></h3>
-        <pre class="dbg-pre" style="max-height:600px">${text.replace(/</g, '&lt;')}</pre>
+        <pre class="dbg-pre" style="max-height:600px">${escapeHtml(text)}</pre>
       </div>` + out.innerHTML;
   }
 });
@@ -2438,7 +2452,7 @@ async function loadSettings() {
     const j = await r.json();
     renderSettingsFields(j.settings || []);
   } catch (e) {
-    fields.innerHTML = `<div class="login-error">Failed to load: ${e.message || e}</div>`;
+    fields.innerHTML = `<div class="login-error">Failed to load: ${escapeHtml(e.message || e)}</div>`;
   }
 }
 
@@ -2448,16 +2462,17 @@ function renderSettingsFields(specs) {
   for (const s of specs) {
     const row = document.createElement('div');
     row.className = 'settings-row';
+    const k = escapeHtml(s.key);
     row.innerHTML = `
-      <label class="settings-label" for="set-${s.key}">
-        <span class="settings-label-text">${s.label}</span>
-        <span class="settings-hint">${s.hint}</span>
+      <label class="settings-label" for="set-${k}">
+        <span class="settings-label-text">${escapeHtml(s.label)}</span>
+        <span class="settings-hint">${escapeHtml(s.hint)}</span>
       </label>
       <div class="settings-control">
-        <input id="set-${s.key}" name="${s.key}" type="number"
-               min="${s.min}" max="${s.max}" step="1"
-               value="${s.value}" required />
-        <span class="settings-range">${s.min}–${s.max}</span>
+        <input id="set-${k}" name="${k}" type="number"
+               min="${escapeHtml(s.min)}" max="${escapeHtml(s.max)}" step="1"
+               value="${escapeHtml(s.value)}" required />
+        <span class="settings-range">${escapeHtml(s.min)}–${escapeHtml(s.max)}</span>
       </div>
     `;
     fields.appendChild(row);
@@ -2666,7 +2681,7 @@ function renderTouEditor(plan) {
       <span><input type="number" class="slot-rate" data-idx="${i}"
              step="0.001" min="0" max="5"
              value="${slot.rate.toFixed(3)}" /> $/kWh</span>
-      <span class="slot-label">${slot.label || ''}</span>
+      <span class="slot-label">${escapeHtml(slot.label || '')}</span>
     `;
     wrap.appendChild(row);
   }
@@ -2920,14 +2935,6 @@ function renderSmartChargeConflicts(conflicts, mode) {
   banner.hidden = false;
 }
 
-// Minimal HTML escape — rule names are user-typed and we render them
-// inside <strong>, so guard against injection.
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
 document.getElementById('sc-conflict-disable')?.addEventListener('click', async (e) => {
   const btn = e.currentTarget;
   let ids = [];
@@ -3083,7 +3090,7 @@ async function toggleDecisionDetails(btn) {
       copyDecisionDetails(j);
     });
   } catch (e) {
-    panel.innerHTML = `<div class="hint" style="padding:8px 12px; color:#ef4444">Failed: ${e.message || e}</div>`;
+    panel.innerHTML = `<div class="hint" style="padding:8px 12px; color:#ef4444">Failed: ${escapeHtml(e.message || e)}</div>`;
   }
 }
 
@@ -4461,11 +4468,6 @@ async function fetchEnergyAllDevices() {
       tbody.appendChild(row);
     }
   } catch (e) { console.warn('energy devices fetch failed', e); }
-}
-
-function escapeHtml(s) {
-  if (s == null) return '';
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ============================================================
@@ -6670,7 +6672,7 @@ document.getElementById('alg-show-context')?.addEventListener('click', async () 
       </p>
       <pre class="dbg-pre" style="max-height:520px">${safe(j.rendered)}</pre>`;
   } catch (e) {
-    wrap.innerHTML = `<div class="hint">Failed: ${e.message || e}</div>`;
+    wrap.innerHTML = `<div class="hint">Failed: ${escapeHtml(e.message || e)}</div>`;
   }
 });
 
@@ -6707,7 +6709,7 @@ document.getElementById('alg-show-history')?.addEventListener('click', async () 
     }
     wrap.hidden = false;
   } catch (e) {
-    wrap.innerHTML = `<div class="hint">Failed: ${e.message || e}</div>`;
+    wrap.innerHTML = `<div class="hint">Failed: ${escapeHtml(e.message || e)}</div>`;
     wrap.hidden = false;
   }
 });
@@ -7889,7 +7891,7 @@ async function loadBackupSnapshots() {
       });
     });
   } catch (err) {
-    wrap.innerHTML = `<div class="hint">Failed to list snapshots: ${err.message || err}</div>`;
+    wrap.innerHTML = `<div class="hint">Failed to list snapshots: ${escapeHtml(err.message || err)}</div>`;
   }
 }
 

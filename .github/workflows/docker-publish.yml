@@ -27,10 +27,14 @@ jobs:
     permissions:
       contents: read
       packages: write          # required to push to ghcr.io
+    # Force any Node-20-based JS action onto Node 24 ahead of GitHub's
+    # June 2026 forced switchover.
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
