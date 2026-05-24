@@ -6,8 +6,14 @@ when the user first opens the Forecast tab; read by the forecast endpoint
 to call Open-Meteo. Not a "setting" — it's per-physical-install state and
 the user shouldn't have to type their lat/lon by hand.
 
-Schema: {"latitude": float, "longitude": float, "updated_at": float,
-         "label"?: str, "utc_offset_seconds"?: int, "timezone"?: str}
+Encrypted at rest (AES-256-GCM via crypto_util) — same key file as the
+other credential blobs. Lat/lon is PII (precise home coordinates), so
+even though SECURITY.md scopes the threat model to image leaks and
+casual filesystem access, we treat this like any other secret.
+
+Schema (cleartext form): {"latitude": float, "longitude": float,
+         "updated_at": float, "label"?: str,
+         "utc_offset_seconds"?: int, "timezone"?: str}
 
 `label` is a human-readable place name (e.g. "San Jose, California, US"),
 persisted when the user picks a city from the manual-override search
@@ -22,6 +28,8 @@ import os
 import threading
 import time
 from typing import Any
+
+import crypto_util
 
 log = logging.getLogger("location")
 
@@ -45,7 +53,11 @@ def _validate(lat: Any, lon: Any) -> tuple[float, float] | None:
 
 
 def _read_raw() -> dict | None:
-    """Internal: load and validate the on-disk dict (or None)."""
+    """Internal: load and validate the on-disk dict (or None).
+
+    Supports both encrypted ({v,alg,nonce,tag,ct}) and legacy plaintext
+    ({latitude,longitude,...}). Legacy records are auto-migrated to the
+    encrypted format on the next write."""
     try:
         with open(LOCATION_PATH) as f:
             data = json.load(f)
@@ -56,7 +68,36 @@ def _read_raw() -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    return data
+    # New encrypted form.
+    if "ct" in data and "nonce" in data:
+        pt = crypto_util.decrypt(data)
+        if pt is None:
+            return None
+        try:
+            inner = json.loads(pt.decode())
+        except Exception as e:
+            log.error("location payload not valid JSON after decrypt: %s", e)
+            return None
+        return inner if isinstance(inner, dict) else None
+    # Legacy plaintext form — return as-is; the next write will encrypt.
+    if "latitude" in data or "utc_offset_seconds" in data:
+        log.info("loaded legacy plaintext location file; will encrypt on next write")
+        return data
+    return None
+
+
+def _write_record(record: dict) -> None:
+    """Encrypt the cleartext record and write atomically. Caller holds _lock."""
+    os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
+    blob = crypto_util.encrypt(json.dumps(record).encode())
+    tmp = LOCATION_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(blob, f)
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
+    os.replace(tmp, LOCATION_PATH)
 
 
 def get() -> dict | None:
@@ -105,13 +146,14 @@ def set(lat: Any, lon: Any, label: Any = None) -> dict | None:
             # without truncating any reasonable city/admin/country combo.
             record["label"] = clean[:200]
     with _lock:
-        os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
-        tmp = LOCATION_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(record, f, indent=2)
-        os.replace(tmp, LOCATION_PATH)
-    log.info("location saved: lat=%.4f lon=%.4f label=%r",
-             pair[0], pair[1], record.get("label"))
+        _write_record(record)
+    # Log label when available; otherwise coarsen lat/lon to ~11km
+    # precision so the log doesn't leak the user's precise home.
+    if record.get("label"):
+        log.info("location saved: label=%r", record["label"])
+    else:
+        log.info("location saved (~11km): lat=%.1f lon=%.1f",
+                 pair[0], pair[1])
     return record
 
 
@@ -131,11 +173,7 @@ def set_label(label: str) -> bool:
         if not data or "latitude" not in data:
             return False
         data["label"] = clean[:200]
-        os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
-        tmp = LOCATION_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, LOCATION_PATH)
+        _write_record(data)
     return True
 
 
@@ -156,11 +194,7 @@ def update_timezone(utc_offset_seconds: int,
             data["timezone"] = str(timezone)
         if "updated_at" not in data:
             data["updated_at"] = time.time()
-        os.makedirs(os.path.dirname(LOCATION_PATH) or ".", exist_ok=True)
-        tmp = LOCATION_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, LOCATION_PATH)
+        _write_record(data)
     return True
 
 

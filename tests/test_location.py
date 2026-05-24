@@ -5,8 +5,13 @@ import importlib
 
 
 def _fresh_location(monkeypatch, tmp_path):
-    """Reload location.py with LOCATION_PATH pointing into tmp_path."""
+    """Reload location.py with LOCATION_PATH pointing into tmp_path.
+    Also redirect the at-rest key file (location is now encrypted) so
+    tests don't touch the dev machine's /data."""
     monkeypatch.setenv("JACKERY_LOCATION_FILE", str(tmp_path / "location.json"))
+    monkeypatch.setenv("JACKERY_AT_REST_KEY_FILE", str(tmp_path / ".key"))
+    import crypto_util
+    importlib.reload(crypto_util)
     import location
     importlib.reload(location)
     return location
@@ -175,3 +180,68 @@ def test_set_label_rejects_empty_or_unset_record(tmp_path, monkeypatch):
     assert loc.set_label("   ") is False
     assert loc.set_label(None) is False  # type: ignore[arg-type]
     assert loc.get().get("label") is None
+
+
+def test_on_disk_format_is_encrypted_not_plaintext(tmp_path, monkeypatch):
+    """The on-disk file must not contain readable lat/lon. It should
+    look like the AES-GCM envelope from crypto_util.encrypt()."""
+    import json
+    loc = _fresh_location(monkeypatch, tmp_path)
+    loc.set(37.7749, -122.4194, label="San Francisco")
+    raw = (tmp_path / "location.json").read_text()
+    # Cleartext fields must not appear in the on-disk JSON.
+    assert "37.7749" not in raw
+    assert "-122.4194" not in raw
+    assert "San Francisco" not in raw
+    # Envelope shape: {v, alg, nonce, tag, ct}
+    blob = json.loads(raw)
+    assert blob["alg"] == "AES-256-GCM"
+    assert all(k in blob for k in ("v", "nonce", "tag", "ct"))
+
+
+def test_legacy_plaintext_record_still_readable_then_migrates(tmp_path, monkeypatch):
+    """A pre-encryption location.json must still load, and the next
+    write must rewrite the file in encrypted form."""
+    import json
+    loc = _fresh_location(monkeypatch, tmp_path)
+    legacy = {
+        "latitude": 37.7749, "longitude": -122.4194,
+        "updated_at": 1700000000.0, "label": "San Francisco",
+        "utc_offset_seconds": -28800,
+    }
+    (tmp_path / "location.json").write_text(json.dumps(legacy))
+    got = loc.get()
+    assert got is not None
+    assert abs(got["latitude"] - 37.7749) < 1e-6
+    assert got["label"] == "San Francisco"
+    # Next write triggers migration.
+    loc.set_label("Updated Label")
+    raw = (tmp_path / "location.json").read_text()
+    assert "37.7749" not in raw  # plaintext gone
+    blob = json.loads(raw)
+    assert blob["alg"] == "AES-256-GCM"
+    # Still readable through the API after migration.
+    assert loc.get()["label"] == "Updated Label"
+
+
+def test_save_log_uses_label_or_coarse_coords(tmp_path, monkeypatch, caplog):
+    """Precise GPS must never reach the log. Prefer the label; if no
+    label, log only the first decimal (~11km precision)."""
+    import logging
+    loc = _fresh_location(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="location"):
+        loc.set(37.7749, -122.4194, label="San Francisco")
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "37.7749" not in full_log
+    assert "-122.4194" not in full_log
+    assert "San Francisco" in full_log
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="location"):
+        loc.set(37.7749, -122.4194)  # no label
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "37.7749" not in full_log
+    assert "-122.4194" not in full_log
+    # Coarse form is present.
+    assert "37.8" in full_log or "37.7" in full_log

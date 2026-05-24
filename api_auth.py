@@ -12,12 +12,27 @@ separately in the WebSocket handler).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 import auth
+
+
+def _cookie_secure() -> bool:
+    """Whether Set-Cookie should carry the Secure flag.
+
+    Default False: the canonical deployment terminates TLS at the
+    Cloudflare Tunnel edge, so the request to our origin is HTTP and
+    a Secure cookie would never be sent back. Operators running with
+    direct HTTPS (Caddy, Tailscale Serve, reverse proxy with cert on
+    the NAS, etc.) set `JACKERY_COOKIE_SECURE=1` to opt in. Read at
+    call time so the env var can be flipped without a code change."""
+    return os.environ.get("JACKERY_COOKIE_SECURE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 # Always-public paths that don't depend on any other module:
 # the auth routes themselves, the static asset bundle, and the
@@ -35,12 +50,12 @@ _BUILTIN_PUBLIC_PREFIXES: tuple[str, ...] = (
 def set_app_cookie(response: Response, name: str, value: str,
                    max_age: int) -> None:
     """Set a long-lived first-party cookie with the flags we use everywhere
-    in this app: HttpOnly, SameSite=Lax, path=/, and Secure=False because
-    Cloudflare Tunnel terminates TLS at the edge — the request to our
-    origin is HTTP, so Secure would block the cookie."""
+    in this app: HttpOnly, SameSite=Lax, path=/. The Secure flag is
+    driven by JACKERY_COOKIE_SECURE — see `_cookie_secure` for why the
+    default is off."""
     response.set_cookie(
         name, value, max_age=max_age,
-        httponly=True, samesite="lax", secure=False, path="/",
+        httponly=True, samesite="lax", secure=_cookie_secure(), path="/",
     )
 
 

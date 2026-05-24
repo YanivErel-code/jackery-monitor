@@ -229,12 +229,18 @@ def _load_creds_file() -> dict | None:
 
     # Legacy plaintext format
     if data.get("email") and data.get("password"):
-        log.warning("loaded legacy plaintext creds file at %s; will re-encrypt on next save", path)
-        return {
-            "email": str(data["email"]),
-            "password": str(data["password"]),
-            "region": str(data.get("region") or "US").upper(),
-        }
+        email = str(data["email"])
+        password = str(data["password"])
+        region = str(data.get("region") or "US").upper()
+        # Immediately re-encrypt in place so the plaintext doesn't linger.
+        # The previous behavior only re-encrypted "on next save", which
+        # could be never if the user didn't change credentials.
+        if _save_creds_file(email, password, region):
+            log.info("migrated legacy plaintext creds at %s to encrypted form", path)
+        else:
+            log.warning("legacy plaintext creds at %s could not be re-encrypted "
+                        "(continuing to use plaintext for this session)", path)
+        return {"email": email, "password": password, "region": region}
     return None
 
 

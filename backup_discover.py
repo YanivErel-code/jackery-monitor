@@ -24,9 +24,11 @@ from __future__ import annotations
 import concurrent.futures
 import ipaddress
 import logging
+import os
 import re
 import socket
 import subprocess
+import tempfile
 from typing import Any
 
 log = logging.getLogger("backup.discover")
@@ -214,6 +216,23 @@ _SHARE_LINE = re.compile(
 _HIDDEN_SHARES = {"IPC$", "ADMIN$", "print$", "NETLOGON", "SYSVOL"}
 
 
+def _write_smb_authfile(username: str, password: str, domain: str) -> str:
+    # smbclient -A reads `username = ... / password = ... / domain = ...`
+    # so the password never lands in argv. Duplicated (intentionally) in
+    # backup.py — keeping this module free of the backup.py dep weight.
+    fd, path = tempfile.mkstemp(prefix="jackery-smbauth-", text=True)
+    try:
+        os.write(fd, (
+            f"username = {username}\n"
+            f"password = {password}\n"
+            f"domain = {domain}\n"
+        ).encode())
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return path
+
+
 def list_shares(host: str, username: str, password: str,
                 *, domain: str = "WORKGROUP",
                 timeout_s: float = _SMBCLIENT_TIMEOUT_S) -> dict[str, Any]:
@@ -237,12 +256,15 @@ def list_shares(host: str, username: str, password: str,
     # "smbclient exited 1" with no actionable detail. The default
     # debug level is fine; we capture and parse only the relevant
     # lines below, the rest get filtered out.
+    # Authenticated path uses an authfile so the password never lands
+    # in argv (visible via /proc/<pid>/cmdline or `ps`). Guest mode
+    # has no password so argv is fine.
+    authfile: str | None = None
     if password:
-        # Authenticated mode. Embed the password in -U so smbclient
-        # doesn't prompt on stdin (we have no TTY).
+        authfile = _write_smb_authfile(username, password, domain)
         cmd = [
             "smbclient", "-L", f"//{host}",
-            "-U", f"{domain}/{username}%{password}",
+            "-A", authfile,
             "-g",
         ]
     else:
@@ -262,6 +284,12 @@ def list_shares(host: str, username: str, password: str,
     except FileNotFoundError:
         return {"ok": False,
                 "error": "smbclient not installed in container"}
+    finally:
+        if authfile:
+            try:
+                os.unlink(authfile)
+            except FileNotFoundError:
+                pass
 
     if r.returncode != 0:
         # smbclient writes the most useful diagnostic to stderr (auth

@@ -436,3 +436,50 @@ def test_run_backup_handles_remote_truncation(backup_env, tmp_path, monkeypatch)
     snap_root = fake_remote / "jackery"
     if snap_root.exists():
         assert list(snap_root.iterdir()) == []
+
+
+# -----------------------------------------------------------------------
+# _smb_run never leaks the password in argv (uses smbclient -A authfile)
+# -----------------------------------------------------------------------
+
+def test_smb_run_does_not_pass_password_in_argv(backup_env, monkeypatch):
+    """Regression: the SMB password must travel via a 0600 authfile,
+    never argv. argv is visible to any process on the host."""
+    import os
+    import stat
+    import subprocess as _sp
+
+    _, _, bk, _ = backup_env
+    seen = {}
+
+    def capture_run(cmd, *a, **kw):
+        seen["cmd"] = cmd
+        # Verify the authfile exists with 0600 perms *during* the run and
+        # has the expected smbclient -A format.
+        i = cmd.index("-A")
+        seen["authfile"] = cmd[i + 1]
+        st = os.stat(seen["authfile"])
+        seen["mode"] = stat.S_IMODE(st.st_mode)
+        with open(seen["authfile"]) as f:
+            seen["body"] = f.read()
+        return _sp.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bk.subprocess, "run", capture_run)
+    bk._smb_run(
+        {"host": "nas.local", "share": "backups",
+         "username": "alice", "password": "hunter2", "domain": "WORKGROUP"},
+        "ls",
+    )
+
+    # Password must not appear anywhere in argv.
+    joined = " ".join(seen["cmd"])
+    assert "hunter2" not in joined
+    # authfile must have been 0600 while the process ran.
+    assert seen["mode"] == 0o600
+    # And must have been cleaned up after _smb_run returned.
+    assert not os.path.exists(seen["authfile"])
+    # Body shape: username/password/domain lines (any order is fine).
+    body = seen["body"]
+    assert "password = hunter2" in body
+    assert "username = alice" in body
+    assert "domain = WORKGROUP" in body

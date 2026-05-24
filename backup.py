@@ -367,6 +367,23 @@ def _split_share(share_field: str) -> tuple[str, str]:
     return parts[0], "/".join(parts[1:])
 
 
+def _write_smb_authfile(username: str, password: str, domain: str) -> str:
+    # smbclient -A reads `username = ... / password = ... / domain = ...`
+    # so the password never lands in argv (where it'd be visible to
+    # any process on the host via /proc/<pid>/cmdline or `ps`).
+    fd, path = tempfile.mkstemp(prefix="jackery-smbauth-", text=True)
+    try:
+        os.write(fd, (
+            f"username = {username}\n"
+            f"password = {password}\n"
+            f"domain = {domain}\n"
+        ).encode())
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    return path
+
+
 def _smb_run(creds: dict, smb_command: str,
              *, timeout_s: float = 30.0) -> subprocess.CompletedProcess:
     """One smbclient session: connect, auth, run the embedded command(s),
@@ -380,9 +397,12 @@ def _smb_run(creds: dict, smb_command: str,
     if share_subpath:
         smb_command = f'cd "{share_subpath}"; {smb_command}'
     domain = (creds.get("domain") or "WORKGROUP").strip() or "WORKGROUP"
+    authfile = _write_smb_authfile(
+        creds["username"], creds["password"], domain,
+    )
     cmd = [
         "smbclient", f"//{host}/{share_name}",
-        "-U", f"{domain}/{creds['username']}%{creds['password']}",
+        "-A", authfile,
         "-c", smb_command,
     ]
     try:
@@ -393,6 +413,11 @@ def _smb_run(creds: dict, smb_command: str,
     except FileNotFoundError as e:
         raise SMBClientError(
             "smbclient not installed in container") from e
+    finally:
+        try:
+            os.unlink(authfile)
+        except FileNotFoundError:
+            pass
 
 
 def _smb_extract_error(r: subprocess.CompletedProcess) -> str:

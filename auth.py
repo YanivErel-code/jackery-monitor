@@ -32,7 +32,11 @@ log = logging.getLogger("auth")
 
 AUTH_PATH = os.environ.get("JACKERY_AUTH_FILE", "/data/auth.json")
 
-PBKDF2_ITER = 200_000
+# OWASP 2023 minimum for PBKDF2-SHA256. The iteration count is stored
+# per-hash in the encoded form (`pbkdf2_sha256:<iter>:salt:hash`), so
+# bumping this only affects new hashes — existing user logins keep
+# verifying against their original iteration count.
+PBKDF2_ITER = 600_000
 PBKDF2_DKLEN = 32
 SALT_BYTES = 16
 

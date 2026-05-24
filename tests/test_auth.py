@@ -24,6 +24,28 @@ def test_password_format_invalid_returns_false(isolated_data):
     assert auth.verify_password("x", "scheme:1:salt") is False  # missing hash field
 
 
+def test_verify_accepts_legacy_lower_iter_hashes(isolated_data):
+    """A stored hash with the old 200k iteration count must still verify.
+    The encoded format embeds the iteration count, so a bump to the
+    module-level constant cannot lock out an existing user."""
+    import base64
+    import hashlib
+    import secrets
+
+    import auth
+    importlib.reload(auth)
+
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", b"hunter2!", salt, 200_000, 32)
+    legacy = (
+        f"pbkdf2_sha256:200000:"
+        f"{base64.b64encode(salt).decode()}:"
+        f"{base64.b64encode(dk).decode()}"
+    )
+    assert auth.verify_password("hunter2!", legacy) is True
+    assert auth.verify_password("wrong", legacy) is False
+
+
 def test_save_and_load_user(isolated_data):
     import auth
     import crypto_util

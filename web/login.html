@@ -296,6 +296,19 @@
         }
       });
 
+      // Snapshot fields (dir, iso, error) come from the remote SMB host's
+      // directory listing. The remote host is operator-chosen, but treat
+      // it as untrusted anyway — a malicious or buggy NAS shouldn't be
+      // able to inject HTML into the restore picker.
+      function escapeHtml(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
       function renderSnapshots(snaps) {
         const wrap = $('rs-snapshot-list');
         wrap.innerHTML = '';
@@ -306,11 +319,11 @@
           row.style.cssText = 'text-align:left; justify-content:flex-start; padding:10px 12px; line-height:1.4';
           if (!s.valid) {
             row.disabled = true;
-            row.innerHTML = `<div><strong>${s.dir}</strong></div><div class="hint" style="font-size:11px">Invalid: ${s.error || '?'}</div>`;
+            row.innerHTML = `<div><strong>${escapeHtml(s.dir)}</strong></div><div class="hint" style="font-size:11px">Invalid: ${escapeHtml(s.error || '?')}</div>`;
           } else {
             const bytes = s.total_bytes ? humanBytes(s.total_bytes) : '—';
             const files = (s.files || []).length;
-            row.innerHTML = `<div><strong>${s.iso || s.dir}</strong></div><div class="hint" style="font-size:11px">${files} files · ${bytes}</div>`;
+            row.innerHTML = `<div><strong>${escapeHtml(s.iso || s.dir)}</strong></div><div class="hint" style="font-size:11px">${files} files · ${bytes}</div>`;
             row.addEventListener('click', () => goConfirm(s));
           }
           wrap.appendChild(row);
@@ -334,7 +347,7 @@
         $('restore-step-pick').hidden = true;
         $('restore-step-confirm').hidden = false;
         $('rs-confirm-sub').innerHTML =
-          `Restore <strong>${snap.iso || snap.dir}</strong>? This writes the snapshot's ${(snap.files || []).length} files into <code>/data</code> and replaces anything already there. Your existing user account (if any) is overwritten by the one from the backup.`;
+          `Restore <strong>${escapeHtml(snap.iso || snap.dir)}</strong>? This writes the snapshot's ${(snap.files || []).length} files into <code>/data</code> and replaces anything already there. Your existing user account (if any) is overwritten by the one from the backup.`;
       }
 
       $('rs-confirm-back').addEventListener('click', () => {

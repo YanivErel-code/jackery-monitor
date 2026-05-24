@@ -118,6 +118,38 @@ def test_auth_setup_rejects_short_password(unauth_client):
     assert r.status_code == 400
 
 
+def test_session_cookie_secure_flag_follows_env(unauth_client, monkeypatch):
+    """JACKERY_COOKIE_SECURE=1 must promote the Set-Cookie to Secure.
+    Default (unset/0) leaves it off so Cloudflare Tunnel HTTP-to-origin
+    deployments still work."""
+    monkeypatch.setenv("JACKERY_COOKIE_SECURE", "1")
+    r = unauth_client.post(
+        "/api/auth/setup",
+        json={"username": "alice", "password": "verysecret"},
+    )
+    assert r.status_code == 200
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "jackery_session=" in set_cookie
+    assert "Secure" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=lax" in set_cookie.lower() or "samesite=lax" in set_cookie.lower()
+
+
+def test_session_cookie_default_is_not_secure(unauth_client, monkeypatch):
+    """Default: no Secure flag — matches the canonical Cloudflare Tunnel
+    deployment where the origin sees plain HTTP."""
+    monkeypatch.delenv("JACKERY_COOKIE_SECURE", raising=False)
+    r = unauth_client.post(
+        "/api/auth/setup",
+        json={"username": "alice", "password": "verysecret"},
+    )
+    assert r.status_code == 200
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "jackery_session=" in set_cookie
+    # No "Secure" attribute on the cookie.
+    assert "secure" not in set_cookie.lower()
+
+
 def test_auth_login_logout_round_trip(client):
     # client fixture already created user "smoke"; logout, then back in.
     r = client.post("/api/auth/logout")
