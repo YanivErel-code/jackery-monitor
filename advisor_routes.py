@@ -67,6 +67,11 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
     capacity = helpers.total_capacity_wh(device_sn, model_code)
     sys_soc = helpers.system_soc_pct(float(main_soc), device_sn, model_code) if main_soc is not None else None
     pack_count = len(state.battery_packs_by_sn.get(device_sn, []))
+    # DIAG (2026-05-24): the advisor flagged pack_count=0 mismatching
+    # 5 packs in DB. Logging the bundle-time read so we can correlate
+    # with the helper's cache-transition trace.
+    log.info("advisor bundle build: device_sn=%s pack_count=%d cache_keys=%s",
+             device_sn, pack_count, list(state.battery_packs_by_sn.keys()))
 
     cfg = smart_charge.get_config(device_sn)
 
