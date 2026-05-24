@@ -778,27 +778,23 @@ def _record_packs_or_keep_cache(device_sn: str, packs: list, ts: float) -> None:
     restart the container OR clear the DB rows to drop the cache —
     that's an acceptable trade for not flickering on every cloud blip.
     """
-    # DIAG (2026-05-24): trace every cache transition until the
-    # advisor's "pack_count=0 despite 5 packs" anomaly is resolved.
-    cache_before = len(state.battery_packs_by_sn.get(device_sn, []))
     if packs:
-        if cache_before != len(packs):
-            log.info("packs[%s]: %d → %d (rpc populated)",
-                     device_sn, cache_before, len(packs))
         state.battery_packs_by_sn[device_sn] = packs
         state.last_packs_ts_by_sn[device_sn] = ts
         return
     existing = state.battery_packs_by_sn.get(device_sn)
     if existing:
-        log.info("packs[%s]: %d kept (rpc returned empty, treating as transient)",
-                 device_sn, len(existing))
+        log.debug("battery_packs: RPC returned empty for %s but cache "
+                  "has %d packs — treating as transient, keeping cache",
+                  device_sn, len(existing))
         return
     try:
         db_rows = state.energy.latest_battery_packs(device_sn)
     except Exception:
         db_rows = []
     if db_rows:
-        log.info("packs[%s]: 0 → %d (re-seeded from DB; rpc empty, cache empty)",
+        log.info("battery_packs: RPC returned empty for %s, cache empty "
+                 "but DB has %d packs — re-seeding cache from DB",
                  device_sn, len(db_rows))
         state.battery_packs_by_sn[device_sn] = [
             _db_pack_to_cloud_shape(r) for r in db_rows
@@ -806,9 +802,6 @@ def _record_packs_or_keep_cache(device_sn: str, packs: list, ts: float) -> None:
         state.last_packs_ts_by_sn[device_sn] = ts
         return
     # No cache, no DB rows — this device genuinely has no packs.
-    if cache_before != 0 or device_sn not in state.battery_packs_by_sn:
-        log.info("packs[%s]: %d → 0 (genuine: rpc empty, cache empty, DB empty)",
-                 device_sn, cache_before)
     state.battery_packs_by_sn[device_sn] = []
     state.last_packs_ts_by_sn[device_sn] = ts
 
