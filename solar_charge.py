@@ -307,6 +307,14 @@ class RuntimeState:
     verify_pre_output_w: float | None = None
     verify_deadline_ts: float = 0.0
     no_load_cooldown_until: float = 0.0
+    # Live plug-reported AC draw (from kasa_client.status). Cached here
+    # so the 2-second telemetry tick has a fresh-enough reading without
+    # hitting the plug each time. Refreshed by the 30s solar_charge
+    # evaluate loop while plug_is_on. None on plugs without emeter
+    # (older HS103-class) — diverted_w then falls back to the legacy
+    # delta-from-baseline estimator.
+    plug_power_w: float | None = None
+    plug_power_ts: float = 0.0
 
 
 _runtime: dict[str, RuntimeState] = {}

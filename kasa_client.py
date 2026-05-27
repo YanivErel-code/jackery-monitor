@@ -233,8 +233,65 @@ async def _connect(host: str):
         ) from err
 
 
+def _read_power_w(dev: Any) -> float | None:
+    """Best-effort read of the plug's live power draw in watts.
+
+    python-kasa exposes emeter several different ways depending on the
+    device family and library version. Try each in order; return None
+    when the plug doesn't support energy monitoring at all (older
+    HS103/KP100-class plugs). Caller assumes `await dev.update()` has
+    already run.
+    """
+    # Path 1 — modular API (python-kasa >= 0.7, the canonical path on
+    # SMART-line plugs and most current models).
+    try:
+        from kasa import Module  # type: ignore
+        energy = dev.modules.get(Module.Energy) if hasattr(dev, "modules") else None
+        if energy is not None:
+            cc = getattr(energy, "current_consumption", None)
+            if cc is not None:
+                return float(cc)
+    except Exception:
+        pass
+    # Path 2 — features API. Some plugs expose current_consumption as a
+    # feature even when the module isn't registered (e.g. mid-version
+    # transition plugs). The feature's .value is a float watt reading.
+    try:
+        feat = dev.features.get("current_consumption") if hasattr(dev, "features") else None
+        if feat is not None:
+            val = getattr(feat, "value", None)
+            if val is not None:
+                return float(val)
+    except Exception:
+        pass
+    # Path 3 — legacy emeter_realtime. Original HS110 / HS300 API.
+    # Returns a dict like {"power": 12.3, "power_mw": 12345, ...}.
+    # Prefer the milliwatt field when present (more precision) and
+    # fall back to "power" (already in watts).
+    try:
+        realtime = getattr(dev, "emeter_realtime", None)
+        if realtime:
+            pmw = realtime.get("power_mw")
+            if pmw is not None:
+                return float(pmw) / 1000.0
+            pw = realtime.get("power")
+            if pw is not None:
+                return float(pw)
+    except Exception:
+        pass
+    return None
+
+
 def _describe(host: str, dev: Any) -> dict:
-    """Pull a small subset of the python-kasa device into a JSON-safe dict."""
+    """Pull a small subset of the python-kasa device into a JSON-safe dict.
+
+    `power_w` is the live AC draw of whatever is plugged into this
+    smart plug, in watts. Returns None when the plug model doesn't
+    support energy monitoring. Used by `solar_charge` to ground-truth
+    whether anything is actually drawing through the diversion plug
+    (vs. the legacy delta-from-baseline estimator, which mis-attributes
+    house-load drift to the diversion when the car isn't connected).
+    """
     type_name = "unknown"
     try:
         if hasattr(dev, "device_type"):
@@ -247,4 +304,5 @@ def _describe(host: str, dev: Any) -> dict:
         "model": getattr(dev, "model", None),
         "type": type_name,
         "is_on": bool(getattr(dev, "is_on", False)),
+        "power_w": _read_power_w(dev),
     }

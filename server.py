@@ -1824,27 +1824,30 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
 
 
 # ---------- Solar-charge (inverse controller: Jackery → car) ----------
+_PLUG_POWER_FRESH_S = 90.0       # accept cached plug_power_w up to 90s old
+_PLUG_POWER_NOISE_FLOOR_W = 5.0  # below this, treat as "nothing plugged in"
+
+
 def _solar_charge_current_diverted_w(device_sn: str | None,
                                      current_output_w: float = 0.0) -> float:
     """Return the instantaneous solar-charge diversion rate (W) for this
-    device. Estimated from the JUMP in Jackery output_w above the
-    house-load baseline captured at the moment the controller toggled
-    the plug ON (rs.verify_pre_output_w).
+    device.
 
-    Why not just `car_load_w` while plug is ON?  Because the controller
-    only knows the plug's electrical state (ON/OFF), not whether
-    anything is actually plugged in and drawing. If the car isn't
-    connected, output_w stays at house-load levels and we should
-    record `diverted_wh = 0`, not `car_load_w × dt`. The delta-from-
-    baseline method gives an honest estimate that's 0 in the no-load
-    case and ≈ car_load_w when the car is actually drawing.
+    Preferred path (modern Kasa plugs with emeter): use the live
+    `current_consumption` cached by the solar_charge evaluate loop in
+    `rs.plug_power_w`. This is ground truth — when no car is plugged
+    in, the plug reports near zero regardless of what's happening on
+    the Jackery output bus, so house-load drift is correctly ignored.
 
-    Falls back to `car_load_w` if no baseline is cached (e.g. after a
-    container restart that wiped runtime state — better to over-count
-    briefly than under-count by treating a real session as zero).
+    Fallback path (no emeter or stale cache): use the legacy delta-
+    from-baseline estimate (output_w − rs.verify_pre_output_w). Honest
+    when the car is the only thing on the AC output, but bleeds any
+    house-load drift into the "diverted" total. We kept it as a
+    fallback for HS103-class plugs that don't report power.
+
     Returns 0 when the controller is off / not in active mode / plug
-    off — those callers will pass `solar_charge_diverted_w=0` to
-    record()."""
+    off — those callers pass `solar_charge_diverted_w=0` to record().
+    """
     if not device_sn:
         return 0.0
     try:
@@ -1854,13 +1857,23 @@ def _solar_charge_current_diverted_w(device_sn: str | None,
         rs = solar_charge.get_runtime(device_sn)
         if not rs.plug_is_on:
             return 0.0
-        # Delta-from-baseline estimate (the truthful one).
+        # Truth from the Kasa emeter, when fresh.
+        if rs.plug_power_w is not None and rs.plug_power_ts > 0:
+            age = time.time() - rs.plug_power_ts
+            if age <= _PLUG_POWER_FRESH_S:
+                p = float(rs.plug_power_w)
+                # Plug's own electronics + relay coil consume ~1-3W
+                # even with nothing connected. Treat that as zero so
+                # we don't drip-attribute it as diversion.
+                if p < _PLUG_POWER_NOISE_FLOOR_W:
+                    return 0.0
+                return p
+        # Fallback A — legacy delta-from-baseline.
         if rs.verify_pre_output_w is not None:
             return max(0.0, float(current_output_w) - float(rs.verify_pre_output_w))
-        # Fallback: container restarted mid-session and we lost the
-        # baseline. Use the configured car_load_w; the per-bucket
-        # output_wh clamp in record() will at least cap us at the
-        # physical maximum.
+        # Fallback B — no baseline either (rare: container restarted
+        # mid-session). Use configured car_load_w; per-bucket clamp in
+        # record() caps it at actual output_wh.
         return float(cfg.get("car_load_w") or 0)
     except Exception:
         return 0.0
@@ -2046,6 +2059,25 @@ async def _solar_charge_evaluate(record: bool = True,
         rs = solar_charge.get_runtime(device_sn)  # re-read updated state
     plug_state_before = "on" if rs.plug_is_on else "off"
 
+    # Refresh the cached plug power_w while the plug is ON, so the
+    # 2-second telemetry write path can record the TRUE diverted_w
+    # instead of guessing via output_w − baseline. Best-effort: Kasa
+    # blips just leave the previous cache in place until the next tick.
+    if rs.plug_is_on:
+        host = cfg.get("kasa_device_host")
+        if host:
+            try:
+                info = await kasa_client.status(host)
+                pw = info.get("power_w")
+                solar_charge._update_runtime(
+                    device_sn,
+                    plug_power_w=(float(pw) if pw is not None else None),
+                    plug_power_ts=time.time(),
+                )
+            except Exception as e:
+                log.debug("solar_charge: plug power refresh failed for %s: %s",
+                          device_sn, e)
+
     # --- No-load detection ---
     # Two gates:
     #  (1) If we're in a no-load cooldown after a recent failed verify,
@@ -2195,11 +2227,15 @@ async def _solar_charge_evaluate(record: bool = True,
                     #        isn't blocked
                     if no_load_off_fired:
                         # Keep no_load_cooldown_until untouched; just
-                        # update the plug state + last_toggle_ts.
+                        # update the plug state + last_toggle_ts +
+                        # clear the live-power cache (plug is OFF, no
+                        # longer authoritative).
                         solar_charge._update_runtime(
                             device_sn,
                             plug_is_on=False,
                             last_toggle_ts=now_ts,
+                            plug_power_w=None,
+                            plug_power_ts=0.0,
                         )
                     else:
                         solar_charge._update_runtime(
@@ -2208,6 +2244,8 @@ async def _solar_charge_evaluate(record: bool = True,
                             last_toggle_ts=now_ts,
                             verify_pre_output_w=None,
                             verify_deadline_ts=0.0,
+                            plug_power_w=None,
+                            plug_power_ts=0.0,
                             no_load_cooldown_until=0.0,
                         )
             except Exception as e:
@@ -2269,7 +2307,8 @@ async def _solar_charge_hydrate_runtime():
             # Force OFF — don't trust prior session state across restart.
             await kasa_client.set_state(host, False)
             solar_charge._update_runtime(
-                sn, plug_is_on=False, last_toggle_ts=time.time())
+                sn, plug_is_on=False, last_toggle_ts=time.time(),
+                plug_power_w=None, plug_power_ts=0.0)
             log.info(
                 "solar_charge hydrate: %s plug forced OFF on startup "
                 "(Kasa %s); next eval will decide whether to re-engage",
