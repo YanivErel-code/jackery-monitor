@@ -79,13 +79,16 @@ def server_state(isolated_data, monkeypatch):
     return server_mod
 
 
-def test_set_output_routes_to_view_device_not_active(server_state, monkeypatch):
+async def test_set_output_routes_to_view_device_not_active(server_state, monkeypatch):
     """The AC toggle was silently sending its command to the bridge-active
     device even when the user was viewing a different one — so a click
     on the 3000 view turned the 5000+'s AC on/off. Verify /api/set_output
-    forwards the body's device_sn through to client.set_output()."""
-    import asyncio
+    forwards the body's device_sn through to client.set_output().
 
+    Async test because Python 3.12 dropped implicit event-loop creation
+    in `asyncio.get_event_loop()`. pytest-asyncio auto mode handles loop
+    setup per-test without polluting the global policy (which
+    `asyncio.run` does — breaking subsequent tests in the file)."""
     captured = {}
 
     async def fake_set_output(port, on, *, device_sn=None):
@@ -97,20 +100,16 @@ def test_set_output_routes_to_view_device_not_active(server_state, monkeypatch):
                         fake_set_output, raising=False)
 
     body = {"port": "ac", "on": False, "device_sn": "SN-B"}
-    result = asyncio.get_event_loop().run_until_complete(
-        server_state.api_set_output(body)
-    )
+    result = await server_state.api_set_output(body)
 
     assert result["ok"] is True
     assert result["device_sn"] == "SN-B"
     assert captured == {"port": "ac", "on": False, "device_sn": "SN-B"}
 
 
-def test_set_output_omits_device_sn_when_none(server_state, monkeypatch):
+async def test_set_output_omits_device_sn_when_none(server_state, monkeypatch):
     """Older clients may not send device_sn — set_output should pass
     device_sn=None so the bridge falls back to the active device."""
-    import asyncio
-
     captured = {}
 
     async def fake_set_output(port, on, *, device_sn=None):
@@ -120,9 +119,7 @@ def test_set_output_omits_device_sn_when_none(server_state, monkeypatch):
                         fake_set_output, raising=False)
 
     body = {"port": "dc", "on": True}
-    asyncio.get_event_loop().run_until_complete(
-        server_state.api_set_output(body)
-    )
+    await server_state.api_set_output(body)
     assert captured["device_sn"] is None
 
 

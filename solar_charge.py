@@ -311,10 +311,19 @@ class RuntimeState:
     # so the 2-second telemetry tick has a fresh-enough reading without
     # hitting the plug each time. Refreshed by the 30s solar_charge
     # evaluate loop while plug_is_on. None on plugs without emeter
-    # (older HS103-class) — diverted_w then falls back to the legacy
-    # delta-from-baseline estimator.
+    # (older HS103/EP10-class) — diverted_w then falls back to the
+    # learned-load delta estimator below.
     plug_power_w: float | None = None
     plug_power_ts: float = 0.0
+    # Learned downstream-load size (W) for non-emeter plugs. Captured at
+    # the moment the no-load verification PASSES: `output_w − baseline`
+    # at that instant is the size of the load that just appeared, which
+    # IS the plug's true draw on this hardware. Used by
+    # `_solar_charge_current_diverted_w` to (a) report a constant
+    # diverted_w during the session instead of a noisy delta and
+    # (b) detect mid-session disconnects by watching for the delta to
+    # collapse below half of learned_load_w (the car unplugged).
+    learned_load_w: float | None = None
 
 
 _runtime: dict[str, RuntimeState] = {}

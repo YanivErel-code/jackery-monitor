@@ -118,30 +118,64 @@ def test_kasa_noise_floor_clamps_low_readings(server_mod):
     assert server_mod._solar_charge_current_diverted_w("SN1", 80) == 0.0
 
 
-def test_falls_back_to_delta_when_cache_stale(server_mod):
+def test_falls_back_to_learned_load_when_cache_stale(server_mod):
     """Cache older than the freshness window can't be trusted (Kasa
-    has been unreachable for too long). Drop to the legacy delta
-    estimator — same as plugs without emeter."""
+    has been unreachable for too long). Drop to the learned-load
+    tracker — same as plugs without emeter."""
     import solar_charge
     _arm_active_plug(server_mod, baseline=80.0)
-    # 5 minutes old — well beyond the 90s freshness window.
     solar_charge._update_runtime(
-        "SN1", plug_power_w=1310.0, plug_power_ts=time.time() - 300)
-    # output_w=1380, baseline=80 → delta=1300
+        "SN1",
+        plug_power_w=1310.0,
+        plug_power_ts=time.time() - 300,  # 5 min — well stale
+        learned_load_w=1300.0,
+    )
+    # output_w=1380, baseline=80 → delta=1300 ≥ learned/2 → return learned.
     assert server_mod._solar_charge_current_diverted_w("SN1", 1380) == 1300.0
 
 
-def test_falls_back_to_delta_when_emeter_unsupported(server_mod):
-    """Older HS103-class plugs never populate plug_power_w. We must
-    keep the legacy estimator working for them."""
+def test_learned_load_active_when_emeter_unsupported(server_mod):
+    """EP10-class plugs never populate plug_power_w. The verify-pass
+    handler records `learned_load_w` as the size of the jump that
+    appeared after toggle-ON; we report that as the constant draw
+    while output_w stays elevated."""
+    import solar_charge
     _arm_active_plug(server_mod, baseline=80.0)
-    # Don't set plug_power_w — leave it None as in the default state.
+    solar_charge._update_runtime("SN1", learned_load_w=1300.0)
+    # Don't set plug_power_w — leave it None as on a non-emeter plug.
+    # output_w=1380, baseline=80 → delta=1300 ≥ learned/2 (650) → learned.
     assert server_mod._solar_charge_current_diverted_w("SN1", 1380) == 1300.0
 
 
-def test_delta_clamps_negative_to_zero(server_mod):
+def test_learned_load_zero_when_car_disconnects_midsession(server_mod):
+    """The bug repro for non-emeter plugs: car was plugged in earlier
+    (learned_load_w got set when verify passed), but unplugged at
+    some point. Output drops back near baseline. Function must
+    return 0 — NOT keep reporting learned_load_w."""
+    import solar_charge
+    _arm_active_plug(server_mod, baseline=80.0)
+    solar_charge._update_runtime("SN1", learned_load_w=1300.0)
+    # output_w=200 → delta=120 << learned/2 (650) → car disconnected.
+    assert server_mod._solar_charge_current_diverted_w("SN1", 200) == 0.0
+
+
+def test_returns_zero_when_no_baseline_and_no_emeter(server_mod):
+    """The old fallback path used cfg.car_load_w when no baseline was
+    cached — combined with the per-bucket min(div, out) clamp it
+    logged ALL of output_wh as diverted, including idle inverter
+    draw and other house loads. That's the bug we're killing: when
+    we have no measurement of the actual load, record nothing."""
+    _arm_active_plug(server_mod, baseline=80.0)
+    # Don't set learned_load_w and don't set plug_power_w.
+    assert server_mod._solar_charge_current_diverted_w("SN1", 1380) == 0.0
+
+
+def test_learned_load_zero_when_output_below_baseline(server_mod):
     """House load DROPPED after baseline capture — the delta is
-    negative. The function returns 0, not a negative diversion."""
+    negative. The function returns 0 (delta < learned/2 trips the
+    disconnect branch)."""
+    import solar_charge
     _arm_active_plug(server_mod, baseline=200.0)
-    # output_w fell below baseline; no fresh Kasa reading
+    solar_charge._update_runtime("SN1", learned_load_w=1300.0)
+    # output_w=150 < baseline → delta negative → 0
     assert server_mod._solar_charge_current_diverted_w("SN1", 150) == 0.0
