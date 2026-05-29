@@ -853,6 +853,121 @@ def test_fit_drain_model_recovers_parasitic_via_multi_hour_runs():
     )
 
 
+# ---------- Diurnal shade shape ----------
+def _solar_day(base_ts, k, shape_by_hour, tz_off=0, days=10):
+    """Synthesize energy_history + weather_hourly where each local hour-of-
+    day's actual production = k * GHI * shape_by_hour[hod]. GHI follows a
+    simple midday bell. Returns (energy_history, weather_hourly).
+
+    base_ts is snapped to UTC midnight so that ts for local hour `hod`
+    buckets to exactly that local hour inside fit_diurnal_shape."""
+    base_ts = (base_ts // 86400) * 86400  # snap to UTC midnight
+    energy, weather = [], []
+    for d in range(days):
+        for hod in range(24):
+            ts = base_ts + d * 86400 + (hod * 3600) - tz_off  # UTC epoch s.t. local hod
+            # bell-shaped GHI peaking at local noon
+            ghi = max(0.0, 1000.0 * (1 - ((hod - 12) / 6.0) ** 2)) if 6 <= hod <= 18 else 0.0
+            sol = k * ghi * shape_by_hour.get(hod, 1.0)
+            energy.append({"ts": ts, "solar_w": sol, "battery_pct": 50,
+                           "output_wh": 100, "ac_input_wh": 0})
+            weather.append({"ts": ts, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
+    return energy, weather
+
+
+def test_diurnal_shape_cold_start_all_ones():
+    """No history → every hour factor is 1.0 (pure k*GHI behavior)."""
+    shape = forecaster.fit_diurnal_shape([], [], k=3.0)
+    assert all(v == 1.0 for v in shape.values())
+    assert set(shape.keys()) == set(range(24))
+
+
+def test_diurnal_shape_no_panels_noop():
+    """k <= 0 (no panels) → all 1.0 regardless of history."""
+    e, w = _solar_day(1_700_000_000, 3.0, {15: 0.5})
+    shape = forecaster.fit_diurnal_shape(e, w, k=0.0)
+    assert all(v == 1.0 for v in shape.values())
+
+
+def test_diurnal_shape_learns_afternoon_shade():
+    """Afternoon hours produce half of k*GHI → those hours' factors land
+    well below 1.0; unshaded morning hours stay near 1.0."""
+    tz_off = -25200
+    # Shade: hours 15-18 produce 50% of what k*GHI predicts.
+    shade = {15: 0.5, 16: 0.5, 17: 0.5, 18: 0.5}
+    e, w = _solar_day(1_700_000_000, 3.0, shade, tz_off=tz_off, days=10)
+    shape = forecaster.fit_diurnal_shape(e, w, k=3.0, utc_offset_seconds=tz_off)
+    # Shaded afternoon hours pulled toward 0.5 (shrinkage keeps them >0.5).
+    assert 0.5 <= shape[16] < 0.7, f"got {shape[16]}"
+    # Midday unshaded stays ~1.0.
+    assert 0.9 <= shape[12] <= 1.1, f"got {shape[12]}"
+
+
+def test_diurnal_shape_shrinks_sparse_hours_toward_one():
+    """An hour with very few samples stays close to 1.0 even if its raw
+    ratio is extreme — shrinkage by sample count."""
+    tz_off = 0
+    # Only 1 day, so each hour has just 1 sample. A 0.5 shade hour should
+    # be pulled strongly toward 1.0 by the PRIOR_STRENGTH=4 pseudo-count.
+    e, w = _solar_day(1_700_000_000, 3.0, {15: 0.5}, tz_off=tz_off, days=1)
+    shape = forecaster.fit_diurnal_shape(e, w, k=3.0, utc_offset_seconds=tz_off)
+    # raw=0.5, n=1, prior=4 → (1*0.5 + 4*1.0)/5 = 0.9
+    assert 0.85 <= shape[15] <= 0.95, f"got {shape[15]}"
+
+
+# ---------- Charge ceiling ----------
+def _charge_history(daily_maxes, tz_off=0, base_ts=1_700_000_000):
+    """One row per local day: SOC rises from 20 to daily_max (a real
+    charge cycle). Two rows per day so min/max are both captured."""
+    base_ts = (base_ts // 86400) * 86400  # snap to UTC midnight
+    rows = []
+    for i, dmax in enumerate(daily_maxes):
+        day_ts = base_ts + i * 86400 + 8 * 3600   # 08:00, mid-day-ish
+        rows.append({"ts": day_ts, "battery_pct": 20})
+        rows.append({"ts": day_ts + 6 * 3600, "battery_pct": dmax})  # 14:00, same day
+    return rows
+
+
+def test_charge_ceiling_cold_start_returns_none():
+    """Fewer than min_charge_days of real charge cycles → None (no cap)."""
+    rows = _charge_history([78, 77, 79])  # only 3 charge days
+    assert forecaster.fit_charge_ceiling(rows) is None
+
+
+def test_charge_ceiling_learns_plateau():
+    """Enough charge days plateauing ~78% → ceiling ≈ 78."""
+    rows = _charge_history([77, 78, 79, 78, 77, 78, 79])
+    ceiling = forecaster.fit_charge_ceiling(rows)
+    assert ceiling is not None
+    assert 77 <= ceiling <= 80, f"got {ceiling}"
+
+
+def test_charge_ceiling_no_cap_when_reaches_full():
+    """A balanced system that charges to ~100% → None (no meaningful cap)."""
+    rows = _charge_history([99, 100, 98, 100, 99, 100, 99])
+    assert forecaster.fit_charge_ceiling(rows) is None
+
+
+def test_charge_ceiling_ignores_non_charge_days():
+    """Days that never charged (flat low SOC) don't count toward the
+    ceiling — only days with a real rise do."""
+    # 7 flat cloudy days (no rise) + 0 charge days → None.
+    flat = [{"ts": 1_700_000_000 + i * 86400, "battery_pct": 30} for i in range(7)]
+    assert forecaster.fit_charge_ceiling(flat) is None
+
+
+def test_simulate_soc_respects_ceiling():
+    """With soc_ceiling_pct set, SOC never exceeds it even on a strongly
+    net-positive day."""
+    hours = [{"ts": 1_700_000_000 + i * 3600, "solar_w": 3000, "load_w": 0}
+             for i in range(12)]
+    out = forecaster.simulate_soc(50.0, 30000, hours, soc_ceiling_pct=78.0)
+    assert max(h["predicted_soc"] for h in out) <= 78.0
+    # Without the ceiling it would climb past 78.
+    out2 = forecaster.simulate_soc(50.0, 30000, hours)
+    assert max(h["predicted_soc"] for h in out2) > 78.0
+
+
 def test_per_pack_baseline_helper():
     """Pure helper: pack_count × 60W, with 0/negative clamped to 0."""
     assert forecaster.per_pack_baseline_w(0) == 0.0

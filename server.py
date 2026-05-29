@@ -1648,6 +1648,7 @@ async def _smart_charge_evaluate(record: bool = True,
     )
     capacity = _total_capacity_wh(device_sn, model_code)
     pack_count = _pack_count_for(device_sn)
+    tz_off = int(weather.get("utc_offset_seconds") or device_location.get_tz_offset() or 0)
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
@@ -1655,6 +1656,7 @@ async def _smart_charge_evaluate(record: bool = True,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
         pack_count=pack_count,
+        utc_offset_seconds=tz_off,
     )
     # Counterfactual — same forecast computed without the AC charge
     # floor injected. Used by compute_plan to decide if AC is actually
@@ -1667,6 +1669,7 @@ async def _smart_charge_evaluate(record: bool = True,
         capacity_wh=capacity,
         ac_charge_floor_pct=None,
         pack_count=pack_count,
+        utc_offset_seconds=tz_off,
     )
     # If we don't have enough history yet to fit a trustworthy forecast,
     # don't act on it — return a no-op plan so the controller stays in
@@ -2001,6 +2004,8 @@ async def _solar_charge_evaluate(record: bool = True,
                 # uses with-diversion — that's the projection that actually
                 # tells us "if I keep running, will I make sunrise?" The
                 # baseline stays for display/audit.
+                sc_tz_off = int(weather.get("utc_offset_seconds")
+                                or device_location.get_tz_offset() or 0)
                 fcast_baseline = forecaster.build_forecast(
                     energy_history=energy_hist,
                     weather_hourly=weather["hourly"],
@@ -2008,6 +2013,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     capacity_wh=capacity,
                     ac_charge_floor_pct=None,
                     pack_count=_pack_count_for(device_sn),
+                    utc_offset_seconds=sc_tz_off,
                 )
                 # The simulator's floor for distributing extra_load_w is
                 # the controller's ON threshold (target + margin +
@@ -2032,6 +2038,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     extra_load_w=float(cfg.get("car_load_w") or 1400),
                     extra_load_floor_pct=sim_floor,
                     pack_count=_pack_count_for(device_sn),
+                    utc_offset_seconds=sc_tz_off,
                 )
 
                 def _sunrise_from(fcast):
@@ -2909,6 +2916,8 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
         pack_count=_pack_count_for(device_sn),
+        utc_offset_seconds=int(weather.get("utc_offset_seconds")
+                               or device_location.get_tz_offset() or 0),
     )
     # Only persist when the forecast is actually fit — recording an
     # empty placeholder would corrupt prediction-accuracy analytics.

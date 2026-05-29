@@ -167,6 +167,34 @@ DEFAULT_SOLAR_COEFF = 0.32
 CLEAR_SKY_GHI_THRESHOLD = 700.0
 CLEAR_SKY_MAX_CLOUD_PCT = 30.0
 
+# Diurnal shade / azimuth correction. A single coefficient k can't
+# represent a site where production deviates from GHI by time of day —
+# afternoon roof/tree shade, east/west panel azimuth, a horizon
+# obstruction. fit_diurnal_shape learns a per-local-hour multiplicative
+# factor s_h on top of k: predicted_solar = k * GHI * s_h. Each hour's
+# factor is the MEDIAN of observed_solar / (k*GHI), shrunk toward 1.0 by
+# sample count so sparse hours stay neutral. Cloud cancels in the ratio
+# (both observed and GHI scale with it) so the factor isolates geometry,
+# not weather. A fresh install with no history gets all-1.0 factors —
+# identical to the pure k*GHI behavior. Nothing site-specific is
+# hardcoded; the shape is entirely learned per device.
+DIURNAL_SHAPE_PRIOR_STRENGTH = 4.0   # pseudo-samples pulling each hour toward 1.0
+DIURNAL_MIN_GHI = 50.0               # only learn from real daylight hours
+DIURNAL_RATIO_CLAMP = (0.05, 5.0)    # drop non-physical per-sample ratios (broken-cloud max-vs-mean spikes)
+
+# Learned charge ceiling. Multi-pack rigs plateau below 100% system SOC
+# because the weakest pack saturates first (its BMS stops accepting
+# charge) while the capacity-weighted average is still well under full —
+# observed ~78% on a 5-pack 5000+ even when the main unit reads 100%.
+# fit_charge_ceiling learns the p95 of daily-max system SOC across days
+# that actually ran a charge cycle; simulate_soc caps there instead of
+# 100%. Cold start (too few charge days, or the system reaches near-full)
+# → None → NO cap, so a fresh / balanced / mostly-cloudy install is never
+# falsely limited. Nothing hardcoded; a balanced single unit learns 100.
+CHARGE_CEILING_MIN_DAYS = 5               # need this many real charge days to trust a cap
+CHARGE_CEILING_MIN_DAILY_RISE_PP = 20.0   # a "charge day" raised SOC at least this much
+CHARGE_CEILING_NO_CAP_ABOVE = 97.0        # learned ceiling >= this → no meaningful cap (reaches full)
+
 # SOC headroom filter for fit_solar_coefficient. When SOC is close to
 # full, the BMS tapers the charging current to protect the pack — so
 # even when GHI is at peak, the reported `solar_w` is the BMS-accepted
@@ -480,6 +508,76 @@ def fit_solar_coefficient(
         log.warning("solar coefficient %.3f out of plausible range; using default", k)
         return DEFAULT_SOLAR_COEFF, len(pairs)
     return k, len(pairs)
+
+
+def fit_diurnal_shape(
+    energy_history: list[dict[str, Any]],
+    weather_hourly: list[dict[str, Any]],
+    k: float,
+    utc_offset_seconds: int = 0,
+) -> dict[int, float]:
+    """Learn a per-local-hour-of-day multiplicative correction on the
+    global solar coefficient `k`, capturing site geometry (afternoon
+    shade, panel azimuth, horizon obstructions) that a single coefficient
+    cannot represent.
+
+    Returns ``{local_hour_0_23: factor}``. A forecast hour's solar
+    becomes ``k * GHI * factor[local_hour]``. Hours with no history
+    default to 1.0, so a fresh install reproduces the pure ``k*GHI``
+    behavior exactly — nothing site-specific is baked in.
+
+    Each hour's factor is the MEDIAN of ``observed_solar / (k*GHI)`` over
+    the history, shrunk toward 1.0 by the sample count so sparse hours
+    stay conservative::
+
+        factor_h = (n_h * median_h + PRIOR) / (n_h + PRIOR)
+
+    Median (not mean) ignores broken-cloud spikes where the per-hour MAX
+    solar is paired with a per-hour MEAN GHI. Cloud cancels in the ratio
+    (numerator and denominator both scale with it) so the factor reflects
+    geometry, not weather. ``k <= 0`` (no panels detected) → all 1.0.
+
+    `utc_offset_seconds` buckets history into the device's LOCAL hour of
+    day; the same offset is used when the forecast applies the factor, so
+    even a cold-start offset of 0 stays self-consistent."""
+    shape = {h: 1.0 for h in range(24)}
+    if k <= 0:
+        return shape
+    # Per-hour MAX solar, consistent with fit_solar_coefficient's basis.
+    by_hour_solar: dict[int, float] = {}
+    for row in energy_history:
+        ts = int(row.get("ts") or 0)
+        if ts <= 0:
+            continue
+        h = (ts // 3600) * 3600
+        sol = float(row.get("solar_w") or 0)
+        if sol > by_hour_solar.get(h, 0.0):
+            by_hour_solar[h] = sol
+    lo, hi = DIURNAL_RATIO_CLAMP
+    ratios: dict[int, list[float]] = {}
+    for w in weather_hourly:
+        h = (int(w.get("ts") or 0) // 3600) * 3600
+        ghi = float(w.get("ghi_w_m2") or 0)
+        if ghi <= DIURNAL_MIN_GHI:
+            continue
+        sol = by_hour_solar.get(h)
+        if sol is None or sol <= 0:
+            continue
+        predicted = k * ghi
+        if predicted <= 0:
+            continue
+        ratio = sol / predicted
+        if ratio < lo or ratio > hi:
+            continue
+        lhod = ((h + int(utc_offset_seconds)) % 86400) // 3600
+        ratios.setdefault(lhod, []).append(ratio)
+    for lhod, rs in ratios.items():
+        rs.sort()
+        n = len(rs)
+        median = rs[n // 2] if n % 2 else (rs[n // 2 - 1] + rs[n // 2]) / 2.0
+        shape[lhod] = ((n * median + DIURNAL_SHAPE_PRIOR_STRENGTH)
+                       / (n + DIURNAL_SHAPE_PRIOR_STRENGTH))
+    return shape
 
 
 # ---------- idle overhead ----------
@@ -1503,6 +1601,53 @@ def expected_load_w(
 
 
 # ---------- simulation ----------
+def fit_charge_ceiling(
+    energy_history: list[dict[str, Any]],
+    utc_offset_seconds: int = 0,
+    *,
+    min_charge_days: int = CHARGE_CEILING_MIN_DAYS,
+    min_daily_rise_pp: float = CHARGE_CEILING_MIN_DAILY_RISE_PP,
+) -> float | None:
+    """Learn the per-device charge ceiling — the system-SOC plateau the
+    BMS actually allows. Multi-pack rigs top out below 100% because the
+    weakest pack saturates first while the capacity-weighted system SOC
+    is still well under full; balanced single units reach ~100%.
+
+    Returns the p95 of daily-max system SOC across days that ran a real
+    charge cycle (daily SOC rose at least `min_daily_rise_pp`), or
+    ``None`` when there isn't enough evidence — in which case the caller
+    applies NO cap (100%). Gating on actual charge days keeps a fresh or
+    persistently-cloudy install from falsely capping itself low just
+    because it hasn't filled yet. Returns None when the learned ceiling
+    is at/above CHARGE_CEILING_NO_CAP_ABOVE (the system reaches full, so
+    a cap would be a no-op). Uses `_row_soc` so it sees capacity-weighted
+    system SOC on multi-pack rigs and main `battery_pct` otherwise.
+
+    Nothing is hardcoded per device: a balanced unit learns ~100 (→ None,
+    no cap), an imbalanced 5-pack learns ~78."""
+    by_day_max: dict[int, float] = {}
+    by_day_min: dict[int, float] = {}
+    for row in energy_history:
+        soc = _row_soc(row)
+        ts = int(row.get("ts") or 0)
+        if soc is None or ts <= 0:
+            continue
+        day = (ts + int(utc_offset_seconds)) // 86400
+        by_day_max[day] = max(by_day_max.get(day, -1.0), soc)
+        by_day_min[day] = min(by_day_min.get(day, 101.0), soc)
+    charge_maxes = sorted(
+        by_day_max[d] for d in by_day_max
+        if by_day_max[d] - by_day_min.get(d, by_day_max[d]) >= min_daily_rise_pp
+    )
+    if len(charge_maxes) < min_charge_days:
+        return None
+    idx = min(len(charge_maxes) - 1, int(len(charge_maxes) * 0.95))
+    ceiling = float(charge_maxes[idx])
+    if ceiling >= CHARGE_CEILING_NO_CAP_ABOVE:
+        return None
+    return ceiling
+
+
 def simulate_soc(
     starting_soc_pct: float,
     capacity_wh: int,
@@ -1512,6 +1657,7 @@ def simulate_soc(
     charge_efficiency: float | None = None,
     extra_load_w: float | None = None,
     extra_load_floor_pct: float | None = None,
+    soc_ceiling_pct: float | None = None,
 ) -> list[dict[str, Any]]:
     """Walk SOC forward through the forecast window.
 
@@ -1541,6 +1687,11 @@ def simulate_soc(
     credited only for the hours the controller would actually keep it
     on. Pass `extra_load_w=None` for the legacy "natural drain only"
     behavior.
+
+    `soc_ceiling_pct`: cap the simulated SOC at this value every hour
+    (in addition to the hard 100% clamp). Models the BMS plateau on
+    imbalanced multi-pack rigs that never reach 100% system SOC. None
+    (default) → no extra cap. Fit per-device with `fit_charge_ceiling`.
     """
     eff = CHARGE_EFFICIENCY if charge_efficiency is None else float(charge_efficiency)
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
@@ -1612,6 +1763,12 @@ def simulate_soc(
             net *= eff
         soc += net / capacity_wh * 100.0
         soc = max(0.0, min(100.0, soc))
+        # Learned charge ceiling — multi-pack rigs plateau below 100%
+        # system SOC (weakest pack saturates, BMS curtails). Clamp here
+        # so net-positive days don't run the simulated SOC up to 100%
+        # when the real system tops out lower. None → no cap (default).
+        if soc_ceiling_pct is not None and soc > soc_ceiling_pct:
+            soc = soc_ceiling_pct
         # Smart-charge floor — the user has Kasa-driven grid top-up that
         # holds SOC at or above target_sunrise_soc_pct. Modeling it as a
         # hard floor undercounts how much grid energy is actually used
@@ -1694,6 +1851,7 @@ def build_forecast(
     extra_load_w: float | None = None,
     extra_load_floor_pct: float | None = None,
     pack_count: int = 0,
+    utc_offset_seconds: int = 0,
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
@@ -1720,6 +1878,11 @@ def build_forecast(
     cutoff = int(now_ts)
 
     k, n_fit = fit_solar_coefficient(energy_history, weather_hourly)
+    # Per-local-hour shade/azimuth correction on top of k. All-1.0 on a
+    # fresh install → identical to pure k*GHI; learns the site's diurnal
+    # curve (e.g. afternoon shade) as history accumulates.
+    diurnal_shape = fit_diurnal_shape(energy_history, weather_hourly, k,
+                                      utc_offset_seconds=utc_offset_seconds)
     profile = fit_load_profile(energy_history, now_ts=now_ts)
     # Per-device drain model: parasitic baseline (W) + percentage of
     # throughput. The parasitic term captures BMS, idle inverter, pack
@@ -1771,6 +1934,13 @@ def build_forecast(
     )
     solar_cap = recent_peak * SOLAR_RECENT_CAP_MULT if recent_peak > 50 else None
 
+    # Per-device charge ceiling (None → no cap). Learned from observed
+    # daily-max system SOC on real charge days; caps the simulator so
+    # multi-pack rigs that plateau ~78% don't run up to 100% on long-
+    # lead net-positive days.
+    soc_ceiling = fit_charge_ceiling(energy_history,
+                                     utc_offset_seconds=utc_offset_seconds)
+
     future = [w for w in weather_hourly if int(w.get("ts") or 0) >= cutoff]
     future = future[:horizon_hours]
 
@@ -1778,7 +1948,12 @@ def build_forecast(
     for w in future:
         ts = int(w["ts"])
         ghi = float(w.get("ghi_w_m2") or 0)
-        solar_w_uncapped = max(0.0, k * ghi)
+        # Apply the learned diurnal shape (afternoon shade etc.) on top of
+        # the global coefficient. shape defaults to 1.0 per hour, so this
+        # is a no-op until the per-hour factors are learned from history.
+        lhod = ((ts + int(utc_offset_seconds)) % 86400) // 3600
+        shape_factor = diurnal_shape.get(lhod, 1.0)
+        solar_w_uncapped = max(0.0, k * ghi * shape_factor)
         solar_w = solar_w_uncapped
         capped = False
         if solar_cap is not None and solar_w > solar_cap:
@@ -1810,6 +1985,7 @@ def build_forecast(
         charge_efficiency=charge_eff,
         extra_load_w=extra_load_w,
         extra_load_floor_pct=extra_load_floor_pct,
+        soc_ceiling_pct=soc_ceiling,
     )
     return {
         "ready": True,
@@ -1826,6 +2002,14 @@ def build_forecast(
         # or running away — pair with the per-hour `solar_capped` flag.
         "solar_recent_peak_w": round(recent_peak, 1),
         "solar_cap_w": round(solar_cap, 1) if solar_cap is not None else None,
+        # Per-local-hour diurnal shade/azimuth correction applied on top
+        # of solar_coefficient. 1.0 = no correction (cold start / no
+        # shade); < 1.0 = that local hour produces less than k*GHI would
+        # predict (e.g. afternoon shade). Keyed by local hour-of-day.
+        "diurnal_shape": {str(h): round(v, 3) for h, v in sorted(diurnal_shape.items())},
+        # Learned charge ceiling (system-SOC plateau the BMS allows).
+        # null = no cap (reaches full, or too little charge-cycle data).
+        "charge_ceiling_pct": round(soc_ceiling, 1) if soc_ceiling is not None else None,
         "overall_load_w": round(overall_load, 1),
         # NEW: p95 of output_w. Used as the per-bucket ceiling in the
         # load profile, replacing the old 2*mean heuristic that biased
