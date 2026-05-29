@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 import auth
+import cf_access
 
 
 def _cookie_secure() -> bool:
@@ -80,19 +81,34 @@ def install(app: FastAPI, web_dir: Path,
         path = request.url.path
         if any(path == p or path.startswith(p) for p in public_prefixes):
             return await call_next(request)
-        # First-time-setup gate: no user yet → force /setup
+
+        # 1. Valid app-session cookie → fast path (local HMAC check).
+        if auth.verify_session(request.cookies.get(auth.COOKIE_NAME)):
+            return await call_next(request)
+
+        # 2. Valid Cloudflare Access assertion → authenticated at the
+        #    edge (e.g. Google/Gmail SSO), no app password needed. Mint a
+        #    session cookie so same-browser follow-ups AND the WebSocket
+        #    (which auths via cookie) take the fast path above and we
+        #    don't RSA-verify every request. Absent/invalid assertion
+        #    falls through to the password path below — that's what keeps
+        #    LAN-direct hits (no assertion) gated by the password.
+        if cf_access.is_configured():
+            cf_email = await cf_access.verify(
+                request.headers.get(cf_access.HEADER_NAME))
+            if cf_email:
+                response = await call_next(request)
+                _set_session_cookie(response, cf_email)
+                return response
+
+        # 3. No valid auth. First-run setup gate, else login.
         if not auth.has_user():
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "setup_required"}, status_code=401)
             return RedirectResponse("/setup", status_code=303)
-        # Auth check
-        token = request.cookies.get(auth.COOKIE_NAME)
-        payload = auth.verify_session(token)
-        if not payload:
-            if path.startswith("/api/"):
-                return JSONResponse({"detail": "auth_required"}, status_code=401)
-            return RedirectResponse("/login", status_code=303)
-        return await call_next(request)
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "auth_required"}, status_code=401)
+        return RedirectResponse("/login", status_code=303)
 
     @app.post("/api/auth/setup")
     async def api_auth_setup(body: dict, response: Response):
