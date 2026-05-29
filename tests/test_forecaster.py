@@ -916,28 +916,60 @@ def test_diurnal_shape_shrinks_sparse_hours_toward_one():
 
 
 # ---------- Charge ceiling ----------
-def _charge_history(daily_maxes, tz_off=0, base_ts=1_700_000_000):
-    """One row per local day: SOC rises from 20 to daily_max (a real
-    charge cycle). Two rows per day so min/max are both captured."""
+CEIL_CAP_WH = 30000  # capacity used in ceiling tests
+# surplus threshold = 5% of capacity = 1500 Wh; "surplus day" rows below
+# give 4000 Wh solar vs 500 Wh load = 3500 Wh surplus (qualifies).
+
+
+def _charge_history(daily_maxes, tz_off=0, base_ts=1_700_000_000,
+                    solar_wh=4000.0, out_wh=500.0):
+    """One charge cycle per local day plateauing at daily_max. Each day
+    carries solar_wh/output_wh so the surplus gate can classify it.
+    Default solar 4000 / load 500 → 3500 Wh surplus, well over the 1500
+    Wh (5% of 30 kWh) threshold."""
     base_ts = (base_ts // 86400) * 86400  # snap to UTC midnight
     rows = []
     for i, dmax in enumerate(daily_maxes):
-        day_ts = base_ts + i * 86400 + 8 * 3600   # 08:00, mid-day-ish
-        rows.append({"ts": day_ts, "battery_pct": 20})
-        rows.append({"ts": day_ts + 6 * 3600, "battery_pct": dmax})  # 14:00, same day
+        day_ts = base_ts + i * 86400 + 8 * 3600   # 08:00
+        # Split the day's solar/load across two rows so the daily sums
+        # are solar_wh / out_wh.
+        rows.append({"ts": day_ts, "battery_pct": 20,
+                     "solar_wh": solar_wh / 2, "output_wh": out_wh / 2})
+        rows.append({"ts": day_ts + 6 * 3600, "battery_pct": dmax,
+                     "solar_wh": solar_wh / 2, "output_wh": out_wh / 2})
     return rows
 
 
 def test_charge_ceiling_cold_start_returns_none():
-    """Fewer than min_charge_days of real charge cycles → None (no cap)."""
-    rows = _charge_history([78, 77, 79])  # only 3 charge days
-    assert forecaster.fit_charge_ceiling(rows) is None
+    """Fewer than min_days of surplus days → None (no cap)."""
+    rows = _charge_history([78, 77, 79])  # only 3 surplus days
+    assert forecaster.fit_charge_ceiling(rows, CEIL_CAP_WH) is None
 
 
 def test_charge_ceiling_learns_plateau():
-    """Enough charge days plateauing ~78% → ceiling ≈ 78."""
+    """Enough surplus days plateauing ~78% → ceiling ≈ 78. Works even
+    though the daily SOC swing is small (the surplus is what qualifies
+    the day, not the realized rise)."""
     rows = _charge_history([77, 78, 79, 78, 77, 78, 79])
-    ceiling = forecaster.fit_charge_ceiling(rows)
+    ceiling = forecaster.fit_charge_ceiling(rows, CEIL_CAP_WH)
+    assert ceiling is not None
+    assert 77 <= ceiling <= 80, f"got {ceiling}"
+
+
+def test_charge_ceiling_learns_plateau_when_battery_kept_topped_up():
+    """The case that broke the old rise-based gate: battery sits high all
+    day (small swing) but there's clear surplus. Should still learn the
+    ceiling."""
+    # SOC barely moves (74→78) but solar 4000 vs load 500 = big surplus.
+    rows = []
+    base = (1_700_000_000 // 86400) * 86400
+    for i, dmax in enumerate([77, 78, 78, 79, 77, 78, 79]):
+        day_ts = base + i * 86400 + 8 * 3600
+        rows.append({"ts": day_ts, "battery_pct": 74,
+                     "solar_wh": 2000, "output_wh": 250})
+        rows.append({"ts": day_ts + 6 * 3600, "battery_pct": dmax,
+                     "solar_wh": 2000, "output_wh": 250})
+    ceiling = forecaster.fit_charge_ceiling(rows, CEIL_CAP_WH)
     assert ceiling is not None
     assert 77 <= ceiling <= 80, f"got {ceiling}"
 
@@ -945,15 +977,22 @@ def test_charge_ceiling_learns_plateau():
 def test_charge_ceiling_no_cap_when_reaches_full():
     """A balanced system that charges to ~100% → None (no meaningful cap)."""
     rows = _charge_history([99, 100, 98, 100, 99, 100, 99])
-    assert forecaster.fit_charge_ceiling(rows) is None
+    assert forecaster.fit_charge_ceiling(rows, CEIL_CAP_WH) is None
 
 
-def test_charge_ceiling_ignores_non_charge_days():
-    """Days that never charged (flat low SOC) don't count toward the
-    ceiling — only days with a real rise do."""
-    # 7 flat cloudy days (no rise) + 0 charge days → None.
-    flat = [{"ts": 1_700_000_000 + i * 86400, "battery_pct": 30} for i in range(7)]
-    assert forecaster.fit_charge_ceiling(flat) is None
+def test_charge_ceiling_ignores_non_surplus_days():
+    """Cloudy days with no surplus (solar ≈ load) don't count — only days
+    with real spare energy do. A week of low-surplus days → None."""
+    # solar 600 vs load 500 = 100 Wh surplus, under the 1500 Wh gate.
+    rows = _charge_history([55, 56, 54, 57, 55, 56, 54],
+                           solar_wh=600.0, out_wh=500.0)
+    assert forecaster.fit_charge_ceiling(rows, CEIL_CAP_WH) is None
+
+
+def test_charge_ceiling_zero_capacity_returns_none():
+    """Guard: capacity_wh <= 0 → None (can't compute a surplus threshold)."""
+    rows = _charge_history([78, 77, 79, 78, 77, 78])
+    assert forecaster.fit_charge_ceiling(rows, 0) is None
 
 
 def test_simulate_soc_respects_ceiling():

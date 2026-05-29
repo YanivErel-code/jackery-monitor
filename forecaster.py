@@ -191,8 +191,15 @@ DIURNAL_RATIO_CLAMP = (0.05, 5.0)    # drop non-physical per-sample ratios (brok
 # 100%. Cold start (too few charge days, or the system reaches near-full)
 # → None → NO cap, so a fresh / balanced / mostly-cloudy install is never
 # falsely limited. Nothing hardcoded; a balanced single unit learns 100.
-CHARGE_CEILING_MIN_DAYS = 5               # need this many real charge days to trust a cap
-CHARGE_CEILING_MIN_DAILY_RISE_PP = 20.0   # a "charge day" raised SOC at least this much
+CHARGE_CEILING_MIN_DAYS = 5               # need this many surplus days to trust a cap
+# A "surplus day" produced at least this fraction of total capacity MORE
+# solar than it consumed — i.e. there was real spare energy that COULD
+# have charged the battery higher. Gating on surplus (not realized SOC
+# rise) is what makes this work for a topped-up battery whose daily SOC
+# swing is small: the surplus is large even when SOC barely moves, and a
+# SOC that plateaus despite surplus IS the ceiling. Capacity-relative so
+# it scales to any system (≈1.5 kWh on a 30 kWh rig, ≈100 Wh on a 2 kWh).
+CHARGE_CEILING_MIN_SURPLUS_FRAC = 0.05
 CHARGE_CEILING_NO_CAP_ABOVE = 97.0        # learned ceiling >= this → no meaningful cap (reaches full)
 
 # SOC headroom filter for fit_solar_coefficient. When SOC is close to
@@ -1603,46 +1610,61 @@ def expected_load_w(
 # ---------- simulation ----------
 def fit_charge_ceiling(
     energy_history: list[dict[str, Any]],
+    capacity_wh: int,
     utc_offset_seconds: int = 0,
     *,
-    min_charge_days: int = CHARGE_CEILING_MIN_DAYS,
-    min_daily_rise_pp: float = CHARGE_CEILING_MIN_DAILY_RISE_PP,
+    min_days: int = CHARGE_CEILING_MIN_DAYS,
+    min_surplus_frac: float = CHARGE_CEILING_MIN_SURPLUS_FRAC,
 ) -> float | None:
     """Learn the per-device charge ceiling — the system-SOC plateau the
     BMS actually allows. Multi-pack rigs top out below 100% because the
     weakest pack saturates first while the capacity-weighted system SOC
     is still well under full; balanced single units reach ~100%.
 
-    Returns the p95 of daily-max system SOC across days that ran a real
-    charge cycle (daily SOC rose at least `min_daily_rise_pp`), or
-    ``None`` when there isn't enough evidence — in which case the caller
-    applies NO cap (100%). Gating on actual charge days keeps a fresh or
-    persistently-cloudy install from falsely capping itself low just
-    because it hasn't filled yet. Returns None when the learned ceiling
-    is at/above CHARGE_CEILING_NO_CAP_ABOVE (the system reaches full, so
-    a cap would be a no-op). Uses `_row_soc` so it sees capacity-weighted
-    system SOC on multi-pack rigs and main `battery_pct` otherwise.
+    The key signal is SURPLUS, not realized SOC change. A "surplus day"
+    produced at least `min_surplus_frac` × capacity more solar than it
+    consumed — meaning there was spare energy that *could* have pushed
+    SOC higher. If the daily-max SOC on such days nonetheless plateaus
+    below 100%, that plateau is the BMS ceiling. Gating on surplus (not
+    on a 20pp SOC rise) is what makes this work for a battery that's
+    kept topped up: its daily SOC swing is small, but on a sunny day the
+    surplus is large, so the plateau is still observable.
 
-    Nothing is hardcoded per device: a balanced unit learns ~100 (→ None,
-    no cap), an imbalanced 5-pack learns ~78."""
+    Returns the p90 of daily-max system SOC across surplus days, or
+    ``None`` when:
+      • fewer than `min_days` surplus days exist (fresh / cloudy install
+        → no cap, never falsely limit a system we haven't seen fill), or
+      • the learned ceiling is ≥ CHARGE_CEILING_NO_CAP_ABOVE (the system
+        reaches ~full, so a cap would be a no-op).
+
+    Uses `_row_soc` so it sees capacity-weighted system SOC on multi-pack
+    rigs and main `battery_pct` otherwise. Nothing is hardcoded per
+    device: a balanced unit learns ~100 (→ None), an imbalanced 5-pack
+    learns ~78. Capacity-relative surplus scales to any system size."""
+    if capacity_wh <= 0:
+        return None
     by_day_max: dict[int, float] = {}
-    by_day_min: dict[int, float] = {}
+    by_day_solar_wh: dict[int, float] = {}
+    by_day_out_wh: dict[int, float] = {}
     for row in energy_history:
-        soc = _row_soc(row)
         ts = int(row.get("ts") or 0)
-        if soc is None or ts <= 0:
+        if ts <= 0:
             continue
         day = (ts + int(utc_offset_seconds)) // 86400
-        by_day_max[day] = max(by_day_max.get(day, -1.0), soc)
-        by_day_min[day] = min(by_day_min.get(day, 101.0), soc)
-    charge_maxes = sorted(
+        soc = _row_soc(row)
+        if soc is not None:
+            by_day_max[day] = max(by_day_max.get(day, -1.0), soc)
+        by_day_solar_wh[day] = by_day_solar_wh.get(day, 0.0) + float(row.get("solar_wh") or 0)
+        by_day_out_wh[day] = by_day_out_wh.get(day, 0.0) + float(row.get("output_wh") or 0)
+    surplus_wh = min_surplus_frac * capacity_wh
+    surplus_maxes = sorted(
         by_day_max[d] for d in by_day_max
-        if by_day_max[d] - by_day_min.get(d, by_day_max[d]) >= min_daily_rise_pp
+        if (by_day_solar_wh.get(d, 0.0) - by_day_out_wh.get(d, 0.0)) > surplus_wh
     )
-    if len(charge_maxes) < min_charge_days:
+    if len(surplus_maxes) < min_days:
         return None
-    idx = min(len(charge_maxes) - 1, int(len(charge_maxes) * 0.95))
-    ceiling = float(charge_maxes[idx])
+    idx = min(len(surplus_maxes) - 1, int(len(surplus_maxes) * 0.90))
+    ceiling = float(surplus_maxes[idx])
     if ceiling >= CHARGE_CEILING_NO_CAP_ABOVE:
         return None
     return ceiling
@@ -1934,11 +1956,12 @@ def build_forecast(
     )
     solar_cap = recent_peak * SOLAR_RECENT_CAP_MULT if recent_peak > 50 else None
 
-    # Per-device charge ceiling (None → no cap). Learned from observed
-    # daily-max system SOC on real charge days; caps the simulator so
-    # multi-pack rigs that plateau ~78% don't run up to 100% on long-
+    # Per-device charge ceiling (None → no cap). Learned from daily-max
+    # system SOC on SURPLUS days (solar exceeded load by >5% of capacity
+    # — spare energy that could have charged higher); caps the simulator
+    # so multi-pack rigs that plateau ~78% don't run up to 100% on long-
     # lead net-positive days.
-    soc_ceiling = fit_charge_ceiling(energy_history,
+    soc_ceiling = fit_charge_ceiling(energy_history, capacity_wh,
                                      utc_offset_seconds=utc_offset_seconds)
 
     future = [w for w in weather_hourly if int(w.get("ts") or 0) >= cutoff]
