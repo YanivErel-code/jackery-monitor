@@ -82,6 +82,16 @@ services:
       # directly to JACKERY_HTTP_PORT (default 8123) on the host — no
       # docker port mapping in the way.
       PORT: "${JACKERY_HTTP_PORT:-8123}"
+      # Cloudflare Access (Google SSO) edge auth. Empty defaults = inert
+      # (app keeps its own password). Set these in .env to let a
+      # Cloudflare-Access-authenticated request skip the app password;
+      # the password stays as the LAN-direct fallback. See cf_access.py.
+      #   TEAM = your <team>.cloudflareaccess.com subdomain
+      #   AUD  = the Access application's Audience tag
+      #   EMAILS = optional comma-separated allowlist (policy is primary)
+      JACKERY_CF_ACCESS_TEAM: "${JACKERY_CF_ACCESS_TEAM:-}"
+      JACKERY_CF_ACCESS_AUD: "${JACKERY_CF_ACCESS_AUD:-}"
+      JACKERY_CF_ACCESS_EMAILS: "${JACKERY_CF_ACCESS_EMAILS:-}"
     volumes:
       - jackery-data:/data
     # No cap_add / security_opt anymore. The backup feature now uses
