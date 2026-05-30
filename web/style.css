@@ -969,7 +969,10 @@ main {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: baseline;
-  justify-items: end;
+  /* Center each word/number within its column so "Peak" sits over the
+     middle of the peak number (not hugging the dot) and "sunset" over
+     the sunset number — symmetric two-stat layout with the dot between. */
+  justify-items: center;
   gap: 0 6px;
   width: 100%;
 }
