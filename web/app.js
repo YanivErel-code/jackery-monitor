@@ -5767,9 +5767,20 @@ async function fetchEodForecast() {
     const showBoth = isDayNow && peakVal > sunsetVal + 1;
 
     if (labelEl) labelEl.textContent = showBoth ? 'Peak · sunset' : label;
-    // The markup has a trailing <small>%</small> after #eod-pct, which
-    // completes the LAST number shown.
-    pct.textContent = showBoth ? `${peakVal}% · ${sunsetVal}` : `${sunsetVal}`;
+    // #eod-pct is followed by a fixed trailing <small>%</small> in the
+    // markup. For a single value we let that complete the number. For the
+    // "peak · sunset" case we hide it and render BOTH numbers with their
+    // own <small>%</small> inside #eod-pct, so the two percent signs pick
+    // up identical styling (.eod-row small is a descendant selector) and
+    // line up — instead of the peak's % being full-size inline text.
+    const trailingPct = el.querySelector('.eod-row > small');
+    if (showBoth) {
+      if (trailingPct) trailingPct.hidden = true;
+      pct.innerHTML = `${peakVal}<small>%</small> · ${sunsetVal}<small>%</small>`;
+    } else {
+      if (trailingPct) trailingPct.hidden = false;
+      pct.textContent = `${sunsetVal}`;
+    }
     el.title = showBoth
       ? `Battery peaks ~${peakVal}% today, then the shaded evening `
         + `(solar below house load) drains it to ~${sunsetVal}% by sunset. `
