@@ -2485,16 +2485,18 @@ def _db_pack_to_cloud_shape(row: dict) -> dict:
     expect the cloud's raw field names. Convert at the boundary so neither
     side has to know about the other.
 
-    `it` is unconditionally dropped — see `_sanitize_pack_telemetry` —
-    so historical rows persisted before the filter shipped don't leak
-    bad temperatures into the UI or advisor."""
+    `it` (per-pack temp) is now carried through from the stored
+    `internal_temp_c` so a restart-hydrated pack card shows the last
+    known temp instead of a blank until the next live refresh. It's
+    persisted for future algorithm use; the UI flags out-of-band values
+    as untrusted and no logic consumes it yet."""
     return {
         "deviceSn": row.get("pack_sn"),
         "deviceOrder": row.get("device_order") or 0,
         "rb": row.get("soc_pct"),
         "ip": row.get("input_w"),
         "op": row.get("output_w"),
-        "it": None,
+        "it": row.get("internal_temp_c"),
         "ec": row.get("error_code") or 0,
     }
 
