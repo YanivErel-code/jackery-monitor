@@ -1113,27 +1113,21 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
         log.debug("daily summary backfill failed: %s", e)
 
 
-# Per-pack temperature reporting on the Jackery 5000 Plus is unreliable
-# across firmwares — observed values include 4°C with 20°C+ ambient,
-# 135°C while neighboring packs read 78°C, and other physically
-# impossible readings. Only the main unit's `bt` field (rendered as
-# `battery_temp_c`) tracks reality; per-pack `it` is dropped entirely
-# rather than displayed alongside the trustworthy main reading. If a
-# future firmware fixes pack reporting, replace this unconditional
-# strip with a plausibility band.
+# Per-pack temperature (`it`, internal °C) was historically unreliable on
+# the 5000 Plus — values like 4°C at 20°C+ ambient, or 135°C next to packs
+# reading 78°C. We used to strip it entirely. It's now PASSED THROUGH for
+# DISPLAY ONLY: the per-pack dropdown shows each pack's reported temp so
+# the user can eyeball whether a firmware update fixed reporting. It is
+# NOT consumed by any logic — the drain model, forecast, and controllers
+# use pack SOC (`rb`) and capacity, never temperature — and the UI flags
+# any out-of-plausible-band value as untrusted (amber, with a tooltip)
+# rather than treating it as real.
 def _sanitize_pack_telemetry(packs: list[dict]) -> list[dict]:
-    """Strip the unreliable per-pack `it` (internal temperature) field
-    from the cloud's pack list before it lands in the cache or the DB.
-    Returns a new list of dicts; everything else passes through."""
-    out: list[dict] = []
-    for p in packs:
-        if not isinstance(p, dict):
-            out.append(p)
-            continue
-        clean = dict(p)
-        clean["it"] = None
-        out.append(clean)
-    return out
+    """Pass the cloud's pack list through unchanged. Retained as the
+    single per-pack ingestion hook for any future field cleaning;
+    per-pack temperature is intentionally NOT stripped anymore (it's
+    display-only — see the note above)."""
+    return packs
 
 
 _unknown_models_warned: set[int] = set()

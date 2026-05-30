@@ -6337,8 +6337,11 @@ function formatPackTempHtml(celsius, packSn) {
     const title = `Reported value ${safe}°C is outside the plausible Li-ion ` +
                   `operating range (${PACK_TEMP_PLAUSIBLE_C.min} to ${PACK_TEMP_PLAUSIBLE_C.max}°C). ` +
                   `Probably a BMS fault code or sensor glitch on this pack — ` +
-                  `not a real temperature reading.`;
-    return `<span class="pack-temp-fault" title="${title}">⚠?</span>`;
+                  `not a real temperature reading (display-only; not used).`;
+    // Show the actual reading (amber + dotted underline = untrusted) so
+    // the value is visible at a glance — the point is to eyeball whether
+    // firmware fixed pack temp reporting. Not hidden behind a "⚠?".
+    return `<span class="pack-temp-fault" title="${title}">${formatTemp(c)}</span>`;
   }
   return formatTemp(c);
 }
