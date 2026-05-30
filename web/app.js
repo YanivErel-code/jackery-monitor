@@ -5684,11 +5684,12 @@ async function fetchEodForecast() {
     const needH = r.needed_hours ?? 24;
     const haveW = r.have_idle_windows ?? 0;
     const needW = r.needed_idle_windows ?? 5;
+    el.classList.remove('eod-pair');  // drop the two-column layout if it was on
     const labelEl = el.querySelector('.eod-label');
     if (labelEl) labelEl.textContent = 'Calibrating';
     const pct = $('eod-pct');
     const trend = $('eod-trend');
-    if (trend) { trend.textContent = ''; trend.classList.remove('up', 'down'); }
+    if (trend) { trend.hidden = false; trend.textContent = ''; trend.classList.remove('up', 'down'); }
     // Reuse #eod-pct as the message slot — keeps the layout stable.
     if (pct) pct.textContent = `${haveH}/${needH} h · ${haveW}/${needW} cycles`;
     el.classList.remove('low');
@@ -5766,40 +5767,52 @@ async function fetchEodForecast() {
     }
     const showBoth = isDayNow && peakVal > sunsetVal + 1;
 
-    if (labelEl) labelEl.textContent = showBoth ? 'Peak · sunset' : label;
-    // #eod-pct is followed by a fixed trailing <small>%</small> in the
-    // markup. For a single value we let that complete the number. For the
-    // "peak · sunset" case we hide it and render BOTH numbers with their
-    // own <small>%</small> inside #eod-pct, so the two percent signs pick
-    // up identical styling (.eod-row small is a descendant selector) and
-    // line up — instead of the peak's % being full-size inline text.
     const trailingPct = el.querySelector('.eod-row > small');
-    if (showBoth) {
-      if (trailingPct) trailingPct.hidden = true;
-      pct.innerHTML = `${peakVal}<small>%</small> · ${sunsetVal}<small>%</small>`;
-    } else {
-      if (trailingPct) trailingPct.hidden = false;
-      pct.textContent = `${sunsetVal}`;
-    }
-    el.title = showBoth
-      ? `Battery peaks ~${peakVal}% today, then the shaded evening `
-        + `(solar below house load) drains it to ~${sunsetVal}% by sunset. `
-        + `Refits every 30 min and on live SOC drift.`
-      : 'Predicted state of charge at the next sun-phase boundary (sunset '
-        + 'during the day, sunrise at night). Refits every 30 min and on '
-        + 'live SOC drift.';
-
-    // Trend arrow reflects the NET end-of-day direction (sunset vs now).
     const delta = best.predicted_soc - start;
-    trend.classList.remove('up', 'down');
-    if (Math.abs(delta) < 1) {
-      trend.textContent = '→';
-    } else if (delta > 0) {
-      trend.textContent = '↗';
-      trend.classList.add('up');
+    if (showBoth) {
+      // Two-column aligned layout: the label and the value row both
+      // become full-width 3-col grids (value · value) via the `eod-pair`
+      // class, so "Peak" sits over the peak number and "sunset" over the
+      // sunset number with the dots lined up. The trend arrow is dropped
+      // here — it would offset column 1 and the peak·sunset already shows
+      // the day's direction. Each number carries its own <small>%</small>
+      // so the percent signs match (.eod-row small is a descendant rule).
+      el.classList.add('eod-pair');
+      if (trailingPct) trailingPct.hidden = true;
+      if (trend) trend.hidden = true;
+      if (labelEl) labelEl.innerHTML =
+        '<span>Peak</span><span class="eod-dot">·</span><span>sunset</span>';
+      pct.innerHTML =
+        `<span>${peakVal}<small>%</small></span>`
+        + '<span class="eod-dot">·</span>'
+        + `<span>${sunsetVal}<small>%</small></span>`;
+      el.title = `Battery peaks ~${peakVal}% today, then the shaded evening `
+        + `(solar below house load) drains it to ~${sunsetVal}% by sunset. `
+        + `Refits every 30 min and on live SOC drift.`;
     } else {
-      trend.textContent = '↘';
-      trend.classList.add('down');
+      // Single value (no afternoon decline, or nighttime "At sunrise").
+      // The fixed trailing <small>%</small> completes the number.
+      el.classList.remove('eod-pair');
+      if (trailingPct) trailingPct.hidden = false;
+      if (labelEl) labelEl.textContent = label;
+      pct.textContent = `${sunsetVal}`;
+      el.title = 'Predicted state of charge at the next sun-phase boundary '
+        + '(sunset during the day, sunrise at night). Refits every 30 min '
+        + 'and on live SOC drift.';
+      // Trend arrow reflects the NET direction (target vs now).
+      if (trend) {
+        trend.hidden = false;
+        trend.classList.remove('up', 'down');
+        if (Math.abs(delta) < 1) {
+          trend.textContent = '→';
+        } else if (delta > 0) {
+          trend.textContent = '↗';
+          trend.classList.add('up');
+        } else {
+          trend.textContent = '↘';
+          trend.classList.add('down');
+        }
+      }
     }
     // "Low" warning keys off the true end-of-day (sunset) value — that's
     // the trough that matters for "will I have enough overnight".

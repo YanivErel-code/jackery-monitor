@@ -959,6 +959,21 @@ main {
 .eod-row small {
   font-size: 12px; color: var(--text-dim); margin-left: 2px; font-weight: 500;
 }
+/* Peak·sunset two-column alignment. The label and the value row both
+   become full-width 3-col grids (value | dot | value) with the same
+   template, so "Peak" lines up over the peak number and "sunset" over
+   the sunset number, dots centered between. */
+.eod-forecast.eod-pair .eod-row { width: 100%; }
+.eod-forecast.eod-pair .eod-label,
+.eod-forecast.eod-pair #eod-pct {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: baseline;
+  justify-items: end;
+  gap: 0 6px;
+  width: 100%;
+}
+.eod-forecast.eod-pair .eod-dot { color: var(--text-mute); }
 .eod-trend { font-size: 14px; line-height: 1; color: var(--text-dim); }
 .eod-trend.up   { color: var(--accent); }
 .eod-trend.down { color: #ef4444; }
