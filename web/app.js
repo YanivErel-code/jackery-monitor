@@ -5743,16 +5743,42 @@ async function fetchEodForecast() {
       return;
     }
     const labelEl = el.querySelector('.eod-label');
-    if (labelEl) labelEl.textContent = label;
-
     const pct = $('eod-pct');
     const trend = $('eod-trend');
-    // Restore the original tooltip on the ready path (showCalibrating
-    // overrode it with calibration progress).
-    el.title = 'Predicted state of charge at the next sun-phase boundary (sunset during the day, sunrise at night). Refits every 30 min and on live SOC drift.';
-    pct.textContent = Math.round(best.predicted_soc);
     const start = j.starting_soc_pct ?? best.predicted_soc;
     _eodAnchorSOC = start;
+    const sunsetVal = Math.round(best.predicted_soc);
+
+    // During daytime, also surface the PEAK SOC over today's remaining
+    // daylight. With afternoon shade the battery can crest mid-afternoon
+    // then drain through the shaded evening (solar < house load), so the
+    // last-daylight-hour value ("sunset") alone reads flat/low and hides
+    // the high-water mark. Show "Peak X% · sunset Y%" when they diverge;
+    // fall back to the single sunset value when they don't (no shade, or
+    // SOC still rising into dusk — then peak ≈ sunset).
+    let peakVal = sunsetVal;
+    if (isDayNow) {
+      let pk = -Infinity;
+      for (let d = 0; d < i; d++) {
+        if (fc[d].predicted_soc != null) pk = Math.max(pk, fc[d].predicted_soc);
+      }
+      if (isFinite(pk)) peakVal = Math.round(pk);
+    }
+    const showBoth = isDayNow && peakVal > sunsetVal + 1;
+
+    if (labelEl) labelEl.textContent = showBoth ? 'Peak · sunset' : label;
+    // The markup has a trailing <small>%</small> after #eod-pct, which
+    // completes the LAST number shown.
+    pct.textContent = showBoth ? `${peakVal}% · ${sunsetVal}` : `${sunsetVal}`;
+    el.title = showBoth
+      ? `Battery peaks ~${peakVal}% today, then the shaded evening `
+        + `(solar below house load) drains it to ~${sunsetVal}% by sunset. `
+        + `Refits every 30 min and on live SOC drift.`
+      : 'Predicted state of charge at the next sun-phase boundary (sunset '
+        + 'during the day, sunrise at night). Refits every 30 min and on '
+        + 'live SOC drift.';
+
+    // Trend arrow reflects the NET end-of-day direction (sunset vs now).
     const delta = best.predicted_soc - start;
     trend.classList.remove('up', 'down');
     if (Math.abs(delta) < 1) {
@@ -5764,6 +5790,8 @@ async function fetchEodForecast() {
       trend.textContent = '↘';
       trend.classList.add('down');
     }
+    // "Low" warning keys off the true end-of-day (sunset) value — that's
+    // the trough that matters for "will I have enough overnight".
     const threshold = j.low_battery_threshold || 20;
     el.classList.toggle('low', best.predicted_soc < threshold);
     el.hidden = false;
