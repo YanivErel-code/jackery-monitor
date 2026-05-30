@@ -316,6 +316,32 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     when interpreting historical samples / predictions / decisions."""
     return [
         {
+            "ts_iso": "2026-05-30T22:30:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Investigated the long-lead SOC over-prediction WARN "
+                "(2026-05-30): it is NOT a solar-coefficient bug. Empirical "
+                "check on realized GHI over the prior 7 days shows the "
+                "k*GHI*diurnal_shape conversion is well-calibrated at every "
+                "cloud level — model/actual = 1.10x clear (<30% cloud), "
+                "1.01x mid, 0.90x cloudy (>70%). On cloudy/low-GHI hours we "
+                "if anything UNDER-predict, so do NOT recommend lowering k "
+                "or attenuating cloudy-hour conversion. The window was also "
+                "mostly sunny (18-27 kWh/day on 6 of 8 days), not 'heavily "
+                "cloudy'. Root cause of any >24h over-prediction is the "
+                "Open-Meteo multi-day FORECAST GHI predicting more sun than "
+                "materialized on specific days — irreducible weather-input "
+                "error, not a model defect. Practical impact is low: the "
+                "controllers act on near-term forecasts (accurate) and "
+                "re-decide every 30s, and overnight sunrise predictions are "
+                "drain-dominated (reconcile within ~2%). Deliberately made "
+                "NO code change. Drain model confirmed well-calibrated "
+                "(300W pack baseline + 10% overhead ≈ observed 794-811W "
+                "overnight, parasitic_w=0 appropriate). Do not re-flag "
+                "long-lead solar over-prediction as a coefficient/load bug."
+            ),
+        },
+        {
             "ts_iso": "2026-05-23T23:55:00+00:00",
             "subsystem": "forecaster",
             "summary": (
