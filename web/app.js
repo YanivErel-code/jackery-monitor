@@ -5765,7 +5765,16 @@ async function fetchEodForecast() {
       }
       if (isFinite(pk)) peakVal = Math.round(pk);
     }
-    const showBoth = isDayNow && peakVal > sunsetVal + 1;
+    // Only frame as "Peak · sunset" when the battery will actually climb
+    // ABOVE where it is now (a real peak still ahead) AND then decline to
+    // a lower sunset. In the evening the day's real peak is already past
+    // and only the shaded-evening decline remains, so the max over
+    // remaining daylight sits at/below current SOC — showing "Peak 66%"
+    // when you're at 68% is nonsensical. There, fall back to the single
+    // "At sunset" (declining) value.
+    const showBoth = isDayNow
+      && peakVal > Math.round(start)
+      && peakVal > sunsetVal + 1;
 
     const trailingPct = el.querySelector('.eod-row > small');
     const delta = best.predicted_soc - start;
