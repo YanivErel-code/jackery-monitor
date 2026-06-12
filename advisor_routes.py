@@ -316,6 +316,38 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     when interpreting historical samples / predictions / decisions."""
     return [
         {
+            "ts_iso": "2026-06-12T01:00:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "Investigated the 2026-06-12 solar-UNDER-prediction WARN: it "
+                "is NOT a solar-coefficient/fit regression. Verified directly: "
+                "fit_solar_coefficient returns k≈3.56-3.59 from a healthy "
+                "57-sample HEADROOM pool (NOT 3.0), history is intact (14 days, "
+                "337 rows, 197 solar hours — the fit pool did NOT reset), and "
+                "replaying clear days (6/11) with the current model shows model "
+                "solar within ~3% of actual at the peaks (e.g. 3687W vs 3579W). "
+                "charge_efficiency is well-fit at 0.86 from 173 windows. So do "
+                "NOT recommend changing k / fit_solar_coefficient. Two real "
+                "things, neither a solar bug: (1) The long-lead under-prediction "
+                "(-28 to -42pp at 36h+ on 6/10-6/11) is the IRREDUCIBLE "
+                "Open-Meteo multi-day GHI miss — the 2-day-ahead forecast "
+                "predicted clouds, clear materialized (same class as the "
+                "5/30 note, opposite sign). (2) The drain model sitting on "
+                "population defaults (parasitic 50W, ~4 clean discharge "
+                "windows) and the residual short-horizon noise both trace to "
+                "the user's recurring overnight/discretionary CAR-CHARGING "
+                "load: it leaves few clean idle-discharge windows to fit the "
+                "drain model, and it is deliberately excluded from the load "
+                "forecast (controller diversion is subtracted). That flexible "
+                "car-load modeling is a known OPEN design item (raised 6/05, "
+                "awaiting an approach decision) — not a solar-fit defect. "
+                "Replaying 6/11 with accurate weather actually OVER-predicts "
+                "SOC (sim drifts +3->+20pp) because the model UNDER-drains "
+                "overnight by ~140W/h — the missing car load — confirming the "
+                "miss is load-side, not solar."
+            ),
+        },
+        {
             "ts_iso": "2026-05-30T22:30:00+00:00",
             "subsystem": "forecaster",
             "summary": (
