@@ -974,9 +974,21 @@ async def handle(method: str, params: dict) -> dict:
         return {"ok": True}
 
     if method == "connect":
-        # Nudge the cloud poller awake.
-        log.info("force_repoll set by: connect RPC")
-        state.cloud_force_repoll.set()
+        # If the cloud poller died, RESTART it; otherwise just nudge it
+        # awake. The monitor's shutdown sends `disconnect` (which cancels
+        # cloud_task), and /api/reconnect does disconnect→connect — so a
+        # plain `connect` MUST be able to resurrect a cancelled loop.
+        # Setting force_repoll alone is a no-op when the task is already
+        # done (nothing is awaiting the event), which left the cloud
+        # session dead after every monitor restart until the bridge
+        # process itself was restarted.
+        if state.cloud_creds and (state.cloud_task is None
+                                  or state.cloud_task.done()):
+            log.info("connect RPC: cloud_task is dead — restarting cloud_loop")
+            state.cloud_task = asyncio.create_task(cloud_loop(), name="cloud_loop")
+        else:
+            log.info("force_repoll set by: connect RPC")
+            state.cloud_force_repoll.set()
         return {"ok": True}
 
     if method == "status":
