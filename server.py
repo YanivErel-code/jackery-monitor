@@ -1584,6 +1584,20 @@ def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
     return None
 
 
+def _car_load_w(device_sn: str | None) -> float:
+    """Configured EV-charger draw for the solar-charge plug.
+
+    Passed to `forecaster.build_forecast` so historical solar-charge
+    diversion is netted out of the learned load profile (via the
+    controller's plug-state log) instead of being mis-learned as
+    household demand — which inflated the weekend profile ~2-3x and
+    drove the forecast to predict 0% SOC on sunny days."""
+    try:
+        return float(solar_charge.get_config(device_sn).get("car_load_w") or 1400)
+    except Exception:
+        return 1400.0
+
+
 async def _smart_charge_evaluate(record: bool = True,
                                  device_sn: str | None = None):
     """Pull the inputs the smart-charge module needs, compute a Plan, and
@@ -1643,12 +1657,14 @@ async def _smart_charge_evaluate(record: bool = True,
     capacity = _total_capacity_wh(device_sn, model_code)
     pack_count = _pack_count_for(device_sn)
     tz_off = int(weather.get("utc_offset_seconds") or device_location.get_tz_offset() or 0)
+    car_load_w = _car_load_w(device_sn)
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
+        car_load_w=car_load_w,
         pack_count=pack_count,
         utc_offset_seconds=tz_off,
     )
@@ -1662,6 +1678,7 @@ async def _smart_charge_evaluate(record: bool = True,
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
         ac_charge_floor_pct=None,
+        car_load_w=car_load_w,
         pack_count=pack_count,
         utc_offset_seconds=tz_off,
     )
@@ -2000,12 +2017,14 @@ async def _solar_charge_evaluate(record: bool = True,
                 # baseline stays for display/audit.
                 sc_tz_off = int(weather.get("utc_offset_seconds")
                                 or device_location.get_tz_offset() or 0)
+                sc_car_load_w = float(cfg.get("car_load_w") or 1400)
                 fcast_baseline = forecaster.build_forecast(
                     energy_history=energy_hist,
                     weather_hourly=weather["hourly"],
                     starting_soc_pct=starting_soc,
                     capacity_wh=capacity,
                     ac_charge_floor_pct=None,
+                    car_load_w=sc_car_load_w,
                     pack_count=_pack_count_for(device_sn),
                     utc_offset_seconds=sc_tz_off,
                 )
@@ -2029,8 +2048,9 @@ async def _solar_charge_evaluate(record: bool = True,
                     starting_soc_pct=starting_soc,
                     capacity_wh=capacity,
                     ac_charge_floor_pct=None,
-                    extra_load_w=float(cfg.get("car_load_w") or 1400),
+                    extra_load_w=sc_car_load_w,
                     extra_load_floor_pct=sim_floor,
+                    car_load_w=sc_car_load_w,
                     pack_count=_pack_count_for(device_sn),
                     utc_offset_seconds=sc_tz_off,
                 )
@@ -2911,6 +2931,7 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         starting_soc_pct=starting_soc,
         capacity_wh=capacity,
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
+        car_load_w=_car_load_w(device_sn),
         pack_count=_pack_count_for(device_sn),
         utc_offset_seconds=int(weather.get("utc_offset_seconds")
                                or device_location.get_tz_offset() or 0),

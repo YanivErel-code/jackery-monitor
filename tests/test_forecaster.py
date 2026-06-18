@@ -286,6 +286,70 @@ def test_load_profile_caps_runaway_buckets_against_overall_mean():
     assert bucket < 1000, f"runaway bucket leaked: {bucket}"
 
 
+def test_load_profile_nets_out_plug_on_via_car_load_w():
+    # Buckets where the solar-charge plug was ON carry the EV charger's
+    # ~car_load_w on top of real household demand. Using the controller's
+    # plug-state log (solar_charge_plug_on_frac) we subtract it so the
+    # learned profile reflects household load (~580W), not the inflated
+    # output_w (~1880W) that previously drove the forecast to 0% SOC.
+    # diverted_wh=0 here is the real EP10 case: the non-emeter plug never
+    # recorded the draw, so plug-state is the only signal that works.
+    from datetime import datetime
+    base = 1_700_000_000
+    energy = [
+        {"ts": base + i * 7 * 24 * 3600, "output_w": 1880, "solar_w": 0,
+         "battery_pct": 80, "solar_charge_plug_on_frac": 1.0,
+         "solar_charge_diverted_wh": 0}
+        for i in range(10)
+    ]
+    d = datetime.fromtimestamp(base)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+
+    netted = forecaster.fit_load_profile(energy, car_load_w=1300)[key]
+    assert 500 < netted < 660, f"expected ~580W household, got {netted}"
+
+    # Without car_load_w the plug-state can't be valued -> raw output leaks
+    # (back-compat: callers that don't pass it keep prior behavior).
+    raw = forecaster.fit_load_profile(energy)[key]
+    assert raw > 1500, f"expected raw ~1880W, got {raw}"
+
+
+def test_load_profile_plug_on_partial_fraction():
+    # Plug ON only half the bucket -> subtract half of car_load_w.
+    from datetime import datetime
+    base = 1_700_000_000
+    energy = [
+        {"ts": base + i * 7 * 24 * 3600, "output_w": 1200, "solar_w": 0,
+         "battery_pct": 80, "solar_charge_plug_on_frac": 0.5,
+         "solar_charge_diverted_wh": 0}
+        for i in range(10)
+    ]
+    d = datetime.fromtimestamp(base)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+    netted = forecaster.fit_load_profile(energy, car_load_w=1300)[key]
+    # 1200 - 0.5*1300 = 550
+    assert 500 < netted < 600, f"expected ~550W, got {netted}"
+
+
+def test_load_profile_diverted_wh_fallback_is_hourly_not_x6():
+    # When no plug-state covers the bucket but diverted_wh WAS recorded
+    # (working emeter plug), subtract it at the correct hourly rate.
+    # Regression for the old /(600/3600)=x6 over-subtraction: on 3600s
+    # buckets that clamped net load to 0 (1500 - 6000 -> 0).
+    from datetime import datetime
+    base = 1_700_000_000
+    energy = [
+        {"ts": base + i * 7 * 24 * 3600, "output_w": 1500, "solar_w": 0,
+         "battery_pct": 80, "solar_charge_diverted_wh": 1000}
+        for i in range(10)
+    ]
+    d = datetime.fromtimestamp(base)
+    key = (d.hour, 1 if d.weekday() >= 5 else 0)
+    # hourly bucket: 1000Wh over 1h = 1000W -> net 500W.
+    netted = forecaster.fit_load_profile(energy, bucket_s=3600)[key]
+    assert 450 < netted < 560, f"expected ~500W, got {netted}"
+
+
 def test_load_profile_trimmed_median_kills_outlier_pair():
     # Sparse 11am bucket with 18 samples around 200W and 2 oven samples
     # at 1800W. Raw median over 20 sorted values = mean of indices 9, 10

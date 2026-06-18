@@ -1298,6 +1298,29 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 for ts, soc in pack_rows:
                     packs_by_ts.setdefault(int(ts), []).append(float(soc))
                 ts_sorted = sorted(packs_by_ts)
+            # Per-bucket fraction of time the solar-charge plug was ON,
+            # from the controller's decision log. This is the RELIABLE
+            # diversion signal — emeter-independent — used by the
+            # forecaster's load-profile fit to net the EV charge out of
+            # learned demand (the configured EP10 is a non-emeter plug
+            # that records solar_charge_diverted_wh=0 even while the car
+            # draws ~car_load_w, which otherwise poisons the profile and
+            # drives the forecast to 0% SOC). plug_state_before is
+            # snapshotted each evaluate tick (~30s), so on/total
+            # approximates the on-fraction within the bucket. Absent
+            # (None) when no decision covered the bucket — fit falls back.
+            plug_on_rows = c.execute(
+                """SELECT (decided_at / ?) * ? AS b,
+                          SUM(CASE WHEN plug_state_before = 'on'
+                                   THEN 1 ELSE 0 END) AS on_n,
+                          COUNT(*) AS tot_n
+                   FROM solar_charge_decisions
+                   WHERE device_sn = ? AND decided_at >= ?
+                   GROUP BY b""",
+                (bucket_s, bucket_s, device_sn, since),
+            ).fetchall()
+            plug_on_frac = {int(b): on_n / tot_n
+                            for b, on_n, tot_n in plug_on_rows if tot_n}
         out = []
         for r in rows:
             # solar_charge_diverted_wh is GROSS output that was intentionally
@@ -1319,6 +1342,10 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                     packs_by_ts, ts_sorted,
                     main_capacity_wh, pack_capacity_wh,
                 )
+            if plug_on_frac:
+                frac = plug_on_frac.get(int(r[0]))
+                if frac is not None:
+                    row["solar_charge_plug_on_frac"] = frac
             out.append(row)
         return out
 

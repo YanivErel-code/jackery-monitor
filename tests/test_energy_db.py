@@ -99,3 +99,39 @@ def test_migration_adds_columns_to_pre_v0_1_db(tmp_path):
     # Old row should still be there and history() should not crash on it.
     rows = db.history("SN1", hours=24, bucket_s=60)
     assert any(r["input_wh"] == 10 for r in rows)
+
+
+def test_history_computes_plug_on_frac_from_decisions(db):
+    # The forecaster nets EV charging out of the load profile using the
+    # controller's plug-state log (NOT the flaky emeter-derived
+    # diverted_wh). history() must surface, per bucket, the fraction of
+    # decisions where the plug was ON.
+    sn = "TEST-PLUG"
+    db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")
+    base = (int(time.time()) - 7200) // 3600 * 3600 + 1800  # mid-bucket
+    db.record(sn, base, input_w=0, output_w=1880, battery_pct=50, solar_w=0)
+    db.record(sn, base + 60, input_w=0, output_w=1880, battery_pct=50, solar_w=0)
+    # 3 ON decisions + 1 OFF, all inside the same 1h bucket -> frac 0.75.
+    for i, state in enumerate(["on", "on", "on", "off"]):
+        db.record_solar_charge_decision(
+            sn,
+            {"decided_at": base + i * 30, "mode": "active", "action": "skip",
+             "plug_state_before": state, "current_soc_pct": 50},
+            executed=False,
+        )
+    rows = db.history(sn, hours=24, bucket_s=3600)
+    bkt = (base // 3600) * 3600
+    row = next(r for r in rows if r["ts"] == bkt)
+    assert row["solar_charge_plug_on_frac"] == pytest.approx(0.75)
+
+
+def test_history_omits_plug_on_frac_when_no_decisions(db):
+    # Buckets with no decision coverage must not carry the field — the
+    # forecaster then falls back to raw output / recorded diverted_wh.
+    sn = "TEST-NODEC"
+    db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")
+    base = (int(time.time()) - 7200) // 3600 * 3600 + 1800
+    db.record(sn, base, input_w=0, output_w=300, battery_pct=50, solar_w=0)
+    db.record(sn, base + 60, input_w=0, output_w=300, battery_pct=50, solar_w=0)
+    rows = db.history(sn, hours=24, bucket_s=3600)
+    assert all("solar_charge_plug_on_frac" not in r for r in rows)

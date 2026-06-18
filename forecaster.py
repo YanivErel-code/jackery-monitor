@@ -1427,6 +1427,8 @@ def fit_load_profile(
     energy_history: list[dict[str, Any]],
     *,
     now_ts: float | None = None,
+    car_load_w: float | None = None,
+    bucket_s: int = 3600,
 ) -> dict[tuple[int, int], float]:
     """Per-hour load profile with stability-aware fitting.
 
@@ -1453,31 +1455,34 @@ def fit_load_profile(
     # Net out solar-charge diversion before fitting demand patterns.
     # The controller can intentionally drive a downstream load (EV
     # charger) for hours on sunny days; counting that as "demand"
-    # would teach the model that the user has a 1.4kW phantom load
-    # every sunny afternoon. Subtract the bucket-averaged diversion
-    # rate from output_w to recover real demand. Falls back to raw
-    # output_w when no diversion was recorded (pre-feature buckets
-    # default to 0 via the schema migration).
+    # would teach the model that the user has a ~1.3kW phantom load
+    # whenever the plug runs — which inflated the (esp. weekend) load
+    # profile 2-3x and drove the forecast to predict 0% SOC on sunny
+    # days.
+    #
+    # The RELIABLE signal is the controller's own plug-state log
+    # (solar_charge_plug_on_frac, derived from solar_charge_decisions
+    # by EnergyDB.history), NOT the recorded diverted_wh. The configured
+    # plug is a non-emeter Kasa (EP10) that cannot measure its own draw,
+    # so it logs diverted_wh=0 even while the car pulls ~car_load_w.
+    # When plug-state covers the bucket, estimate the diverted draw as
+    # on-fraction * car_load_w and subtract it — emeter-independent.
+    # Fall back to the recorded diverted_wh only when no plug-state
+    # covered the bucket (controller off, or pre-decision-log history).
     def _net_load_w(r: dict) -> float | None:
         out_w = r.get("output_w")
         if out_w is None:
             return None
-        # diverted_wh integrates the plug's draw over the bucket;
-        # divide by bucket-hours to get the average plug-draw rate
-        # in W. For 10-minute buckets that's diverted_wh / (10/60).
-        # Since we don't carry bucket_s on the row, infer from the
-        # next row's ts (back-compat: if only one row, assume 600s).
+        frac = r.get("solar_charge_plug_on_frac")
+        if frac is not None and car_load_w:
+            return max(0.0, float(out_w) - float(frac) * float(car_load_w))
         diverted_wh = float(r.get("solar_charge_diverted_wh") or 0)
         if diverted_wh <= 0:
             return float(out_w)
-        # Approx bucket length: 600s default (smallest aggregation).
-        # The actual db.history bucket_s isn't on the row, but for
-        # the fit we only need a ratio. Use 600 as the safe default —
-        # if the caller bucketed to 3600s, diversion stretches over
-        # 1h and our subtraction is conservative (under-subtracts
-        # by 6x, leaving some pollution but never over-subtracting
-        # which would invent negative demand).
-        avg_diverted_w = diverted_wh / (600.0 / 3600.0)
+        # diverted_wh integrates the plug's metered draw over the bucket;
+        # divide by bucket-hours to recover the average diverted watts.
+        bucket_h = max(int(bucket_s), 1) / 3600.0
+        avg_diverted_w = diverted_wh / bucket_h
         return max(0.0, float(out_w) - avg_diverted_w)
 
     all_vals_raw = [
@@ -1872,6 +1877,7 @@ def build_forecast(
     ac_charge_floor_pct: float | None = None,
     extra_load_w: float | None = None,
     extra_load_floor_pct: float | None = None,
+    car_load_w: float | None = None,
     pack_count: int = 0,
     utc_offset_seconds: int = 0,
 ) -> dict[str, Any]:
@@ -1886,6 +1892,12 @@ def build_forecast(
     that have smart-charge enabled (and a target_sunrise_soc_pct) should
     pass it so long-lead predictions don't saturate at 0% — see
     `simulate_soc` docstring for the mechanism.
+
+    `car_load_w`: the configured EV-charger draw. Passed to
+    `fit_load_profile` so historical solar-charge diversion is netted out
+    of the learned demand profile using the controller's plug-state log
+    (see `fit_load_profile._net_load_w`). Without it, past car charging
+    is mis-learned as household demand and the forecast drains to 0%.
     """
     readiness = forecast_readiness(energy_history, capacity_wh)
     if not readiness["ready"]:
@@ -1905,7 +1917,8 @@ def build_forecast(
     # curve (e.g. afternoon shade) as history accumulates.
     diurnal_shape = fit_diurnal_shape(energy_history, weather_hourly, k,
                                       utc_offset_seconds=utc_offset_seconds)
-    profile = fit_load_profile(energy_history, now_ts=now_ts)
+    profile = fit_load_profile(energy_history, now_ts=now_ts,
+                               car_load_w=car_load_w)
     # Per-device drain model: parasitic baseline (W) + percentage of
     # throughput. The parasitic term captures BMS, idle inverter, pack
     # balancing, and any unmeasured DC bus draw — pieces the
