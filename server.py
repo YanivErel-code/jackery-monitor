@@ -1992,6 +1992,12 @@ async def _solar_charge_evaluate(record: bool = True,
     # with-diversion forecast uses target+margin+hysteresis as the
     # simulator's "stop diverting" floor.
     target = _solar_charge_target_sunrise_soc(device_sn)
+    # Inputs for the model-free overnight-reserve guard in compute_plan.
+    # Computed unconditionally (the forecast try-block below may be
+    # skipped on weather/location failure); sunrise_ts is filled in when
+    # the forecast is available.
+    sc_capacity = _total_capacity_wh(device_sn, model_code)
+    sc_sunrise_ts = None
 
     loc = device_location.get() or {}
     predicted_sunrise_baseline = None
@@ -2070,6 +2076,11 @@ async def _solar_charge_evaluate(record: bool = True,
 
                 predicted_sunrise_baseline = _sunrise_from(fcast_baseline)
                 predicted_sunrise_with_div = _sunrise_from(fcast_with_div)
+                # Sunrise timestamp for the overnight-reserve guard.
+                _bl_future = [h for h in (fcast_baseline.get("forecast") or [])
+                              if (h.get("ts") or 0) >= time.time()]
+                sc_sunrise_ts = (smart_charge._find_next_sunrise(_bl_future)
+                                 if _bl_future else None)
         except Exception as e:
             log.debug("solar_charge forecast fetch failed: %s", e)
 
@@ -2158,6 +2169,12 @@ async def _solar_charge_evaluate(record: bool = True,
         )
 
     if no_load_override_plan is None:
+        # Household load = live output minus the EV charger when the plug
+        # is ON (the controller knows it's pulling ~car_load_w). This is
+        # what the battery would drain at if we stopped diverting now —
+        # the input the overnight-reserve guard projects to sunrise.
+        sc_car_w = float(cfg.get("car_load_w") or 0)
+        household_load_w = max(0.0, load_w - (sc_car_w if rs.plug_is_on else 0.0))
         plan = solar_charge.compute_plan(
             config=cfg,
             current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
@@ -2167,6 +2184,10 @@ async def _solar_charge_evaluate(record: bool = True,
             target_sunrise_soc_pct=target,
             predicted_sunrise_soc_with_diversion=predicted_sunrise_with_div,
             predicted_sunrise_soc_baseline=predicted_sunrise_baseline,
+            capacity_wh=sc_capacity,
+            hours_to_sunrise=(max(0.0, (sc_sunrise_ts - now_ts) / 3600.0)
+                              if sc_sunrise_ts else None),
+            household_load_w=household_load_w,
         )
         plan = solar_charge.gate_min_hold(
             plan,

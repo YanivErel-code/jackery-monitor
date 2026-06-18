@@ -23,8 +23,13 @@ def _cfg(**overrides):
 
 def _eval(*, current_soc, predicted_sunrise=80.0, target=20.0,
           telemetry_age=10.0, cfg=None, solar_w=0.0, load_w=0.0,
-          ac_input_w=0.0, now_ts=1_700_000_000.0):
-    """Convenience wrapper around compute_plan with safe defaults."""
+          ac_input_w=0.0, now_ts=1_700_000_000.0,
+          capacity_wh=None, hours_to_sunrise=None, household_load_w=None):
+    """Convenience wrapper around compute_plan with safe defaults.
+
+    The overnight-reserve guard inputs (capacity_wh / hours_to_sunrise /
+    household_load_w) default to None → guard is a no-op unless a test
+    opts in by supplying all three."""
     return solar_charge.compute_plan(
         config=cfg or _cfg(),
         current_soc_pct=current_soc,
@@ -34,6 +39,9 @@ def _eval(*, current_soc, predicted_sunrise=80.0, target=20.0,
         target_sunrise_soc_pct=target,
         predicted_sunrise_soc_with_diversion=predicted_sunrise,
         predicted_sunrise_soc_baseline=predicted_sunrise,
+        capacity_wh=capacity_wh,
+        hours_to_sunrise=hours_to_sunrise,
+        household_load_w=household_load_w,
         now_ts=now_ts,
     )
 
@@ -110,6 +118,49 @@ def test_off_when_current_soc_below_hard_floor():
                  cfg=_cfg(comfort_low_pct=20))
     assert plan.action == "off"
     assert "comfort_low" in plan.reason
+
+
+# ---------- Overnight-reserve guard (model-free, forecast-independent) ----------
+def test_reserve_guard_blocks_overnight_battery_drain():
+    """No solar surplus + coasting on household load alone to sunrise
+    would land below target+margin → OFF, even though the (optimistic)
+    forecast says we're fine. This is the 2026-06-18 81%->17% case:
+    SOC 78%, ~600W house, ~9h to sunrise -> ~52pp drain -> ~26% < 35%."""
+    plan = _eval(current_soc=78, predicted_sunrise=80.0, target=30.0,
+                 solar_w=0.0, load_w=600.0,
+                 capacity_wh=10080, hours_to_sunrise=9.0,
+                 household_load_w=600.0)
+    assert plan.action == "off"
+    assert "overnight-reserve guard" in plan.reason
+
+
+def test_reserve_guard_skipped_when_solar_surplus():
+    """Daytime: solar exceeds house load → diversion is self-funding →
+    guard does NOT fire; the normal forecast/SOC gate decides (ON)."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0,
+                 solar_w=3000.0, load_w=500.0,
+                 capacity_wh=10080, hours_to_sunrise=18.0,
+                 household_load_w=500.0)
+    assert plan.action == "on"
+
+
+def test_reserve_guard_allows_true_excess():
+    """No surplus but plenty of reserve: SOC 80%, ~500W house, only ~4h
+    to sunrise -> ~20pp drain -> ~60% at sunrise >> floor. Guard passes;
+    forecast/SOC gate turns ON."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0,
+                 solar_w=0.0, load_w=500.0,
+                 capacity_wh=10080, hours_to_sunrise=4.0,
+                 household_load_w=500.0)
+    assert plan.action == "on"
+
+
+def test_reserve_guard_noop_without_inputs():
+    """Back-compat: without the guard inputs the controller behaves
+    exactly as before (no spurious OFF)."""
+    plan = _eval(current_soc=78, predicted_sunrise=80.0, target=30.0,
+                 solar_w=0.0, load_w=600.0)
+    assert plan.action == "on"
 
 
 # ---------- Fail-closed safety paths ----------

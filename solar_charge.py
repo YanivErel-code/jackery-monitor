@@ -394,6 +394,9 @@ def compute_plan(
     target_sunrise_soc_pct: float,
     predicted_sunrise_soc_with_diversion: float | None,
     predicted_sunrise_soc_baseline: float | None,
+    capacity_wh: float | None = None,
+    hours_to_sunrise: float | None = None,
+    household_load_w: float | None = None,
     now_ts: float | None = None,
 ) -> Plan:
     """Pure decision function. All inputs explicit; no globals read.
@@ -417,6 +420,12 @@ def compute_plan(
             the cost of diversion; not used for the gating decision
             (we gate on the with-diversion projection — that's the one
             that actually predicts what'll happen if we run).
+        capacity_wh, hours_to_sunrise, household_load_w: inputs to the
+            model-free overnight-reserve guard (see below). All three
+            must be provided for the guard to run; otherwise it's a
+            no-op (back-compat). `household_load_w` is the live load with
+            the EV charger EXCLUDED — i.e. what the battery would drain at
+            if the plug were OFF right now.
         now_ts: clock injection for tests; defaults to time.time().
     """
     now = float(now_ts if now_ts is not None else time.time())
@@ -491,6 +500,40 @@ def compute_plan(
     if current_soc_pct <= comfort_low:
         return _plan("off",
                      f"SOC {current_soc_pct:.0f}% ≤ comfort_low {comfort_low:.0f}%")
+
+    # Overnight-reserve guard (model-free, forecast-independent). The
+    # gating forecast above can be over-optimistic about overnight drain
+    # (on 2026-06-18 it projected 26% sunrise while SOC actually bottomed
+    # at 17%), and we deliberately keep the car load OUT of that forecast
+    # (modeling it as demand would stop diversion from ever starting —
+    # the circularity the user flagged). So independently verify against
+    # LIVE telemetry: when there is no solar surplus (diversion comes
+    # straight out of the battery, not the panels), check that stopping
+    # NOW and coasting on HOUSEHOLD load alone to sunrise still clears
+    # target+margin. The car is excluded from this projection, so it is
+    # not circular — it answers "if I stop the car now, does the house
+    # alone still make sunrise?" If not, we'd be diverting the overnight
+    # reserve into the car → force OFF.
+    #
+    # Skipped entirely when solar covers the load (daytime surplus
+    # diversion is self-funding) or when any input is missing (the live
+    # telemetry path always supplies them; tests/back-compat callers may
+    # not, and then this is a no-op).
+    if (capacity_wh and capacity_wh > 0 and hours_to_sunrise
+            and household_load_w is not None and solar_w is not None
+            and solar_w <= household_load_w):
+        coast_drain_pp = (household_load_w * float(hours_to_sunrise)
+                          / float(capacity_wh) * 100.0)
+        reserve_at_sunrise = current_soc_pct - coast_drain_pp
+        if reserve_at_sunrise < safe_sunrise_floor:
+            return _plan(
+                "off",
+                f"overnight-reserve guard: no solar surplus and coasting "
+                f"{household_load_w:.0f}W house load for {float(hours_to_sunrise):.1f}h "
+                f"would reach {reserve_at_sunrise:.0f}% by sunrise < "
+                f"target{target_sunrise_soc_pct:.0f}%+margin = {safe_sunrise_floor:.0f}%; "
+                f"diverting would eat the overnight reserve",
+            )
 
     # Forecast-driven decision, gated by asymmetric SOC bands:
     #   - START (OFF → ON) requires SOC >= comfort_high.  Without this,
