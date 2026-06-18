@@ -69,3 +69,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # GHCR keeps every pushed version forever. Each build adds an
+      # immutable main-<sha7> tag, so old digests stay TAGGED (not
+      # dangling) — "delete untagged" wouldn't catch them. Keep the 10
+      # most-recent versions (current `latest` + ~9 prior builds for
+      # rollback) and trim the rest so the registry doesn't grow without
+      # bound. Never fails the build.
+      - name: Prune old GHCR image versions
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: jackery-monitor
+          package-type: container
+          min-versions-to-keep: 10
