@@ -442,44 +442,54 @@ class JackeryCloudClient:
         shows are SN-keyed, and `/v1/device/bind/list` returns per-device
         rows whose firmware fields fetch_devices currently discards."""
         sn = (device_sn or "").strip()
+        # (method, path, params). Round 1 showed bind/list + pack/list are
+        # real (pack/list carries per-pack needUpgrade), the firmware/ota/
+        # upgrade paths 404, and info/detail/version return 10600 — a
+        # business error, NOT 404, so those endpoints EXIST and just need
+        # the right param name/method. Hunt the firmware-version shape
+        # across deviceSn/deviceCode/deviceId and GET/POST.
         attempts = [
-            # Known-real endpoints whose RAW rows likely carry firmware /
-            # needUpgrade (fetch_devices/fetch_battery_packs keep only a
-            # subset of these fields).
-            ("/v1/device/bind/list",          {}),
-            ("/v1/device/battery/pack/list",  {"deviceSn": sn}),
-            # Firmware / OTA candidates. The protocol's MQTT side has a
-            # DeviceUpgradeProgress message, so an "upgrade"/"ota"/
-            # "firmware" HTTP endpoint very likely feeds the app's version
-            # + update-available screen. Try SN-keyed (pack/list uses
-            # deviceSn) with deviceId fallbacks for the top guesses.
-            ("/v1/device/upgrade/info",       {"deviceSn": sn}),
-            ("/v1/device/upgrade/check",      {"deviceSn": sn}),
-            ("/v1/device/upgrade/list",       {"deviceSn": sn}),
-            ("/v1/device/firmware/info",      {"deviceSn": sn}),
-            ("/v1/device/firmware/check",     {"deviceSn": sn}),
-            ("/v1/device/firmware/list",      {"deviceSn": sn}),
-            ("/v1/device/ota/info",           {"deviceSn": sn}),
-            ("/v1/device/ota/check",          {"deviceSn": sn}),
-            ("/v1/ota/check",                 {"deviceSn": sn}),
-            ("/v1/device/version",            {"deviceSn": sn}),
-            ("/v1/device/upgrade/info",       {"deviceId": device_id}),
-            ("/v1/device/firmware/info",      {"deviceId": device_id}),
-            # Original property probe, retained for reference.
-            ("/v1/device/property",           {"deviceId": device_id}),
+            ("GET",  "/v1/device/bind/list",         {}),
+            ("GET",  "/v1/device/battery/pack/list", {"deviceSn": sn}),
+            ("GET",  "/v1/device/info",     {"deviceSn": sn}),
+            ("GET",  "/v1/device/info",     {"deviceCode": sn}),
+            ("GET",  "/v1/device/info",     {"deviceId": device_id, "deviceSn": sn}),
+            ("POST", "/v1/device/info",     {"deviceSn": sn}),
+            ("POST", "/v1/device/info",     {"deviceId": device_id}),
+            ("GET",  "/v1/device/detail",   {"deviceSn": sn}),
+            ("GET",  "/v1/device/detail",   {"deviceId": device_id, "deviceSn": sn}),
+            ("POST", "/v1/device/detail",   {"deviceSn": sn}),
+            ("GET",  "/v1/device/version",  {"deviceId": device_id}),
+            ("GET",  "/v1/device/version",  {"deviceSn": sn, "deviceId": device_id}),
+            ("POST", "/v1/device/version",  {"deviceSn": sn}),
+            ("POST", "/v1/device/version",  {"deviceId": device_id, "deviceSn": sn}),
+            ("GET",  "/v1/device/firmware", {"deviceSn": sn}),
+            ("GET",  "/v1/device/getVersion", {"deviceSn": sn}),
         ]
+        if not self.token:
+            await self.login()
+        client = await self._client()
+        hdr = {"token": self.token or "", "content-type": "application/json"}
         results: dict[str, Any] = {}
-        for path, params in attempts:
-            # Distinct key per (path, param-shape) so deviceId/deviceSn
-            # variants of the same path don't clobber each other.
-            key = f"{path}?{','.join(sorted(params))}" if params else path
+        for method, path, params in attempts:
+            # Distinct key per (method, path, param-shape) so variants of
+            # the same path don't clobber each other.
+            shape = ",".join(sorted(params)) if params else "-"
+            key = f"{method} {path}?{shape}"
             try:
-                data = await self._authed_get(path, params)
+                if method == "GET":
+                    resp = await client.get(path, params=params, headers=hdr)
+                else:
+                    resp = await client.post(path, json=params, headers=hdr)
+                if resp.status_code != 200:
+                    results[key] = {"error": f"HTTP {resp.status_code}: {resp.text[:120]}"}
+                    continue
+                data = resp.json()
                 results[key] = {"code": data.get("code"),
                                 "msg": data.get("msg"),
                                 "data": data.get("data")}
             except Exception as e:
-                results[key] = {"error": str(e)[:200]}
+                results[key] = {"error": str(e)[:160]}
         return results
 
     # ---- MQTT control ----
