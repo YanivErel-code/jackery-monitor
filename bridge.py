@@ -1171,13 +1171,16 @@ async def handle(method: str, params: dict) -> dict:
         # firmware/upgrade). Prefer an explicit param; else look it up
         # from the cloud client's device list by device_id.
         device_sn = (params.get("device_sn") or "").strip()
-        if not device_sn:
-            device_sn = next(
-                (d.device_sn for d in (state.cloud_client.devices or [])
-                 if d.device_id == device_id), "")
+        model_code = params.get("model_code")
+        match = next((d for d in (state.cloud_client.devices or [])
+                      if d.device_id == device_id), None)
+        if not device_sn and match:
+            device_sn = match.device_sn
+        if model_code is None and match:
+            model_code = match.model_code
         try:
             results = await state.cloud_client.probe_endpoints(
-                device_id, device_sn=device_sn)
+                device_id, device_sn=device_sn, model_code=model_code)
             return {"ok": True, "device_id": device_id,
                     "device_sn": device_sn, "results": results}
         except Exception as e:

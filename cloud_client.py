@@ -430,7 +430,8 @@ class JackeryCloudClient:
         return packs
 
     async def probe_endpoints(self, device_id: str,
-                              device_sn: str | None = None) -> dict[str, Any]:
+                              device_sn: str | None = None,
+                              model_code: int | None = None) -> dict[str, Any]:
         """Speculative diagnostic — try endpoint shapes the iOS app might
         use for data we don't currently parse (per-battery, expansion,
         firmware/OTA). Returns a dict mapping each endpoint to its
@@ -442,52 +443,45 @@ class JackeryCloudClient:
         shows are SN-keyed, and `/v1/device/bind/list` returns per-device
         rows whose firmware fields fetch_devices currently discards."""
         sn = (device_sn or "").strip()
-        # (method, path, params). Round 1 showed bind/list + pack/list are
-        # real (pack/list carries per-pack needUpgrade), the firmware/ota/
-        # upgrade paths 404, and info/detail/version return 10600 — a
-        # business error, NOT 404, so those endpoints EXIST and just need
-        # the right param name/method. Hunt the firmware-version shape
-        # across deviceSn/deviceCode/deviceId and GET/POST.
+        mc = model_code
+        # Round 3: POST /v1/device/version returned code=0 (the firmware
+        # endpoint — POST, not GET) but empty `data` with simple bodies.
+        # Capture the FULL raw body (not just `data`) so a version under a
+        # non-`data` key isn't missed, and retry with richer bodies
+        # (+modelCode, deviceCode, list shapes). pack/list kept for the
+        # per-pack needUpgrade context.
+        def body(**kw):
+            return {k: v for k, v in kw.items() if v is not None}
         attempts = [
-            ("GET",  "/v1/device/bind/list",         {}),
             ("GET",  "/v1/device/battery/pack/list", {"deviceSn": sn}),
-            ("GET",  "/v1/device/info",     {"deviceSn": sn}),
-            ("GET",  "/v1/device/info",     {"deviceCode": sn}),
-            ("GET",  "/v1/device/info",     {"deviceId": device_id, "deviceSn": sn}),
-            ("POST", "/v1/device/info",     {"deviceSn": sn}),
-            ("POST", "/v1/device/info",     {"deviceId": device_id}),
-            ("GET",  "/v1/device/detail",   {"deviceSn": sn}),
-            ("GET",  "/v1/device/detail",   {"deviceId": device_id, "deviceSn": sn}),
-            ("POST", "/v1/device/detail",   {"deviceSn": sn}),
-            ("GET",  "/v1/device/version",  {"deviceId": device_id}),
-            ("GET",  "/v1/device/version",  {"deviceSn": sn, "deviceId": device_id}),
-            ("POST", "/v1/device/version",  {"deviceSn": sn}),
-            ("POST", "/v1/device/version",  {"deviceId": device_id, "deviceSn": sn}),
-            ("GET",  "/v1/device/firmware", {"deviceSn": sn}),
-            ("GET",  "/v1/device/getVersion", {"deviceSn": sn}),
+            ("POST", "/v1/device/version", body(deviceSn=sn)),
+            ("POST", "/v1/device/version", body(deviceSn=sn, modelCode=mc)),
+            ("POST", "/v1/device/version", body(deviceId=device_id, deviceSn=sn, modelCode=mc)),
+            ("POST", "/v1/device/version", body(deviceCode=sn)),
+            ("POST", "/v1/device/version", body(deviceCode=sn, modelCode=mc)),
+            ("POST", "/v1/device/version", body(sn=sn)),
+            ("POST", "/v1/device/version", body(deviceId=device_id)),
+            ("POST", "/v1/device/version", {}),
+            ("POST", "/v1/device/version", {"deviceSnList": [sn]}),
+            ("GET",  "/v1/device/version", {"deviceSn": sn}),
         ]
         if not self.token:
             await self.login()
         client = await self._client()
         hdr = {"token": self.token or "", "content-type": "application/json"}
         results: dict[str, Any] = {}
-        for method, path, params in attempts:
-            # Distinct key per (method, path, param-shape) so variants of
-            # the same path don't clobber each other.
+        for i, (method, path, params) in enumerate(attempts):
             shape = ",".join(sorted(params)) if params else "-"
-            key = f"{method} {path}?{shape}"
+            key = f"{i:02d} {method} {path}?{shape}"
             try:
                 if method == "GET":
                     resp = await client.get(path, params=params, headers=hdr)
                 else:
                     resp = await client.post(path, json=params, headers=hdr)
                 if resp.status_code != 200:
-                    results[key] = {"error": f"HTTP {resp.status_code}: {resp.text[:120]}"}
+                    results[key] = {"error": f"HTTP {resp.status_code}: {resp.text[:160]}"}
                     continue
-                data = resp.json()
-                results[key] = {"code": data.get("code"),
-                                "msg": data.get("msg"),
-                                "data": data.get("data")}
+                results[key] = {"sent": params, "full": resp.json()}
             except Exception as e:
                 results[key] = {"error": str(e)[:160]}
         return results
