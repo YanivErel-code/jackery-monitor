@@ -2336,6 +2336,7 @@ $('dbg-battery-packs')?.addEventListener('click', async () => {
     output_w: p.op,
     temp_c: p.it === 999 ? '—' : p.it,
     err: p.ec,
+    needUpgrade: p.needUpgrade ?? '—',
   }));
   _dbgRender(
     `Battery packs (${rows.length}, fetched_at: ${new Date((j.fetched_at || 0) * 1000).toLocaleString()})`,
@@ -5858,9 +5859,19 @@ function computeSystemSoc(mainPct, packs, mainWh) {
   return Math.max(0, Math.min(100, pct));
 }
 
-function packRow({ idx, soc, flow, flowClass, temp, label, snTitle, isMain }) {
+function packRow({ idx, soc, flow, flowClass, temp, label, snTitle, isMain,
+                   needUpgrade }) {
   const cls = isMain ? 'pack-row pack-row-main' : 'pack-row';
   const socTxt = soc != null ? Math.round(soc) : '—';
+  // Firmware-update-available badge (per-pack `needUpgrade` from the
+  // cloud). Yellow accent + Space Mono to match the deck style; inline
+  // so it needs no stylesheet change.
+  const fwBadge = needUpgrade
+    ? ' <span class="pack-fw" title="Firmware update available in the Jackery app"'
+      + ' style="color:#EAF044;font:600 9px/1 \'Space Mono\',monospace;'
+      + 'letter-spacing:.5px;border:1px solid #EAF044;border-radius:3px;'
+      + 'padding:1px 3px;vertical-align:middle">UPD</span>'
+    : '';
   return `
     <div class="${cls}">
       <span class="pack-idx">${idx}</span>
@@ -5868,7 +5879,7 @@ function packRow({ idx, soc, flow, flowClass, temp, label, snTitle, isMain }) {
       <span class="pack-soc">${socTxt}<small>%</small></span>
       <span class="pack-flow ${flowClass}">${flow}</span>
       <span class="pack-temp">${temp}</span>
-      <span class="pack-sn" title="${snTitle}">${label}</span>
+      <span class="pack-sn" title="${snTitle}">${label}${fwBadge}</span>
     </div>`;
 }
 
@@ -5945,7 +5956,9 @@ function renderBatteryPacks() {
   const totalIn = packs.reduce((s, p) => s + (p.ip || 0), 0);
   const avgPack = packs.reduce((s, p) => s + (p.rb || 0), 0) / packs.length;
   const sysTxt = systemSoc != null ? ` · system ${Math.round(systemSoc)}%` : '';
-  summary.textContent = `${packs.length} packs · avg ${Math.round(avgPack)}%${sysTxt} · ${totalIn}W in`;
+  const upgrades = packs.filter(p => p.needUpgrade).length;
+  const upgTxt = upgrades ? ` · ⬆ ${upgrades} update${upgrades > 1 ? 's' : ''}` : '';
+  summary.textContent = `${packs.length} packs · avg ${Math.round(avgPack)}%${sysTxt} · ${totalIn}W in${upgTxt}`;
 
   const rows = [];
   if (mainPct != null) {
@@ -5979,6 +5992,7 @@ function renderBatteryPacks() {
       label: `…${sn.slice(-6)}`,
       snTitle: sn,
       isMain: false,
+      needUpgrade: !!p.needUpgrade,
     }));
   });
   list.innerHTML = rows.join('');

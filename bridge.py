@@ -510,6 +510,11 @@ class State:
         # Updated in real-time from MQTT SubDevicePropertyChange pushes.
         self.battery_packs_by_sn: dict[str, list[dict]] = {}
         self.packs_ts_by_sn: dict[str, float] = {}
+        # Per-pack firmware-update flags (needUpgrade), keyed by parent SN
+        # -> {pack_sn: bool}. Sourced from the HTTP pack list only (MQTT
+        # pushes omit needUpgrade), refreshed lazily on a slow TTL.
+        self.pack_upgrade_by_sn: dict[str, dict[str, bool]] = {}
+        self.pack_upgrade_ts: dict[str, float] = {}
         self.cloud_telemetry: dict | None = None
         self.cloud_props_raw: dict = {}
         self.cloud_ts: float | None = None
@@ -542,6 +547,34 @@ class State:
         self.contested_alerted: bool = False
 
 state = State()
+
+# Per-pack firmware-update flags change only when Jackery ships a new
+# release, so refresh them at most hourly (one extra HTTP call/hour).
+PACK_UPGRADE_TTL_S = 3600.0
+
+
+async def _annotate_pack_upgrades(device_sn: str, packs: list[dict]) -> list[dict]:
+    """Merge per-pack `needUpgrade` into `packs` in place. The flag lives
+    only on the HTTP pack list (MQTT pushes omit it), so refresh it on a
+    slow TTL and annotate whatever packs we're about to return. Best
+    effort — on any fetch error we keep the last-known flags and never
+    raise (the live telemetry path must not depend on this)."""
+    if not packs or not state.cloud_client:
+        return packs
+    now = time.time()
+    if now - state.pack_upgrade_ts.get(device_sn, 0.0) > PACK_UPGRADE_TTL_S:
+        try:
+            state.pack_upgrade_by_sn[device_sn] = (
+                await state.cloud_client.fetch_pack_upgrade_flags(device_sn))
+            state.pack_upgrade_ts[device_sn] = now
+        except Exception as e:
+            log.debug("pack upgrade flags refresh failed for %s: %s", device_sn, e)
+    flags = state.pack_upgrade_by_sn.get(device_sn) or {}
+    for p in packs:
+        sn = str(p.get("deviceSn") or "")
+        if sn in flags:
+            p["needUpgrade"] = flags[sn]
+    return packs
 
 
 # ---- Cloud poller ----
@@ -1210,13 +1243,15 @@ async def handle(method: str, params: dict) -> dict:
             return {"ok": False, "error": "no device_sn", "packs": []}
         cached = state.battery_packs_by_sn.get(device_sn)
         if cached is not None:
-            return {"ok": True, "device_sn": device_sn, "packs": cached,
+            packs = await _annotate_pack_upgrades(device_sn, cached)
+            return {"ok": True, "device_sn": device_sn, "packs": packs,
                     "fetched_at": state.packs_ts_by_sn.get(device_sn, 0.0),
                     "source": "mqtt"}
         if not state.cloud_client:
             return {"ok": False, "error": "cloud client not initialised", "packs": []}
         try:
             packs = await state.cloud_client.fetch_battery_packs(device_sn)
+            packs = await _annotate_pack_upgrades(device_sn, packs)
         except Exception as e:
             return {"ok": False, "error": str(e), "packs": []}
         state.battery_packs_by_sn[device_sn] = packs

@@ -429,6 +429,25 @@ class JackeryCloudClient:
         packs.sort(key=lambda p: p.get("deviceOrder") or 0)
         return packs
 
+    async def fetch_pack_upgrade_flags(self, device_sn: str) -> dict[str, bool]:
+        """Per-pack `needUpgrade` (firmware-update-available) flags.
+
+        Only the HTTP /v1/device/battery/pack/list carries needUpgrade —
+        the real-time MQTT SubDevicePropertyChange pushes omit it — so
+        this always hits HTTP and deliberately does NOT populate
+        pack_cache_by_sn (that cache feeds the live telemetry path).
+        Returns {pack_sn: needUpgrade}; empty on any error (best-effort,
+        callers treat a missing flag as "no update")."""
+        data = await self._authed_get("/v1/device/battery/pack/list",
+                                      {"deviceSn": device_sn})
+        if data.get("code") != 0 or not isinstance(data.get("data"), list):
+            return {}
+        flags: dict[str, bool] = {}
+        for d in data["data"]:
+            if isinstance(d, dict) and d.get("deviceSn") and not d.get("isDelete"):
+                flags[str(d["deviceSn"])] = bool(d.get("needUpgrade"))
+        return flags
+
     async def probe_endpoints(self, device_id: str,
                               device_sn: str | None = None,
                               model_code: int | None = None) -> dict[str, Any]:
