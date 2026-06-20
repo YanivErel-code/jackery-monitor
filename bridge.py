@@ -1167,9 +1167,19 @@ async def handle(method: str, params: dict) -> dict:
         if not device_id or not state.cloud_client:
             return {"ok": False, "error": "no device or cloud client",
                     "results": {}}
+        # Resolve the device SN for SN-keyed endpoints (pack list,
+        # firmware/upgrade). Prefer an explicit param; else look it up
+        # from the cloud client's device list by device_id.
+        device_sn = (params.get("device_sn") or "").strip()
+        if not device_sn:
+            device_sn = next(
+                (d.device_sn for d in (state.cloud_client.devices or [])
+                 if d.device_id == device_id), "")
         try:
-            results = await state.cloud_client.probe_endpoints(device_id)
-            return {"ok": True, "device_id": device_id, "results": results}
+            results = await state.cloud_client.probe_endpoints(
+                device_id, device_sn=device_sn)
+            return {"ok": True, "device_id": device_id,
+                    "device_sn": device_sn, "results": results}
         except Exception as e:
             return {"ok": False, "error": str(e), "results": {}}
 

@@ -429,33 +429,57 @@ class JackeryCloudClient:
         packs.sort(key=lambda p: p.get("deviceOrder") or 0)
         return packs
 
-    async def probe_endpoints(self, device_id: str) -> dict[str, Any]:
-        """Speculative diagnostic — try a small handful of endpoint shapes
-        the iOS app might use for per-battery / expansion data. Returns a
-        dict mapping each endpoint to its response (or error string). Used
-        from the Device tab "Cloud probe" button to find data we're not
-        currently exposing."""
+    async def probe_endpoints(self, device_id: str,
+                              device_sn: str | None = None) -> dict[str, Any]:
+        """Speculative diagnostic — try endpoint shapes the iOS app might
+        use for data we don't currently parse (per-battery, expansion,
+        firmware/OTA). Returns a dict mapping each endpoint to its
+        response (or error string). Used from the Device tab "Cloud
+        probe" button.
+
+        `device_sn` enables the SN-keyed endpoints (battery pack list,
+        firmware/upgrade) — the firmware version + needUpgrade the app
+        shows are SN-keyed, and `/v1/device/bind/list` returns per-device
+        rows whose firmware fields fetch_devices currently discards."""
+        sn = (device_sn or "").strip()
         attempts = [
-            ("/v1/device/property",      {"deviceId": device_id}),
-            ("/v1/device/info",          {"deviceId": device_id}),
-            ("/v1/device/detail",        {"deviceId": device_id}),
-            ("/v1/device/expansionPack", {"deviceId": device_id}),
-            ("/v1/device/expansionPacks", {"deviceId": device_id}),
-            ("/v1/device/batteryPacks",  {"deviceId": device_id}),
-            ("/v1/device/subDevices",    {"deviceId": device_id}),
-            ("/v1/device/modules",       {"deviceId": device_id}),
-            ("/v1/device/extension",     {"deviceId": device_id}),
-            ("/v1/device/packs",         {"deviceId": device_id}),
+            # Known-real endpoints whose RAW rows likely carry firmware /
+            # needUpgrade (fetch_devices/fetch_battery_packs keep only a
+            # subset of these fields).
+            ("/v1/device/bind/list",          {}),
+            ("/v1/device/battery/pack/list",  {"deviceSn": sn}),
+            # Firmware / OTA candidates. The protocol's MQTT side has a
+            # DeviceUpgradeProgress message, so an "upgrade"/"ota"/
+            # "firmware" HTTP endpoint very likely feeds the app's version
+            # + update-available screen. Try SN-keyed (pack/list uses
+            # deviceSn) with deviceId fallbacks for the top guesses.
+            ("/v1/device/upgrade/info",       {"deviceSn": sn}),
+            ("/v1/device/upgrade/check",      {"deviceSn": sn}),
+            ("/v1/device/upgrade/list",       {"deviceSn": sn}),
+            ("/v1/device/firmware/info",      {"deviceSn": sn}),
+            ("/v1/device/firmware/check",     {"deviceSn": sn}),
+            ("/v1/device/firmware/list",      {"deviceSn": sn}),
+            ("/v1/device/ota/info",           {"deviceSn": sn}),
+            ("/v1/device/ota/check",          {"deviceSn": sn}),
+            ("/v1/ota/check",                 {"deviceSn": sn}),
+            ("/v1/device/version",            {"deviceSn": sn}),
+            ("/v1/device/upgrade/info",       {"deviceId": device_id}),
+            ("/v1/device/firmware/info",      {"deviceId": device_id}),
+            # Original property probe, retained for reference.
+            ("/v1/device/property",           {"deviceId": device_id}),
         ]
         results: dict[str, Any] = {}
         for path, params in attempts:
+            # Distinct key per (path, param-shape) so deviceId/deviceSn
+            # variants of the same path don't clobber each other.
+            key = f"{path}?{','.join(sorted(params))}" if params else path
             try:
                 data = await self._authed_get(path, params)
-                results[path] = {"code": data.get("code"),
-                                 "msg": data.get("msg"),
-                                 "data": data.get("data")}
+                results[key] = {"code": data.get("code"),
+                                "msg": data.get("msg"),
+                                "data": data.get("data")}
             except Exception as e:
-                results[path] = {"error": str(e)[:200]}
+                results[key] = {"error": str(e)[:200]}
         return results
 
     # ---- MQTT control ----
