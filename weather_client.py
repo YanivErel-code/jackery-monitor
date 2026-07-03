@@ -109,6 +109,18 @@ async def fetch_irradiance(
                 log.info("weather: serving stale cache (%.0fs old) after fetch error",
                          data["stale_age_s"])
                 return data
+            # No live data and nothing in the in-memory cache (e.g. after a
+            # restart). Synthesize a forecast from the GHI observations we
+            # already persist: real past hours + a recent per-local-hour
+            # climatology projected across the horizon. Keeps the forecast
+            # alive through a multi-hour/day outage instead of going blank.
+            synth = _synthesize_from_observations(now, past_days,
+                                                  forecast_days, lat, lon)
+            if synth:
+                synth["stale_error"] = msg
+                log.info("weather: SYNTHETIC forecast from %d past observations "
+                         "(Open-Meteo down: %s)", synth.pop("_n_obs", 0), msg)
+                return synth
             return {"hourly": [], "fetched_at": now, "lat": lat, "lon": lon,
                     "error": msg}
 
@@ -161,6 +173,80 @@ def clear_cache() -> None:
     """Drop cached forecasts. Mostly for tests."""
     with _cache_lock:
         _cache.clear()
+
+
+def _median(xs: list[float]) -> float:
+    s = sorted(xs)
+    return s[len(s) // 2] if s else 0.0
+
+
+def _synthesize_from_observations(now: float, past_days: int,
+                                  forecast_days: int, lat: float,
+                                  lon: float) -> dict[str, Any] | None:
+    """Fallback forecast built entirely from data we already persist, for
+    when the live weather API is down.
+
+    Uses the `weather_observations` table (real hourly GHI we recorded on
+    past successful fetches): the real past hours let the forecaster fit
+    its solar coefficient, and a per-local-hour GHI *climatology* (median
+    of recent observations) projected across the horizon gives a
+    recent-typical-day future curve. This keeps the forecast (and the
+    solar-charge controller) alive through a multi-hour/day Open-Meteo
+    outage instead of collapsing to an empty/`k≈0` forecast.
+
+    Returns None when there are no observations to work from.
+    """
+    try:
+        import location as loc_mod
+        from energy_db import EnergyDB
+    except Exception:
+        return None
+    tz = loc_mod.get_tz_offset() or 0
+    since = int(now) - max(int(past_days), 10) * 86400
+    try:
+        obs = EnergyDB().list_weather_observations(since_ts=since)
+    except Exception as e:
+        log.debug("synthetic weather: obs read failed: %s", e)
+        return None
+    if not obs:
+        return None
+
+    # Real past hours (observations are already ts <= now).
+    past_rows = [{"ts": int(o["ts"]),
+                  "ghi_w_m2": float(o["ghi_w_m2"] or 0.0),
+                  "cloud_cover_pct": float(o["cloud_cover_pct"] or 0.0)}
+                 for o in obs if int(o["ts"]) <= int(now)]
+
+    # Per-local-hour climatology (median) over the observation window.
+    from collections import defaultdict
+    ghi_by_h: dict[int, list[float]] = defaultdict(list)
+    cloud_by_h: dict[int, list[float]] = defaultdict(list)
+    for o in obs:
+        lh = ((int(o["ts"]) + tz) % 86400) // 3600
+        ghi_by_h[lh].append(float(o["ghi_w_m2"] or 0.0))
+        cloud_by_h[lh].append(float(o["cloud_cover_pct"] or 0.0))
+    ghi_clim = {h: _median(v) for h, v in ghi_by_h.items()}
+    cloud_clim = {h: _median(v) for h, v in cloud_by_h.items()}
+
+    # Future hours: next whole hour .. now + forecast_days, filled from
+    # the climatology for each local hour-of-day.
+    start = (int(now) // 3600 + 1) * 3600
+    end = int(now) + int(forecast_days) * 86400
+    fut_rows = []
+    t = start
+    while t <= end:
+        lh = ((t + tz) % 86400) // 3600
+        fut_rows.append({"ts": t,
+                         "ghi_w_m2": round(ghi_clim.get(lh, 0.0), 1),
+                         "cloud_cover_pct": round(cloud_clim.get(lh, 0.0), 1)})
+        t += 3600
+    if not fut_rows:
+        return None
+
+    return {"hourly": past_rows + fut_rows, "fetched_at": now,
+            "lat": lat, "lon": lon,
+            "utc_offset_seconds": tz, "timezone": None,
+            "synthetic": True, "stale": True, "_n_obs": len(obs)}
 
 
 async def geocode(query: str, *, count: int = 5) -> dict[str, Any]:

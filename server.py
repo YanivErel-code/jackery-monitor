@@ -2984,6 +2984,10 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         "system_soc_pct": starting_soc,
         "pack_count": len(state.battery_packs_by_sn.get(device_sn, [])),
         "today_actual_solar_wh": today_actual_solar_wh,
+        # Flag when the forecast is running on the observation-derived
+        # fallback (live weather API unreachable) so the UI can note it.
+        "weather_synthetic": bool(weather.get("synthetic")),
+        "weather_stale": bool(weather.get("stale")),
         **result,
         "configured": True,
     }

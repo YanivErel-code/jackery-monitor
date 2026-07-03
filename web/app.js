@@ -4882,9 +4882,14 @@ async function fetchForecast() {
     const dev = activeJackeryDevice();
     const title = $('forecast-title');
     if (title) {
-      title.textContent = dev?.name
+      const base = dev?.name
         ? `${dev.name} — next 5 days`
         : 'State of charge — next 5 days';
+      // Note the fallback when the live weather API is down and we're
+      // projecting from recent-average solar instead.
+      title.textContent = j.weather_synthetic
+        ? `${base} · ⚠ recent-average solar (weather service offline)`
+        : base;
     }
     setText('forecast-capacity', j.capacity_wh);
     setText('forecast-coeff',    j.solar_coefficient, 2);

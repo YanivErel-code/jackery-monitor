@@ -63,3 +63,43 @@ async def test_serves_stale_cache_on_failure(monkeypatch):
     assert out["hourly"] == good["hourly"]
     assert out.get("stale_error")
     assert "error" not in out  # stale data is usable, not an error state
+
+
+@pytest.mark.asyncio
+async def test_synthesizes_forecast_from_observations_when_api_down(monkeypatch):
+    # Live API down AND in-memory cache empty (e.g. post-restart): build a
+    # fallback forecast from persisted GHI observations — real past hours +
+    # a per-local-hour climatology projected forward.
+    import energy_db
+    import location
+    now = time.time()
+    base_hour = int(now) // 3600 * 3600
+    obs = []
+    for d in range(1, 4):                       # 3 days of hourly obs
+        for h in range(24):
+            ts = base_hour - d * 86400 + h * 3600
+            local_h = (ts % 86400) // 3600      # tz=0, so UTC hour == local
+            ghi = 800.0 if 10 <= local_h <= 14 else 0.0   # midday sun
+            obs.append({"ts": ts, "ghi_w_m2": ghi, "cloud_cover_pct": 10.0})
+
+    class _FakeDB:
+        def __init__(self, *a, **k):
+            pass
+
+        def list_weather_observations(self, since_ts=0, limit=100000):
+            return [o for o in obs if o["ts"] >= since_ts]
+
+    monkeypatch.setattr(energy_db, "EnergyDB", _FakeDB)
+    monkeypatch.setattr(location, "get_tz_offset", lambda: 0)
+    monkeypatch.setattr(weather_client.httpx, "AsyncClient",
+                        lambda *a, **k: _RaisingClient(httpx.ConnectTimeout("")))
+
+    out = await weather_client.fetch_irradiance(37.0, -122.0)
+    assert out.get("synthetic") is True
+    assert "error" not in out
+    fut = [h for h in out["hourly"] if h["ts"] >= now]
+    assert fut, "no future hours synthesized"
+    midday = [h["ghi_w_m2"] for h in fut if 10 <= (h["ts"] % 86400) // 3600 <= 14]
+    night = [h["ghi_w_m2"] for h in fut if (h["ts"] % 86400) // 3600 in (0, 1, 2, 3)]
+    assert midday and max(midday) >= 700      # climatology carried forward
+    assert night and max(night) == 0          # dark hours stay dark
