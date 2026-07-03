@@ -2944,7 +2944,12 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     )
     weather = await weather_client.fetch_irradiance(loc["latitude"], loc["longitude"])
     if weather.get("error"):
-        return {"error": f"weather fetch failed: {weather['error']}", "configured": True}
+        # Surface a clear, user-facing reason instead of a blank forecast.
+        # The raw exception (e.g. httpx ConnectTimeout) goes to the detail
+        # field / logs; the heading stays readable.
+        return {"error": "Weather service unreachable (Open-Meteo)",
+                "error_detail": str(weather["error"]),
+                "configured": True}
 
     result = forecaster.build_forecast(
         energy_history=energy_hist,

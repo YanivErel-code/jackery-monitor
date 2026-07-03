@@ -4851,7 +4851,13 @@ async function fetchForecast() {
         'The forecaster needs your approximate location to know which weather to fetch. Click below to share it.');
       return;
     }
-    if (j.error) { showNeedsConfig(j.error, body.textContent); return; }
+    if (j.error) {
+      const detail = j.error_detail
+        ? `The forecast needs weather data and can't reach the weather service right now (${j.error_detail}). It refreshes automatically once the connection is restored.`
+        : body.textContent;
+      showNeedsConfig(j.error, detail);
+      return;
+    }
     if (j.ready === false) {
       const r = j.readiness || {};
       const haveH = r.have_hours ?? 0, needH = r.needed_hours ?? 24;

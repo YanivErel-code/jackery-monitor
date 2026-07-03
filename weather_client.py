@@ -88,9 +88,29 @@ async def fetch_irradiance(
             r.raise_for_status()
             j = r.json()
         except Exception as e:
-            log.warning("Open-Meteo fetch failed: %s", e)
+            # httpx timeout exceptions stringify to "" (e.g.
+            # ConnectTimeout('')), and callers gate on
+            # `if weather.get("error")` — an empty string is falsy, so the
+            # failure was silently swallowed and the forecast served blank.
+            # Always carry a meaningful message.
+            msg = str(e) or f"{type(e).__module__}.{type(e).__name__}"
+            log.warning("Open-Meteo fetch failed: %s", msg)
+            # Serve the last-good cached weather (even past its TTL) so a
+            # transient outage doesn't blank the forecast; flag it stale so
+            # callers/UI can note it. Fall through to an error only when we
+            # have no usable cache.
+            with _cache_lock:
+                stale = _cache.get(key)
+            if stale and (stale[1].get("hourly")):
+                data = dict(stale[1])
+                data["stale"] = True
+                data["stale_error"] = msg
+                data["stale_age_s"] = round(now - float(data.get("fetched_at") or now), 1)
+                log.info("weather: serving stale cache (%.0fs old) after fetch error",
+                         data["stale_age_s"])
+                return data
             return {"hourly": [], "fetched_at": now, "lat": lat, "lon": lon,
-                    "error": str(e)}
+                    "error": msg}
 
     hourly = j.get("hourly") or {}
     times = hourly.get("time") or []
