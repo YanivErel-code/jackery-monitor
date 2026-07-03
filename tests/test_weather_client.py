@@ -89,6 +89,9 @@ async def test_synthesizes_forecast_from_observations_when_api_down(monkeypatch)
         def list_weather_observations(self, since_ts=0, limit=100000):
             return [o for o in obs if o["ts"] >= since_ts]
 
+        def get_weather_forecast(self, since_ts=0):
+            return [], 0        # nothing stored -> falls through to synth
+
     monkeypatch.setattr(energy_db, "EnergyDB", _FakeDB)
     monkeypatch.setattr(location, "get_tz_offset", lambda: 0)
     monkeypatch.setattr(weather_client.httpx, "AsyncClient",
@@ -103,3 +106,40 @@ async def test_synthesizes_forecast_from_observations_when_api_down(monkeypatch)
     night = [h["ghi_w_m2"] for h in fut if (h["ts"] % 86400) // 3600 in (0, 1, 2, 3)]
     assert midday and max(midday) >= 700      # climatology carried forward
     assert night and max(night) == 0          # dark hours stay dark
+
+
+@pytest.mark.asyncio
+async def test_serves_last_good_db_forecast_when_api_down(monkeypatch):
+    # The real last-good forecast persisted to the DB is served (as stale,
+    # not synthetic) ahead of the climatology fallback.
+    import energy_db
+    import location
+    now = time.time()
+    base_hour = int(now) // 3600 * 3600
+    future = [{"ts": base_hour + (i + 1) * 3600, "ghi_w_m2": 500.0,
+               "cloud_cover_pct": 5.0} for i in range(120)]
+    past_obs = [{"ts": base_hour - (i + 1) * 3600, "ghi_w_m2": 100.0,
+                 "cloud_cover_pct": 0.0} for i in range(48)]
+
+    class _FakeDB:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_weather_forecast(self, since_ts=0):
+            fut = [r for r in future if r["ts"] >= since_ts]
+            return (fut, int(now) - 7200) if fut else ([], 0)
+
+        def list_weather_observations(self, since_ts=0, limit=100000):
+            return [o for o in past_obs if o["ts"] >= since_ts]
+
+    monkeypatch.setattr(energy_db, "EnergyDB", _FakeDB)
+    monkeypatch.setattr(location, "get_tz_offset", lambda: 0)
+    monkeypatch.setattr(weather_client.httpx, "AsyncClient",
+                        lambda *a, **k: _RaisingClient(httpx.ConnectTimeout("")))
+
+    out = await weather_client.fetch_irradiance(37.0, -122.0)
+    assert out.get("stale") is True
+    assert not out.get("synthetic")           # real forecast, not climatology
+    assert "error" not in out
+    fut = [h for h in out["hourly"] if h["ts"] >= now]
+    assert len(fut) >= 100                     # served the stored 5-day curve

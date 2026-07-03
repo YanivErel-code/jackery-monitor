@@ -190,6 +190,19 @@ CREATE TABLE IF NOT EXISTS weather_observations (
     PRIMARY KEY (ts)
 );
 
+-- Latest full weather forecast (future hours), persisted so the app can
+-- serve a real last-good 5-day forecast when the Open-Meteo API is
+-- unreachable, and survive restarts (the in-memory cache does not).
+-- Replaced wholesale on each successful fetch; refreshed from Open-Meteo
+-- whenever it is available.
+CREATE TABLE IF NOT EXISTS weather_forecast (
+    ts              INTEGER NOT NULL,    -- hour-aligned unix epoch (future)
+    ghi_w_m2        REAL NOT NULL,
+    cloud_cover_pct REAL,
+    fetched_at      INTEGER NOT NULL,    -- when this forecast was pulled
+    PRIMARY KEY (ts)
+);
+
 CREATE TABLE IF NOT EXISTS daily_solar_summary (
     date           TEXT NOT NULL,         -- YYYY-MM-DD in user's local TZ
     device_sn      TEXT NOT NULL,
@@ -702,6 +715,46 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             {"ts": r[0], "ghi_w_m2": r[1], "cloud_cover_pct": r[2]}
             for r in rows
         ]
+
+    # ---------- last-good weather forecast (future hours) ----------
+    def replace_weather_forecast(self, rows: list[dict], fetched_at: int) -> int:
+        """Store the latest forecast (future hourly GHI + cloud), replacing
+        any prior. Served as the last-good forecast when the live API is
+        unreachable. Each row is {ts, ghi_w_m2, cloud_cover_pct}."""
+        prepared = [
+            (int(r["ts"]),
+             float(r.get("ghi_w_m2") or 0),
+             float(r["cloud_cover_pct"]) if r.get("cloud_cover_pct") is not None else None,
+             int(fetched_at))
+            for r in rows if r.get("ts")
+        ]
+        with self._conn() as c:
+            c.execute("DELETE FROM weather_forecast")
+            if prepared:
+                c.executemany(
+                    """INSERT OR REPLACE INTO weather_forecast
+                           (ts, ghi_w_m2, cloud_cover_pct, fetched_at)
+                       VALUES (?, ?, ?, ?)""",
+                    prepared,
+                )
+        return len(prepared)
+
+    def get_weather_forecast(self, since_ts: int = 0) -> tuple[list[dict], int]:
+        """Return (rows, fetched_at) for the stored forecast at ts >= since_ts,
+        oldest first. fetched_at is 0 when the table is empty."""
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT ts, ghi_w_m2, cloud_cover_pct, fetched_at
+                     FROM weather_forecast
+                    WHERE ts >= ?
+                    ORDER BY ts ASC""",
+                (int(since_ts),),
+            ).fetchall()
+        if not rows:
+            return [], 0
+        fetched_at = int(rows[0][3] or 0)
+        return ([{"ts": r[0], "ghi_w_m2": r[1], "cloud_cover_pct": r[2]}
+                 for r in rows], fetched_at)
 
     # ---------- per-expansion-battery state ----------
     def record_battery_packs(self, parent_sn: str, packs: list[dict],

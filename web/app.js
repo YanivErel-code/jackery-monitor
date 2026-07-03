@@ -4885,11 +4885,15 @@ async function fetchForecast() {
       const base = dev?.name
         ? `${dev.name} — next 5 days`
         : 'State of charge — next 5 days';
-      // Note the fallback when the live weather API is down and we're
-      // projecting from recent-average solar instead.
-      title.textContent = j.weather_synthetic
-        ? `${base} · ⚠ recent-average solar (weather service offline)`
-        : base;
+      // Note the fallback when the live weather API is down: either the
+      // real last-good stored forecast, or (cold start) a recent-average
+      // climatology.
+      const wxNote = j.weather_synthetic
+        ? ' · ⚠ recent-average solar (weather service offline)'
+        : j.weather_stale
+          ? ' · ⚠ last-good forecast (weather service offline)'
+          : '';
+      title.textContent = base + wxNote;
     }
     setText('forecast-capacity', j.capacity_wh);
     setText('forecast-coeff',    j.solar_coefficient, 2);

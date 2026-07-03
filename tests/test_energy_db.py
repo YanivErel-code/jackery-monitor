@@ -125,6 +125,23 @@ def test_history_computes_plug_on_frac_from_decisions(db):
     assert row["solar_charge_plug_on_frac"] == pytest.approx(0.75)
 
 
+def test_weather_forecast_replace_and_get(db):
+    now = int(time.time())
+    rows = [{"ts": now + 3600, "ghi_w_m2": 500.0, "cloud_cover_pct": 10.0},
+            {"ts": now + 7200, "ghi_w_m2": 600.0, "cloud_cover_pct": 5.0}]
+    assert db.replace_weather_forecast(rows, fetched_at=now) == 2
+    got, fetched = db.get_weather_forecast(since_ts=now)
+    assert fetched == now and len(got) == 2 and got[0]["ghi_w_m2"] == 500.0
+    # replace is wholesale — old rows gone, new fetched_at recorded.
+    db.replace_weather_forecast(
+        [{"ts": now + 10800, "ghi_w_m2": 700.0, "cloud_cover_pct": 0.0}],
+        fetched_at=now + 60)
+    got2, fetched2 = db.get_weather_forecast(since_ts=now)
+    assert len(got2) == 1 and fetched2 == now + 60
+    # since_ts filters out already-elapsed hours.
+    assert db.get_weather_forecast(since_ts=now + 20000) == ([], 0)
+
+
 def test_history_omits_plug_on_frac_when_no_decisions(db):
     # Buckets with no decision coverage must not carry the field — the
     # forecaster then falls back to raw output / recorded diverted_wh.

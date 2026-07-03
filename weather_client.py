@@ -109,11 +109,19 @@ async def fetch_irradiance(
                 log.info("weather: serving stale cache (%.0fs old) after fetch error",
                          data["stale_age_s"])
                 return data
-            # No live data and nothing in the in-memory cache (e.g. after a
-            # restart). Synthesize a forecast from the GHI observations we
-            # already persist: real past hours + a recent per-local-hour
-            # climatology projected across the horizon. Keeps the forecast
-            # alive through a multi-hour/day outage instead of going blank.
+            # Serve the real last-good forecast persisted to the DB (future
+            # hours) + real past observations. Survives restarts and gives
+            # ACTUAL forecast data through outages up to the horizon length.
+            db_served = _serve_from_db(now, past_days, lat, lon)
+            if db_served:
+                db_served["stale_error"] = msg
+                log.info("weather: serving last-good DB forecast "
+                         "(%.1fh old) — Open-Meteo down: %s",
+                         db_served.get("stale_age_s", 0) / 3600.0, msg)
+                return db_served
+            # Nothing stored yet (cold start). Synthesize from the GHI
+            # observations we persist: real past hours + a recent
+            # per-local-hour climatology projected across the horizon.
             synth = _synthesize_from_observations(now, past_days,
                                                   forecast_days, lat, lon)
             if synth:
@@ -166,6 +174,17 @@ async def fetch_irradiance(
         except Exception as e:
             log.debug("weather observation persist failed: %s", e)
 
+    # Persist the FUTURE forecast (the 5-day curve) so we can serve a real
+    # last-good forecast from the DB — surviving restarts — when Open-Meteo
+    # is unreachable. Refreshed (replaced) on every successful fetch.
+    future_rows = [r for r in rows if r["ts"] > cutoff_ts]
+    if future_rows:
+        try:
+            from energy_db import EnergyDB
+            EnergyDB().replace_weather_forecast(future_rows, cutoff_ts)
+        except Exception as e:
+            log.debug("weather forecast persist failed: %s", e)
+
     return out
 
 
@@ -178,6 +197,40 @@ def clear_cache() -> None:
 def _median(xs: list[float]) -> float:
     s = sorted(xs)
     return s[len(s) // 2] if s else 0.0
+
+
+def _serve_from_db(now: float, past_days: int, lat: float,
+                   lon: float) -> dict[str, Any] | None:
+    """Serve the real last-good forecast persisted to the DB when the live
+    API is down: stored future hours (still ahead of `now`) + real past
+    observations for the solar-coefficient fit. Returns None when no
+    forecast has been stored yet (cold start). Real data — only `stale`,
+    not `synthetic`."""
+    try:
+        import location as loc_mod
+        from energy_db import EnergyDB
+    except Exception:
+        return None
+    try:
+        db = EnergyDB()
+        future, fetched_at = db.get_weather_forecast(since_ts=int(now))
+        if not future:
+            return None
+        since = int(now) - max(int(past_days), 10) * 86400
+        obs = db.list_weather_observations(since_ts=since)
+    except Exception as e:
+        log.debug("DB forecast serve failed: %s", e)
+        return None
+    tz = loc_mod.get_tz_offset() or 0
+    past = [{"ts": int(o["ts"]),
+             "ghi_w_m2": float(o["ghi_w_m2"] or 0.0),
+             "cloud_cover_pct": float(o["cloud_cover_pct"] or 0.0)}
+            for o in obs if int(o["ts"]) <= int(now)]
+    return {"hourly": past + future, "fetched_at": float(fetched_at or now),
+            "lat": lat, "lon": lon,
+            "utc_offset_seconds": tz, "timezone": None,
+            "stale": True,
+            "stale_age_s": round(now - float(fetched_at or now), 1)}
 
 
 def _synthesize_from_observations(now: float, past_days: int,
