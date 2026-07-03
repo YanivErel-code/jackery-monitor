@@ -2614,6 +2614,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Jackery 5000 Plus Monitor", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def _no_store_api_responses(request, call_next):
+    """Dynamic API data must never be cached — by the browser or an
+    intermediary (we sit behind Cloudflare). Without an explicit header,
+    a stale `/api/forecast` (e.g. an empty one captured during a weather
+    outage) can keep being served to the client long after the origin
+    recovered — which reads as "the forecast isn't updating."
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 api_auth.install(
     app, WEB_DIR,
     # Pre-auth restore: lets a fresh install pull data from backup
