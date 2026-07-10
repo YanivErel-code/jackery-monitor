@@ -216,6 +216,7 @@ class AppState:
         # Anthropic /v1/models response cache so the model picker UI doesn't
         # round-trip the API on every page load. {ts, models}.
         self.anthropic_models_cache: dict[str, Any] = {"ts": 0.0, "models": []}
+        self.openai_models_cache: dict[str, Any] = {"ts": 0.0, "models": []}
 
     @property
     def backend(self) -> str:
@@ -4448,15 +4449,140 @@ async def api_anthropic_prefs_save(body: dict):
     raw_1m = body.get("advisor_1m_context")
     advisor_1m = bool(raw_1m) if raw_1m is not None else None
     advisor_effort = body.get("advisor_thinking_effort")
-    if (advisor_model is None and narrator_model is None
-            and advisor_1m is None and advisor_effort is None):
+    provider = body.get("provider")
+    openai_advisor_model = body.get("openai_advisor_model")
+    openai_narrator_model = body.get("openai_narrator_model")
+    openai_advisor_effort = body.get("openai_advisor_effort")
+    if all(v is None for v in (advisor_model, narrator_model, advisor_1m,
+                               advisor_effort, provider, openai_advisor_model,
+                               openai_narrator_model, openai_advisor_effort)):
         raise HTTPException(400, "at least one preference field required")
     return anthropic_prefs.set_models(
+        provider=provider,
         advisor_model=advisor_model,
         advisor_1m_context=advisor_1m,
         advisor_thinking_effort=advisor_effort,
         narrator_model=narrator_model,
+        openai_advisor_model=openai_advisor_model,
+        openai_narrator_model=openai_narrator_model,
+        openai_advisor_effort=openai_advisor_effort,
     )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI provider — key management, model list, and the AI-provider selector.
+# Mirrors the /api/anthropic/* endpoints so the Settings UI is symmetric.
+# ---------------------------------------------------------------------------
+OPENAI_MODELS_CACHE_TTL_S = 5 * 60
+
+# Static fallback offered when no key is configured or the live fetch
+# fails. Order = recommended first. o-series = reasoning (advisor);
+# gpt-4o-mini = cheap/fast (narrator).
+OPENAI_MODELS_FALLBACK: list[dict[str, str]] = [
+    {"id": "o4-mini", "display_name": "o4-mini (reasoning)"},
+    {"id": "o3", "display_name": "o3 (reasoning)"},
+    {"id": "gpt-4.1", "display_name": "GPT-4.1"},
+    {"id": "gpt-4o", "display_name": "GPT-4o"},
+    {"id": "gpt-4o-mini", "display_name": "GPT-4o mini"},
+]
+
+
+@app.get("/api/openai/key")
+def api_openai_key_status():
+    """Whether an OpenAI API key is saved (without returning it)."""
+    import openai_creds as oc
+    return {
+        "has_key": oc.has_key() or bool(os.environ.get("OPENAI_API_KEY")),
+        "source": "env" if (not oc.has_key() and os.environ.get("OPENAI_API_KEY"))
+                  else ("saved" if oc.has_key() else None),
+    }
+
+
+@app.post("/api/openai/key")
+async def api_openai_key_save(body: dict):
+    """Validate the candidate OpenAI key with a 1-token call, then persist."""
+    import claude_narrator
+    import openai_creds as oc
+    api_key = ((body or {}).get("api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(400, "api_key required")
+    ok, msg = await claude_narrator.validate_key(api_key, provider="openai")
+    if not ok:
+        raise HTTPException(400, f"key validation failed: {msg}")
+    if not oc.save(api_key):
+        raise HTTPException(500, "failed to save key")
+    return {"ok": True}
+
+
+@app.delete("/api/openai/key")
+def api_openai_key_clear():
+    """Forget the saved OpenAI key. The env-var fallback (if set) stays."""
+    import openai_creds as oc
+    oc.clear()
+    return {"ok": True}
+
+
+@app.get("/api/openai/models")
+async def api_openai_models(refresh: bool = False):
+    """List OpenAI chat models the user can pick from. Live list (cached
+    5 min) when a key is configured; static fallback otherwise. Always
+    succeeds so the dropdown always renders."""
+    import openai_creds as oc
+    now = time.time()
+    if not refresh and (now - state.openai_models_cache["ts"]) < OPENAI_MODELS_CACHE_TTL_S:
+        cached = state.openai_models_cache["models"]
+        if cached:
+            return {"models": cached, "source": "cache"}
+    api_key = oc.load() or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return {"models": OPENAI_MODELS_FALLBACK, "source": "fallback_no_key"}
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        return {"models": OPENAI_MODELS_FALLBACK, "source": "fallback_no_sdk"}
+    try:
+        client = AsyncOpenAI(api_key=api_key)
+        page = await client.models.list()
+        # Only chat-capable families are useful here; filter to gpt-*/o*.
+        models = [
+            {"id": m.id, "display_name": m.id}
+            for m in (page.data or [])
+            if m.id.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-"))
+        ]
+        models.sort(key=lambda m: m["id"])
+    except Exception as e:
+        log.info("openai models list failed (%s); using fallback", e)
+        return {"models": OPENAI_MODELS_FALLBACK,
+                "source": "fallback_fetch_failed", "error": str(e)[:200]}
+    if not models:
+        return {"models": OPENAI_MODELS_FALLBACK, "source": "fallback_empty"}
+    state.openai_models_cache["ts"] = now
+    state.openai_models_cache["models"] = models
+    return {"models": models, "source": "live"}
+
+
+@app.get("/api/ai/provider")
+def api_ai_provider_get():
+    """Active AI provider + per-provider key status, for the Settings UI."""
+    import anthropic_creds as ac
+    import anthropic_prefs
+    import openai_creds as oc
+    return {
+        "provider": anthropic_prefs.get_provider(),
+        "anthropic_has_key": ac.has_key() or bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "openai_has_key": oc.has_key() or bool(os.environ.get("OPENAI_API_KEY")),
+    }
+
+
+@app.post("/api/ai/provider")
+def api_ai_provider_set(body: dict):
+    """Switch the active AI provider ('anthropic' | 'openai')."""
+    import anthropic_prefs
+    provider = ((body or {}).get("provider") or "").strip().lower()
+    if provider not in anthropic_prefs.VALID_PROVIDERS:
+        raise HTTPException(400, f"provider must be one of {anthropic_prefs.VALID_PROVIDERS}")
+    anthropic_prefs.set_models(provider=provider)
+    return {"provider": anthropic_prefs.get_provider()}
 
 
 @app.get("/api/kasa/devices")

@@ -1,20 +1,20 @@
 """
-Optional Claude narration of smart-charge decisions.
+Optional AI narration of smart-charge decisions.
 
 Each smart-charge tick that fires (mode != off) computes a Plan. When the
-user has both saved an Anthropic API key AND enabled `claude_enabled` in
-the per-device config, this module turns that Plan into a 1-2 sentence
-explanation that gets attached to the persisted decision row.
+user has both saved an API key for the active provider AND enabled
+`claude_enabled` in the per-device config, this module turns that Plan
+into a 1-2 sentence explanation attached to the persisted decision row.
 
-API key resolution order:
-  1. saved key from anthropic_creds (UI Settings page)
-  2. ANTHROPIC_API_KEY env var (for ops parity with other secrets)
+Provider (anthropic | openai) is selected in Settings — see
+anthropic_prefs.get_provider(). Key resolution per provider:
+  1. saved key (UI Settings page) — anthropic_creds / openai_creds
+  2. ANTHROPIC_API_KEY / OPENAI_API_KEY env var (ops parity)
 
-Cost: one API call per fired decision (typically 1-3/day for an active-
-mode setup). Haiku 4.5 — pennies per month at this rate.
+Cost: one API call per fired decision (typically 1-3/day). Defaults are
+the cheap/fast small models per provider.
 
-Validation: validate_key() lets the UI sanity-check a key on save without
-having to wait for the next tick to discover it's wrong.
+Validation: validate_key() lets the UI sanity-check a key on save.
 """
 
 from __future__ import annotations
@@ -25,36 +25,48 @@ from typing import Any
 
 import anthropic_creds
 import anthropic_prefs
+import openai_creds
 
 log = logging.getLogger("claude_narrator")
 
-# Resolved at call time (not module load) so a Settings-tab change
-# applies on the next tick without a container restart. Default is
-# Haiku — cheap + fast for the per-decision narration use case.
-DEFAULT_MODEL = "claude-haiku-4-5"
 MAX_TOKENS = 200
+
+_SYSTEM = (
+    "You explain solar-battery automation decisions in 1-2 plain English "
+    "sentences for a homeowner. No jargon, no preamble. Lead with the "
+    "action and the reason. Mention the relevant numbers (predicted SOC, "
+    "target, deficit) only when they clarify the decision."
+)
 
 
 def _get_model() -> str:
-    try:
-        return anthropic_prefs.get_model("narrator")
-    except Exception:
-        return DEFAULT_MODEL
+    # Provider-aware: returns the active provider's narrator model.
+    return anthropic_prefs.get_model("narrator")
 
 
-def _resolve_key() -> str | None:
-    """UI-saved key takes precedence; env var is the ops-controlled fallback."""
+def _resolve_key(provider: str | None = None) -> str | None:
+    """UI-saved key takes precedence; env var is the ops fallback."""
+    provider = provider or anthropic_prefs.get_provider()
+    if provider == "openai":
+        return openai_creds.load() or os.environ.get("OPENAI_API_KEY") or None
     return anthropic_creds.load() or os.environ.get("ANTHROPIC_API_KEY") or None
 
 
 def has_usable_key() -> bool:
+    """Whether the ACTIVE provider has a usable key."""
     return _resolve_key() is not None
 
 
-async def validate_key(api_key: str) -> tuple[bool, str]:
-    """Smoke-test a candidate API key by making a tiny one-shot call.
-    Returns (ok, message). Used by the Settings save endpoint so we
-    can refuse to persist a key that won't actually work."""
+async def validate_key(api_key: str, provider: str = "anthropic") -> tuple[bool, str]:
+    """Smoke-test a candidate API key for `provider` with a tiny one-shot
+    call. Returns (ok, message). Used by the Settings save endpoint so we
+    refuse to persist a key that won't actually work."""
+    if provider == "openai":
+        return await _validate_openai(api_key)
+    return await _validate_anthropic(api_key)
+
+
+async def _validate_anthropic(api_key: str) -> tuple[bool, str]:
     if not api_key or not api_key.startswith("sk-ant-"):
         return False, "Anthropic API keys start with `sk-ant-`. Check the value you pasted."
     try:
@@ -63,60 +75,82 @@ async def validate_key(api_key: str) -> tuple[bool, str]:
         return False, "Anthropic SDK not installed in this image — rebuild required."
     client = AsyncAnthropic(api_key=api_key)
     try:
-        # 1-token completion is the cheapest way to confirm auth + model access.
         await client.messages.create(
-            model=_get_model(),
+            model=anthropic_prefs.get_model("narrator", provider="anthropic"),
             max_tokens=1,
             messages=[{"role": "user", "content": "ok"}],
         )
         return True, "ok"
     except Exception as e:
         msg = str(e)
-        # Truncate verbose tracebacks to something the UI can show inline.
-        if len(msg) > 200:
-            msg = msg[:200] + "…"
-        return False, msg
+        return False, (msg[:200] + "…") if len(msg) > 200 else msg
+
+
+async def _validate_openai(api_key: str) -> tuple[bool, str]:
+    if not api_key or not api_key.startswith("sk-"):
+        return False, "OpenAI API keys start with `sk-`. Check the value you pasted."
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        return False, "OpenAI SDK not installed in this image — rebuild required."
+    client = AsyncOpenAI(api_key=api_key)
+    try:
+        # Cheapest confirm of auth + model access. max_completion_tokens is
+        # the modern param accepted across current chat models.
+        await client.chat.completions.create(
+            model=anthropic_prefs.get_model("narrator", provider="openai"),
+            max_completion_tokens=1,
+            messages=[{"role": "user", "content": "ok"}],
+        )
+        return True, "ok"
+    except Exception as e:
+        msg = str(e)
+        return False, (msg[:200] + "…") if len(msg) > 200 else msg
 
 
 async def narrate_smart_charge(plan: Any) -> str:
-    """Render a 1-2 sentence explanation of the given Plan dataclass.
-    Returns "" on any failure (missing key, SDK not installed, network
-    blip, model error). Failures are logged at debug — never raised —
-    because narration is purely additive; the decision still stands."""
-    api_key = _resolve_key()
+    """Render a 1-2 sentence explanation of the given Plan. Returns "" on
+    any failure (missing key, SDK not installed, network blip, model
+    error) — narration is purely additive; the decision still stands."""
+    provider = anthropic_prefs.get_provider()
+    api_key = _resolve_key(provider)
     if not api_key:
         return ""
-    try:
-        from anthropic import AsyncAnthropic
-    except ImportError as e:
-        log.debug("anthropic SDK not installed: %s", e)
-        return ""
-
     facts = _plan_to_prompt(plan)
-    client = AsyncAnthropic(api_key=api_key)
     try:
-        resp = await client.messages.create(
-            model=_get_model(),
-            max_tokens=MAX_TOKENS,
-            system=(
-                "You explain solar-battery automation decisions in 1-2 plain "
-                "English sentences for a homeowner. No jargon, no preamble. "
-                "Lead with the action and the reason. Mention the relevant "
-                "numbers (predicted SOC, target, deficit) only when they "
-                "clarify the decision."
-            ),
-            messages=[{"role": "user", "content": facts}],
-        )
+        if provider == "openai":
+            return await _narrate_openai(api_key, facts)
+        return await _narrate_anthropic(api_key, facts)
     except Exception as e:
-        log.debug("claude narration failed: %s", e)
+        log.debug("narration failed (%s): %s", provider, e)
         return ""
 
-    parts = []
-    for block in (resp.content or []):
-        text = getattr(block, "text", None)
-        if text:
-            parts.append(text)
-    return " ".join(parts).strip()[:512]  # match DB column cap
+
+async def _narrate_anthropic(api_key: str, facts: str) -> str:
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic(api_key=api_key)
+    resp = await client.messages.create(
+        model=_get_model(),
+        max_tokens=MAX_TOKENS,
+        system=_SYSTEM,
+        messages=[{"role": "user", "content": facts}],
+    )
+    parts = [getattr(b, "text", "") for b in (resp.content or [])]
+    return " ".join(p for p in parts if p).strip()[:512]
+
+
+async def _narrate_openai(api_key: str, facts: str) -> str:
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=api_key)
+    resp = await client.chat.completions.create(
+        model=_get_model(),
+        max_completion_tokens=MAX_TOKENS,
+        messages=[
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": facts},
+        ],
+    )
+    return (resp.choices[0].message.content or "").strip()[:512]
 
 
 def _plan_to_prompt(plan: Any) -> str:

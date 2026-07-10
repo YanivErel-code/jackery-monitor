@@ -410,7 +410,7 @@ function switchTab(name, opts = {}) {
   if (name === 'live')     { drawLiveChart(lastStatus); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadAIProvider(); loadOpenAIKeyStatus(); loadOpenAIModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
     restoreAutomationSubtab();
@@ -6854,13 +6854,17 @@ async function loadAnthropicKeyStatus() {
 }
 
 function applyAnthropicGates() {
-  // Anything that depends on a saved + verified Anthropic API key gets
-  // gated here. Re-runnable on every render or status change.
-  const reason = 'Save an Anthropic API key on the Settings page first.';
+  // Anything that depends on a saved + verified key for the ACTIVE AI
+  // provider gets gated here. Re-runnable on every render or status
+  // change. window._aiActiveHasKey (set by loadAIProvider) reflects the
+  // active provider's key; fall back to the Anthropic flag before the
+  // provider status has loaded.
+  const hasKey = (window._aiActiveHasKey ?? false) || _anthropicHasKey;
+  const reason = 'Save an API key for the active AI provider on the Settings page first.';
 
   const t = $('sc-claude-toggle');
   if (t) {
-    if (_anthropicHasKey) {
+    if (hasKey) {
       t.disabled = false;
       t.title = '';
     } else {
@@ -6875,7 +6879,7 @@ function applyAnthropicGates() {
   const hour = $('set-advisor_trigger_hour');
   if (hour) {
     const row = hour.closest('.settings-row');
-    if (_anthropicHasKey) {
+    if (hasKey) {
       hour.disabled = false;
       hour.title = '';
       if (row) row.classList.remove('gated');
@@ -7075,6 +7079,161 @@ document.getElementById('ak-narrator-model')?.addEventListener('change', (e) => 
 });
 document.getElementById('ak-advisor-effort')?.addEventListener('change', (e) => {
   saveAnthropicPref({ advisor_thinking_effort: e.target.value }, 'thinking effort');
+});
+
+// ============================================================
+// AI PROVIDER SELECTOR + OPENAI KEY/MODEL PICKERS
+// Mirrors the Anthropic block. Provider switch → /api/ai/provider;
+// key → /api/openai/{key,models}; model prefs reuse saveAnthropicPref
+// (the /api/anthropic/prefs endpoint also accepts openai_* fields).
+// ============================================================
+async function loadAIProvider() {
+  const sel = $('ai-provider-select');
+  const status = $('ai-provider-status');
+  if (!sel) return;
+  try {
+    const r = await fetch('/api/ai/provider');
+    const j = r.ok ? await r.json() : {};
+    if (j.provider) sel.value = j.provider;
+    if (status) status.textContent = j.provider ? `active: ${j.provider}` : '';
+    // Gate the narration toggle + advisor hour on the ACTIVE provider's key.
+    window._aiActiveHasKey = j.provider === 'openai'
+      ? !!j.openai_has_key : !!j.anthropic_has_key;
+    applyAnthropicGates();
+  } catch (e) { console.warn('ai provider fetch failed', e); }
+}
+
+document.getElementById('ai-provider-select')?.addEventListener('change', async (e) => {
+  const status = $('ai-provider-status');
+  if (status) status.textContent = 'Switching…';
+  try {
+    const r = await fetch('/api/ai/provider', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: e.target.value }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    if (status) status.textContent = `active: ${j.provider}`;
+    loadAIProvider();  // refresh the active-provider key flag + re-gate
+  } catch (err) {
+    if (status) status.textContent = `switch failed: ${err.message || err}`;
+  }
+});
+
+async function loadOpenAIKeyStatus() {
+  const line = $('oa-state-line');
+  const status = $('oa-status');
+  if (!line) return;
+  try {
+    const r = await fetch('/api/openai/key');
+    const j = r.ok ? await r.json() : { has_key: false };
+    if (j.has_key) {
+      line.innerHTML = j.source === 'env'
+        ? '✅ <strong>Configured via env var</strong> on the bridge — UI changes here only affect the saved-on-disk key.'
+        : '✅ <strong>API key saved.</strong>';
+    } else {
+      line.innerHTML = 'No key saved. Enter one below to use OpenAI as the active provider.';
+    }
+    if (status) { status.hidden = false; status.textContent = j.has_key ? 'connected' : 'not configured'; }
+  } catch (e) { console.warn('openai key status fetch failed', e); }
+}
+
+document.getElementById('oa-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = $('oa-status');
+  const input = $('oa-input');
+  const key = input.value.trim();
+  if (!key) return;
+  status.hidden = false;
+  status.textContent = 'Validating with OpenAI…';
+  try {
+    const r = await fetch('/api/openai/key', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ api_key: key }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || j.error || `HTTP ${r.status}`);
+    status.textContent = 'Saved. Test call succeeded.';
+    input.value = '';
+    loadOpenAIKeyStatus();
+    loadOpenAIModelPickers();
+  } catch (err) { status.textContent = String(err.message || err); }
+});
+
+document.getElementById('oa-clear')?.addEventListener('click', async () => {
+  const status = $('oa-status');
+  if (!confirm('Forget the saved OpenAI API key?')) return;
+  status.hidden = false;
+  status.textContent = 'Clearing…';
+  try {
+    const r = await fetch('/api/openai/key', { method: 'DELETE' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    status.textContent = 'Forgotten.';
+    loadOpenAIKeyStatus();
+  } catch (err) { status.textContent = String(err.message || err); }
+});
+
+async function loadOpenAIModelPickers() {
+  const advisorSel = $('oa-advisor-model');
+  const narratorSel = $('oa-narrator-model');
+  const effortSel = $('oa-advisor-effort');
+  const statusEl = $('oa-models-status');
+  if (!advisorSel || !narratorSel || !effortSel) return;
+  if (statusEl) statusEl.textContent = 'Loading model list…';
+  try {
+    const [modelsR, prefsR] = await Promise.all([
+      fetch('/api/openai/models'),
+      fetch('/api/anthropic/prefs'),
+    ]);
+    const modelsJ = modelsR.ok ? await modelsR.json() : { models: [], source: 'fetch_failed' };
+    const prefsJ = prefsR.ok ? await prefsR.json() : {};
+    const models = modelsJ.models || [];
+    const advisorCurrent = prefsJ.openai_advisor_model || '';
+    const narratorCurrent = prefsJ.openai_narrator_model || '';
+    const effort = prefsJ.openai_advisor_effort || 'high';
+    const populate = (sel, current) => {
+      sel.innerHTML = '';
+      const seen = new Set();
+      const addOpt = (id, label) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        const o = document.createElement('option');
+        o.value = id;
+        o.textContent = label || id;
+        if (id === current) o.selected = true;
+        sel.appendChild(o);
+      };
+      for (const m of models) addOpt(m.id, m.display_name);
+      if (current && !seen.has(current)) addOpt(current, `${current} (saved)`);
+      sel.disabled = false;
+    };
+    populate(advisorSel, advisorCurrent);
+    populate(narratorSel, narratorCurrent);
+    for (const opt of effortSel.options) opt.selected = opt.value === effort;
+    if (statusEl) {
+      const sourceLabel = ({
+        live: '✅ Live list from OpenAI.',
+        cache: '✅ Live list (cached).',
+        fallback_no_key: '⚠ No API key saved — showing well-known models as a fallback.',
+        fallback_no_sdk: '⚠ OpenAI SDK not in this image — showing fallback list.',
+        fallback_fetch_failed: `⚠ Couldn't reach OpenAI to refresh — showing fallback. ${modelsJ.error || ''}`,
+        fallback_empty: '⚠ OpenAI returned an empty list — showing fallback.',
+      })[modelsJ.source] || `Source: ${modelsJ.source || 'unknown'}.`;
+      statusEl.textContent = sourceLabel;
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `Failed to load model list: ${e.message || e}`;
+  }
+}
+
+document.getElementById('oa-advisor-model')?.addEventListener('change', (e) => {
+  saveAnthropicPref({ openai_advisor_model: e.target.value }, 'OpenAI advisor model');
+});
+document.getElementById('oa-narrator-model')?.addEventListener('change', (e) => {
+  saveAnthropicPref({ openai_narrator_model: e.target.value }, 'OpenAI narrator model');
+});
+document.getElementById('oa-advisor-effort')?.addEventListener('change', (e) => {
+  saveAnthropicPref({ openai_advisor_effort: e.target.value }, 'OpenAI reasoning effort');
 });
 
 // ============================================================

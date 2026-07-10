@@ -15,3 +15,4 @@ tzdata>=2024.1
 # rest of the app works fine without an API key — narration only runs
 # when the user explicitly enables it AND has saved a key.
 anthropic>=0.40
+openai>=1.40

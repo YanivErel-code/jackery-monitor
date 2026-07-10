@@ -127,3 +127,66 @@ def test_partial_update_preserves_other_advisor_fields(prefs):
     prefs.set_models(advisor_model="claude-sonnet-4-7")
     assert prefs.get_1m_context() is True
     assert prefs.get_thinking_effort() == "medium"
+
+
+# ---- provider selector + OpenAI settings ----
+
+def test_default_provider_is_anthropic(prefs):
+    assert prefs.get_provider() == "anthropic"
+
+
+def test_get_model_is_provider_aware(prefs):
+    # Active provider = anthropic → anthropic models.
+    assert prefs.get_model("advisor") == prefs.DEFAULTS["advisor_model"]
+    # Explicit provider override.
+    assert prefs.get_model("advisor", provider="openai") == \
+        prefs.DEFAULTS["openai_advisor_model"]
+    assert prefs.get_model("narrator", provider="openai") == \
+        prefs.DEFAULTS["openai_narrator_model"]
+    # Switch active provider → get_model() follows it.
+    prefs.set_models(provider="openai")
+    assert prefs.get_model("advisor") == prefs.DEFAULTS["openai_advisor_model"]
+
+
+def test_set_provider_validates_and_round_trips(prefs):
+    out = prefs.set_models(provider="openai")
+    assert out["provider"] == "openai"
+    importlib.reload(prefs)
+    assert prefs.get_provider() == "openai"
+    # Garbage provider is dropped (no half-save).
+    prefs.set_models(provider="gemini")
+    assert prefs.get_provider() == "openai"
+
+
+def test_openai_model_and_effort_round_trip(prefs):
+    prefs.set_models(openai_advisor_model="o3",
+                     openai_narrator_model="gpt-4o",
+                     openai_advisor_effort="medium")
+    assert prefs.get_model("advisor", provider="openai") == "o3"
+    assert prefs.get_model("narrator", provider="openai") == "gpt-4o"
+    assert prefs.get_openai_effort() == "medium"
+    # Invalid effort dropped.
+    prefs.set_models(openai_advisor_effort="ludicrous")
+    assert prefs.get_openai_effort() == "medium"
+
+
+def test_get_all_includes_provider_and_openai_fields(prefs):
+    snap = prefs.get_all()
+    for k in ("provider", "openai_advisor_model", "openai_narrator_model",
+              "openai_advisor_effort"):
+        assert k in snap
+    # Anthropic model fields report the anthropic values regardless of
+    # the active provider (the UI shows both provider sections at once).
+    prefs.set_models(provider="openai")
+    snap = prefs.get_all()
+    assert snap["advisor_model"] == prefs.DEFAULTS["advisor_model"]
+    assert snap["provider"] == "openai"
+
+
+def test_switching_provider_preserves_both_providers_models(prefs):
+    prefs.set_models(advisor_model="claude-sonnet-4-7",
+                     openai_advisor_model="o3")
+    prefs.set_models(provider="openai")
+    snap = prefs.get_all()
+    assert snap["advisor_model"] == "claude-sonnet-4-7"      # anthropic kept
+    assert snap["openai_advisor_model"] == "o3"              # openai kept

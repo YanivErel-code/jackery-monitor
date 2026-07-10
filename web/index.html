@@ -1355,6 +1355,28 @@
       </div><!-- /data-settings-group=general -->
 
       <div data-settings-group="intelligence" hidden>
+      <section class="card device-card" id="settings-card-ai-provider">
+        <div class="card-header">
+          <h2>AI provider</h2>
+          <span id="ai-provider-status" class="hint"></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Which AI backend powers the daily advisor + the per-decision narration. Exactly one is active at a time — configure that provider's API key and models in its card below. Switching here takes effect on the next advisor/narrator call.
+        </p>
+        <div class="settings-row">
+          <label class="settings-label" for="ai-provider-select">
+            <span class="settings-label-text">Active provider</span>
+            <span class="settings-hint">Anthropic (Claude) or OpenAI (ChatGPT). The code uses whichever is selected and has a saved key.</span>
+          </label>
+          <div class="settings-control">
+            <select id="ai-provider-select" class="device-select">
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai">OpenAI (ChatGPT)</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
       <section class="card device-card collapsible" id="settings-card-anthropic" data-settings-collapse-key="anthropic">
         <div class="card-header collapsible-header">
           <h2>Anthropic API key</h2>
@@ -1423,6 +1445,73 @@
             </div>
           </div>
           <div id="ak-models-status" class="hint" style="margin-top:6px"></div>
+        </div>
+      </section>
+
+      <section class="card device-card collapsible" id="settings-card-openai" data-settings-collapse-key="openai">
+        <div class="card-header collapsible-header">
+          <h2>OpenAI API key</h2>
+          <span id="oa-status" class="hint" hidden></span>
+          <span class="collapsible-chevron" aria-hidden="true">▾</span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Optional. Powers the advisor + narration when <strong>OpenAI</strong> is the active provider (see the AI provider card above). Get a key at <code>platform.openai.com</code>. Stored encrypted in the data volume; never sent anywhere except api.openai.com.
+        </p>
+        <p id="oa-state-line" class="hint" style="margin:6px 0 12px"></p>
+        <form id="oa-form" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <input id="oa-input" type="password" autocomplete="off" placeholder="sk-…" class="device-select" style="min-width:280px; flex:1" />
+          <button class="btn btn-primary" type="submit">Save &amp; test</button>
+          <button id="oa-clear" class="btn btn-ghost" type="button">Forget</button>
+        </form>
+        <div id="oa-models-block" style="margin-top:18px">
+          <h3 style="margin:0 0 6px; font-size:13px; color:var(--text-dim); font-weight:500">Model selection</h3>
+          <p class="hint" style="margin:0 0 10px">
+            Pick which OpenAI model each role uses. <strong>Advisor</strong> runs the daily heavy review (multi-turn reasoning — an o-series model is the typical choice); <strong>narrator</strong> writes the 1-2 sentence rationale on each smart-charge decision (cheap + fast, e.g. GPT-4o mini). The dropdown auto-refreshes when you open this tab.
+          </p>
+          <div class="settings-row">
+            <label class="settings-label" for="oa-advisor-model">
+              <span class="settings-label-text">Advisor model</span>
+              <span class="settings-hint">
+                Daily review — quality-sensitive. A reasoning
+                (o-series) model is the typical choice; whatever's
+                selected here is what runs.
+              </span>
+            </label>
+            <div class="settings-control">
+              <select id="oa-advisor-model" class="device-select" disabled><option>—</option></select>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="oa-advisor-effort">
+              <span class="settings-label-text">Reasoning effort</span>
+              <span class="settings-hint">
+                Applies to o-series reasoning advisor models. Higher =
+                the model spends more on reasoning before answering.
+                Ignored by non-reasoning models (e.g. GPT-4o).
+              </span>
+            </label>
+            <div class="settings-control">
+              <select id="oa-advisor-effort" class="device-select">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="oa-narrator-model">
+              <span class="settings-label-text">Narrator model</span>
+              <span class="settings-hint">
+                Per-decision narration — cost-sensitive. A fast/cheap
+                model (GPT-4o mini is the typical choice) is plenty for
+                a 1-2 sentence rationale.
+              </span>
+            </label>
+            <div class="settings-control">
+              <select id="oa-narrator-model" class="device-select" disabled><option>—</option></select>
+            </div>
+          </div>
+          <div id="oa-models-status" class="hint" style="margin-top:6px"></div>
         </div>
       </section>
       </div><!-- /data-settings-group=intelligence -->

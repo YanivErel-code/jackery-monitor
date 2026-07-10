@@ -37,6 +37,7 @@ from typing import Any
 
 import anthropic_creds
 import anthropic_prefs
+import openai_creds
 
 log = logging.getLogger("claude_advisor")
 
@@ -153,11 +154,15 @@ def _load_tunables_catalog() -> dict[str, dict[str, Any]]:
 ALLOWED_TARGETS: dict[str, dict[str, Any]] = _load_tunables_catalog()
 
 
-def _resolve_key() -> str | None:
+def _resolve_key(provider: str | None = None) -> str | None:
+    provider = provider or anthropic_prefs.get_provider()
+    if provider == "openai":
+        return openai_creds.load() or os.environ.get("OPENAI_API_KEY") or None
     return anthropic_creds.load() or os.environ.get("ANTHROPIC_API_KEY") or None
 
 
 def has_usable_key() -> bool:
+    """Whether the ACTIVE provider has a usable key."""
     return _resolve_key() is not None
 
 
@@ -458,10 +463,13 @@ QueryFn = Callable[[str, dict], Awaitable[dict]]
 
 async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
     """Multi-turn agent loop. The server provides a compact starter
-    bundle and a query_fn that executes Claude's tool calls against the
-    DB. Returns the final review payload (summary, suggestions,
-    anomalies) plus diagnostic metadata (turn count, tool calls)."""
-    api_key = _resolve_key()
+    bundle and a query_fn that executes the model's tool calls against
+    the DB. Routes to the active provider (Anthropic or OpenAI). Returns
+    the final review payload (summary, suggestions, anomalies) plus
+    diagnostic metadata (turn count, tool calls)."""
+    if anthropic_prefs.get_provider() == "openai":
+        return await _review_openai(bundle, query_fn=query_fn)
+    api_key = _resolve_key(provider="anthropic")
     if not api_key:
         log.info("advisor: no Anthropic key — skipping review")
         return {"summary": "", "config_suggestions": [], "anomalies": [],
@@ -626,6 +634,156 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
         "anomalies": final_payload.get("anomalies") or [],
         "model": _get_model(),
         "thinking_used": True,
+        "turns": turn,
+        "tool_calls": tool_calls_made,
+    }
+
+
+def _to_openai_tools() -> list[dict]:
+    """Convert the Anthropic-shaped tool specs (name/description/
+    input_schema) to OpenAI function-calling specs."""
+    out = []
+    for t in [*QUERY_TOOLS, _review_tool()]:
+        out.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema")
+                or {"type": "object", "properties": {}},
+            },
+        })
+    return out
+
+
+async def _review_openai(bundle: dict, *, query_fn: QueryFn) -> dict:
+    """OpenAI counterpart of review(): the same agentic tool-use loop via
+    Chat Completions function-calling. o-series models get reasoning_effort
+    (the analog of Anthropic extended thinking); it's only sent when the
+    model id looks like an o-series (gpt-4o etc. reject it)."""
+    api_key = _resolve_key(provider="openai")
+    if not api_key:
+        log.info("advisor: no OpenAI key — skipping review")
+        return {"summary": "", "config_suggestions": [], "anomalies": [],
+                "skipped_reason": "no_api_key"}
+    try:
+        from openai import AsyncOpenAI
+    except ImportError as e:
+        log.warning("advisor: openai SDK not installed: %s", e)
+        return {"summary": "", "config_suggestions": [], "anomalies": [],
+                "skipped_reason": "sdk_missing"}
+
+    model = anthropic_prefs.get_model("advisor", provider="openai")
+    client = AsyncOpenAI(api_key=api_key)
+    tools = _to_openai_tools()
+    messages: list[dict] = [
+        {"role": "system", "content": _system_prompt()},
+        {"role": "user", "content": _format_starter_bundle(bundle)},
+    ]
+    extra: dict = {}
+    if model.lower().startswith("o"):
+        extra["reasoning_effort"] = anthropic_prefs.get_openai_effort()
+
+    tool_calls_made = 0
+    turn = 0
+    final_payload: dict | None = None
+    last_text = ""
+
+    while turn < MAX_TURNS:
+        turn += 1
+        log.info("advisor(openai) turn %d/%d (tool calls so far: %d)",
+                 turn, MAX_TURNS, tool_calls_made)
+        try:
+            resp = await client.chat.completions.create(
+                model=model, messages=messages, tools=tools,
+                tool_choice="auto", max_completion_tokens=MAX_TOKENS, **extra,
+            )
+        except Exception as e:
+            msg = str(e)
+            if len(msg) > 300:
+                msg = msg[:300] + "…"
+            log.warning("advisor(openai): call failed at turn %d: %s: %s",
+                        turn, type(e).__name__, msg)
+            return {"summary": last_text or "", "config_suggestions": [],
+                    "anomalies": [],
+                    "skipped_reason": f"api_error: {type(e).__name__}: {msg}",
+                    "turns": turn, "tool_calls": tool_calls_made}
+
+        choice = resp.choices[0]
+        m = choice.message
+        if m.content:
+            last_text = m.content.strip()
+        tcs = list(m.tool_calls or [])
+        if not tcs:
+            log.info("advisor(openai): stopped without submit at turn %d "
+                     "(finish_reason=%s)", turn, choice.finish_reason)
+            break
+
+        # Assistant turn (with tool_calls) MUST precede its tool results,
+        # and every tool_call MUST get a matching tool message.
+        messages.append({
+            "role": "assistant",
+            "content": m.content or None,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name,
+                              "arguments": tc.function.arguments}}
+                for tc in tcs
+            ],
+        })
+
+        submit = False
+        for tc in tcs:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                args = {}
+            if name == "submit_algorithm_review":
+                final_payload = dict(args or {})
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": "ok"})
+                submit = True
+                continue
+            tool_calls_made += 1
+            try:
+                result = await query_fn(name, args)
+            except Exception as e:
+                log.warning("advisor(openai): tool %s failed: %s: %s",
+                            name, type(e).__name__, e)
+                result = {"error": f"{type(e).__name__}: {e}"}
+            content = json.dumps(result, default=str)
+            if len(content) > 80000:
+                content = content[:80000] + "…(truncated; narrow your query)"
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": content})
+        if submit:
+            log.info("advisor(openai): submit_algorithm_review at turn %d", turn)
+            break
+
+    if final_payload is None:
+        log.warning("advisor(openai): finished without submit; tool_calls=%d",
+                    tool_calls_made)
+        return {"summary": last_text[:1000] if last_text else
+                "Review ended without final commit.",
+                "config_suggestions": [], "anomalies": [],
+                "skipped_reason": "no_submit",
+                "turns": turn, "tool_calls": tool_calls_made}
+
+    valid: list[dict] = []
+    for s in (final_payload.get("config_suggestions") or []):
+        ok, why = _validate_suggestion(s)
+        if ok:
+            valid.append(s)
+        else:
+            log.info("advisor(openai): rejected suggestion %s: %s", s, why)
+
+    return {
+        "summary": final_payload.get("summary") or "",
+        "config_suggestions": valid,
+        "anomalies": final_payload.get("anomalies") or [],
+        "model": model,
+        "thinking_used": bool(extra.get("reasoning_effort")),
         "turns": turn,
         "tool_calls": tool_calls_made,
     }
