@@ -641,26 +641,28 @@ async def review(bundle: dict, *, query_fn: QueryFn) -> dict:
 
 def _to_openai_tools() -> list[dict]:
     """Convert the Anthropic-shaped tool specs (name/description/
-    input_schema) to OpenAI function-calling specs."""
+    input_schema) to OpenAI Responses-API function tools. NOTE: the
+    Responses API takes a FLATTENED shape ({type, name, description,
+    parameters}) — not Chat Completions' nested {"function": {...}}."""
     out = []
     for t in [*QUERY_TOOLS, _review_tool()]:
         out.append({
             "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("input_schema")
-                or {"type": "object", "properties": {}},
-            },
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("input_schema")
+            or {"type": "object", "properties": {}},
         })
     return out
 
 
 async def _review_openai(bundle: dict, *, query_fn: QueryFn) -> dict:
     """OpenAI counterpart of review(): the same agentic tool-use loop via
-    Chat Completions function-calling. o-series models get reasoning_effort
-    (the analog of Anthropic extended thinking); it's only sent when the
-    model id looks like an o-series (gpt-4o etc. reject it)."""
+    the RESPONSES API (/v1/responses). Chat Completions is a dead end
+    here — current models (gpt-5.x, o-series) reject function tools +
+    reasoning on /v1/chat/completions ("use /v1/responses"). The loop
+    chains turns with previous_response_id, so reasoning state carries
+    server-side and we only send each turn's function outputs."""
     api_key = _resolve_key(provider="openai")
     if not api_key:
         log.info("advisor: no OpenAI key — skipping review")
@@ -676,28 +678,52 @@ async def _review_openai(bundle: dict, *, query_fn: QueryFn) -> dict:
     model = anthropic_prefs.get_model("advisor", provider="openai")
     client = AsyncOpenAI(api_key=api_key)
     tools = _to_openai_tools()
-    messages: list[dict] = [
-        {"role": "system", "content": _system_prompt()},
-        {"role": "user", "content": _format_starter_bundle(bundle)},
-    ]
-    extra: dict = {}
-    if model.lower().startswith("o"):
-        extra["reasoning_effort"] = anthropic_prefs.get_openai_effort()
+    # Reasoning effort maps 1:1 onto the prefs value. Non-reasoning
+    # models reject the `reasoning` param outright — rather than
+    # maintaining a model-name allowlist that rots (the startswith("o")
+    # heuristic already burned us on gpt-5.x), drop it on the first
+    # rejection and retry once.
+    reasoning: dict | None = {"effort": anthropic_prefs.get_openai_effort()}
+
+    async def _create(**kw):
+        nonlocal reasoning
+        if reasoning is not None:
+            try:
+                return await client.responses.create(reasoning=reasoning, **kw)
+            except Exception as e:
+                emsg = str(e).lower()
+                if "reasoning" in emsg:
+                    log.info("advisor(openai): model %s rejected the "
+                             "reasoning param; retrying without", model)
+                    reasoning = None
+                else:
+                    raise
+        return await client.responses.create(**kw)
 
     tool_calls_made = 0
     turn = 0
     final_payload: dict | None = None
     last_text = ""
+    prev_id: str | None = None
+    # First turn carries the starter bundle; later turns carry only the
+    # function outputs (previous_response_id supplies the history).
+    pending_input: Any = _format_starter_bundle(bundle)
 
     while turn < MAX_TURNS:
         turn += 1
         log.info("advisor(openai) turn %d/%d (tool calls so far: %d)",
                  turn, MAX_TURNS, tool_calls_made)
         try:
-            resp = await client.chat.completions.create(
-                model=model, messages=messages, tools=tools,
-                tool_choice="auto", max_completion_tokens=MAX_TOKENS, **extra,
+            kw: dict = dict(
+                model=model,
+                instructions=_system_prompt(),
+                tools=tools,
+                input=pending_input,
+                max_output_tokens=MAX_TOKENS,
             )
+            if prev_id:
+                kw["previous_response_id"] = prev_id
+            resp = await _create(**kw)
         except Exception as e:
             msg = str(e)
             if len(msg) > 300:
@@ -709,40 +735,35 @@ async def _review_openai(bundle: dict, *, query_fn: QueryFn) -> dict:
                     "skipped_reason": f"api_error: {type(e).__name__}: {msg}",
                     "turns": turn, "tool_calls": tool_calls_made}
 
-        choice = resp.choices[0]
-        m = choice.message
-        if m.content:
-            last_text = m.content.strip()
-        tcs = list(m.tool_calls or [])
-        if not tcs:
+        prev_id = resp.id
+        fn_calls: list = []
+        for item in (resp.output or []):
+            itype = getattr(item, "type", None)
+            if itype == "message":
+                for c in (getattr(item, "content", None) or []):
+                    text = getattr(c, "text", None)
+                    if text:
+                        last_text = text.strip()
+            elif itype == "function_call":
+                fn_calls.append(item)
+
+        if not fn_calls:
             log.info("advisor(openai): stopped without submit at turn %d "
-                     "(finish_reason=%s)", turn, choice.finish_reason)
+                     "(status=%s)", turn, getattr(resp, "status", "?"))
             break
 
-        # Assistant turn (with tool_calls) MUST precede its tool results,
-        # and every tool_call MUST get a matching tool message.
-        messages.append({
-            "role": "assistant",
-            "content": m.content or None,
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name,
-                              "arguments": tc.function.arguments}}
-                for tc in tcs
-            ],
-        })
-
+        outputs: list[dict] = []
         submit = False
-        for tc in tcs:
-            name = tc.function.name
+        for fc in fn_calls:
+            name = fc.name
             try:
-                args = json.loads(tc.function.arguments or "{}")
+                args = json.loads(fc.arguments or "{}")
             except Exception:
                 args = {}
             if name == "submit_algorithm_review":
                 final_payload = dict(args or {})
-                messages.append({"role": "tool", "tool_call_id": tc.id,
-                                 "content": "ok"})
+                outputs.append({"type": "function_call_output",
+                                "call_id": fc.call_id, "output": "ok"})
                 submit = True
                 continue
             tool_calls_made += 1
@@ -755,11 +776,12 @@ async def _review_openai(bundle: dict, *, query_fn: QueryFn) -> dict:
             content = json.dumps(result, default=str)
             if len(content) > 80000:
                 content = content[:80000] + "…(truncated; narrow your query)"
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": content})
+            outputs.append({"type": "function_call_output",
+                            "call_id": fc.call_id, "output": content})
         if submit:
             log.info("advisor(openai): submit_algorithm_review at turn %d", turn)
             break
+        pending_input = outputs
 
     if final_payload is None:
         log.warning("advisor(openai): finished without submit; tool_calls=%d",
@@ -783,7 +805,7 @@ async def _review_openai(bundle: dict, *, query_fn: QueryFn) -> dict:
         "config_suggestions": valid,
         "anomalies": final_payload.get("anomalies") or [],
         "model": model,
-        "thinking_used": bool(extra.get("reasoning_effort")),
+        "thinking_used": reasoning is not None,
         "turns": turn,
         "tool_calls": tool_calls_made,
     }

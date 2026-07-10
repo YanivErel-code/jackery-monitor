@@ -81,3 +81,21 @@ def test_format_starter_bundle_renders_with_drain_fit():
     assert "parasitic_w: 95.0 W" in out
     assert "inverter_overhead_pct: 0.1" in out
     assert "fit windows: 12" in out
+
+
+def test_openai_tools_use_flattened_responses_api_shape():
+    """The Responses API (/v1/responses) takes {type, name, description,
+    parameters} directly. The nested Chat Completions shape
+    ({"function": {...}}) is what broke on gpt-5.x ("use /v1/responses").
+    Guard the conversion so a refactor can't silently regress it."""
+    tools = claude_advisor._to_openai_tools()
+    assert tools, "no tools converted"
+    names = set()
+    for t in tools:
+        assert t["type"] == "function"
+        assert "function" not in t, "nested Chat Completions shape detected"
+        assert isinstance(t["name"], str) and t["name"]
+        assert isinstance(t["parameters"], dict)
+        names.add(t["name"])
+    assert "submit_algorithm_review" in names
+    assert "query_samples" in names
