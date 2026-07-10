@@ -1265,14 +1265,21 @@ def install(app: FastAPI, state, helpers: AdvisorHelpers) -> None:
         if not device_sn:
             raise HTTPException(400, "no active device")
         bundle = await _build_advisor_bundle(state, helpers, device_sn)
-        # Resolve the model at call time — same precedence the actual review
-        # uses (env var > anthropic_prefs > DEFAULT_MODEL). Don't reach for
-        # a module-level constant; there isn't one any more.
+        # Resolve model + provider at call time — same precedence the actual
+        # review uses. _get_model() is provider-aware (follows the active
+        # provider); surface the provider so the UI can label correctly
+        # instead of assuming Claude/Opus.
+        import anthropic_prefs
+        provider = anthropic_prefs.get_provider()
         return {
             "device_sn": device_sn,
             "rendered": claude_advisor._format_starter_bundle(bundle),
+            "provider": provider,
             "model": claude_advisor._get_model(),
             "thinking_budget": claude_advisor.THINKING_BUDGET,
+            "reasoning_effort": (anthropic_prefs.get_openai_effort()
+                                 if provider == "openai"
+                                 else anthropic_prefs.get_thinking_effort()),
             "raw_bundle": bundle,
         }
 

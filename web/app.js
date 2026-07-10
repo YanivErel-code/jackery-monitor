@@ -6461,7 +6461,7 @@ function renderAlgorithmSuggestions(rows) {
 
   if (!rows.length) {
     wrap.innerHTML = '<div class="hint">No pending suggestions. ' +
-      'Click "Run review now" to ask Claude for a fresh analysis.</div>';
+      'Click "Run review now" to ask the AI advisor for a fresh analysis.</div>';
     return;
   }
 
@@ -6644,12 +6644,34 @@ async function dismissAlgSuggestion(id) {
 // it instead of stacking polls.
 let _advisorPollTimer = null;
 
+// Provider-aware label for advisor status lines ("Claude (claude-opus-4-7)"
+// or "ChatGPT (gpt-5.6-sol)"), refreshed from prefs before each run so a
+// Settings change shows correctly without a reload.
+let _aiAdvisorLabel = 'AI advisor';
+async function refreshAIAdvisorLabel() {
+  try {
+    const r = await fetch('/api/anthropic/prefs');
+    const j = r.ok ? await r.json() : {};
+    const isOpenAI = j.provider === 'openai';
+    const model = isOpenAI ? j.openai_advisor_model : j.advisor_model;
+    const brand = isOpenAI ? 'ChatGPT' : 'Claude';
+    _aiAdvisorLabel = model ? `${brand} (${model})` : brand;
+  } catch { /* keep previous label */ }
+  return _aiAdvisorLabel;
+}
+
 document.getElementById('alg-review-now')?.addEventListener('click', async () => {
   const status = $('alg-status');
   const summaryEl = $('alg-summary');
   const btn = $('alg-review-now');
   status.hidden = false;
-  status.textContent = 'Starting Claude review (Opus + extended thinking, 60-180s)…';
+  status.textContent = 'Starting AI review (60-180s)…';
+  refreshAIAdvisorLabel().then((label) => {
+    // Only upgrade the text if we're still in the starting phase.
+    if (status.textContent.startsWith('Starting AI review')) {
+      status.textContent = `Starting ${label} review (60-180s)…`;
+    }
+  });
   if (btn) btn.disabled = true;
   try {
     const dev = activeJackeryDevice();
@@ -6686,7 +6708,7 @@ function pollAdvisorJob(deviceSn) {
       if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
       if (j.status === 'running') {
         const elapsed = j.elapsed_s != null ? `${Math.round(j.elapsed_s)}s elapsed` : '';
-        status.textContent = `Claude is reviewing… ${elapsed}`;
+        status.textContent = `${_aiAdvisorLabel} is reviewing… ${elapsed}`;
         _advisorPollTimer = setTimeout(tick, 4000);
         return;
       }
@@ -6697,8 +6719,10 @@ function pollAdvisorJob(deviceSn) {
           summaryEl.hidden = false;
         }
         const newCount = (result.new_suggestion_ids || []).length;
+        const modelTag = result.model ? ` · ${result.model}` : '';
         status.textContent = `Review complete: ${newCount} new ` +
-          `(${result.turns || 0} turns, ${result.tool_calls || 0} DB queries).`;
+          `(${result.turns || 0} turns, ${result.tool_calls || 0} DB queries` +
+          `${modelTag}).`;
         setTimeout(() => { status.hidden = true; }, 6000);
         loadAlgorithmAdvisor();
         // Light the tab dot if user is on another tab — they'll see new
@@ -6733,7 +6757,10 @@ async function resumeAdvisorPollIfRunning() {
   try {
     const r = await fetch(`/api/algorithm/review_status?device_sn=${encodeURIComponent(dev.device_sn)}`);
     const j = await r.json().catch(() => ({}));
-    if (r.ok && j.status === 'running') pollAdvisorJob(dev.device_sn);
+    if (r.ok && j.status === 'running') {
+      refreshAIAdvisorLabel();  // async; polling text picks it up next tick
+      pollAdvisorJob(dev.device_sn);
+    }
   } catch { /* silent — not critical */ }
 }
 
@@ -6756,12 +6783,16 @@ document.getElementById('alg-show-context')?.addEventListener('click', async () 
     if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
     const safe = (s) => String(s || '').replace(/[<>&"]/g, (c) =>
       ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    const brand = j.provider === 'openai' ? 'ChatGPT' : 'Claude';
+    const effortLine = j.provider === 'openai'
+      ? `reasoning effort: <code>${safe(j.reasoning_effort || '—')}</code>`
+      : `thinking effort: <code>${safe(j.reasoning_effort || '—')}</code>`;
     wrap.innerHTML = `
-      <h3 style="margin:0 0 4px;font-size:14px">Context sent to Claude</h3>
+      <h3 style="margin:0 0 4px;font-size:14px">Context sent to ${brand}</h3>
       <p class="hint" style="margin:0 0 8px">
-        Model: <code>${safe(j.model)}</code> · thinking budget: <code>${j.thinking_budget}</code> tokens.
-        This is the exact text Claude reads as the user message — minus
-        the system prompt and tool schema.
+        Model: <code>${safe(j.model)}</code> · ${effortLine}.
+        This is the exact text the advisor reads as the user message —
+        minus the system prompt and tool schema.
       </p>
       <pre class="dbg-pre" style="max-height:520px">${safe(j.rendered)}</pre>`;
   } catch (e) {
