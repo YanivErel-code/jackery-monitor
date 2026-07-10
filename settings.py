@@ -73,7 +73,7 @@ SCHEMA: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 23,
         "label": "AI advisor daily-review hour",
-        "hint": "Local hour (0-23) when Claude reviews yesterday's data per device. 8 = 8 AM local. Requires an Anthropic API key on this page; runs once per device per day.",
+        "hint": "Local hour (0-23) when the AI advisor reviews yesterday's data per device. 8 = 8 AM local. Requires an API key for the active AI provider (Settings → AI provider); runs once per device per day.",
     },
     "backup_schedule_hour": {
         "env": "JACKERY_BACKUP_HOUR",

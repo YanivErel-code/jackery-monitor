@@ -1254,10 +1254,10 @@ def install(app: FastAPI, state, helpers: AdvisorHelpers) -> None:
 
     @app.get("/api/algorithm/preview")
     async def api_alg_preview(device_sn: str | None = None):
-        """Return the exact starter bundle the advisor sends to Claude as
-        its opening user message — minus the system prompt and the tool
-        schema. Claude follows up with DB query tools, but this is the
-        initial context. Used by the UI's "Show what Claude sees" button
+        """Return the exact starter bundle the advisor sends to the model
+        as its opening user message — minus the system prompt and the tool
+        schema. The model follows up with DB query tools, but this is the
+        initial context. Used by the UI's "Show advisor context" button
         so the user can verify the data flow without burning an API call."""
         import claude_advisor
         if not device_sn:

@@ -6863,9 +6863,9 @@ async function loadAnthropicKeyStatus() {
     if (j.has_key) {
       line.innerHTML = j.source === 'env'
         ? '✅ <strong>Configured via env var</strong> on the bridge — UI changes here will only affect the saved-on-disk key.'
-        : '✅ <strong>API key saved.</strong> The Claude narration toggle on the Automation tab is unlocked.';
+        : '✅ <strong>API key saved.</strong> Advisor + AI narration are unlocked when Anthropic is the active provider.';
     } else {
-      line.innerHTML = 'No key saved. Enter one below to unlock the Claude narration toggle on the Automation tab.';
+      line.innerHTML = 'No key saved. Enter one below to use Anthropic as the active provider.';
     }
     // Populate the collapsed-card chip so the user can see at a glance
     // whether they're configured. The advisor model name (when known)
@@ -6957,7 +6957,7 @@ document.getElementById('ak-form')?.addEventListener('submit', async (e) => {
 
 document.getElementById('ak-clear')?.addEventListener('click', async () => {
   const status = $('ak-status');
-  if (!confirm('Forget the saved Anthropic API key? Claude narration will stop until a new key is saved.')) return;
+  if (!confirm('Forget the saved Anthropic API key? The advisor + AI narration stop working if Anthropic is the active provider.')) return;
   status.hidden = false;
   status.textContent = 'Clearing…';
   try {

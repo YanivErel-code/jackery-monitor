@@ -788,7 +788,7 @@
         </form>
       </section>
 
-      <!-- AI INSIGHTS: daily Claude review of forecast/control performance -->
+      <!-- AI INSIGHTS: daily AI-advisor review of forecast/control performance -->
       <section class="card device-card" data-automation-group="insights">
         <div class="card-header">
           <h2>AI insights <span id="alg-pending-badge" class="alg-badge" hidden>0</span></h2>
@@ -799,7 +799,7 @@
         </p>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px">
           <button id="alg-review-now" class="btn btn-primary" type="button">Run review now</button>
-          <button id="alg-show-context" class="btn btn-ghost" type="button">Show context sent to Claude</button>
+          <button id="alg-show-context" class="btn btn-ghost" type="button">Show advisor context</button>
           <button id="alg-show-history" class="btn btn-ghost" type="button">Show change history</button>
         </div>
         <div id="alg-summary" class="alg-summary" hidden></div>
@@ -883,8 +883,8 @@
           </div>
           <div class="settings-row">
             <label class="settings-label" for="sc-claude-toggle">
-              <span class="settings-label-text">Claude narration</span>
-              <span class="settings-hint">Optional 1-2 sentence plain-English explanation attached to each decision. Disabled until you save an Anthropic API key on the Settings page. Costs ~one Haiku API call per fired decision (typically 1-3/day).</span>
+              <span class="settings-label-text">AI narration</span>
+              <span class="settings-hint">Optional 1-2 sentence plain-English explanation attached to each decision, written by the active AI provider (Claude or ChatGPT — see Settings). Disabled until that provider has a saved API key. Costs ~one small-model API call per fired decision (typically 1-3/day).</span>
             </label>
             <div class="settings-control">
               <label class="keep-awake-row">
@@ -1384,7 +1384,7 @@
           <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
-          Optional. Powers the smart-charge "Claude narration" toggle — a 1-2 sentence plain-English explanation of each automation decision, attached to the persisted history. Get a key at <code>console.anthropic.com</code>. Stored encrypted in the data volume; never sent anywhere except api.anthropic.com.
+          Optional. Powers the advisor + narration when <strong>Anthropic</strong> is the active provider (see the AI provider card above). Get a key at <code>console.anthropic.com</code>. Stored encrypted in the data volume; never sent anywhere except api.anthropic.com.
         </p>
         <p id="ak-state-line" class="hint" style="margin:6px 0 12px"></p>
         <form id="ak-form" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
@@ -1575,7 +1575,7 @@
           <span class="collapsible-chevron" aria-hidden="true">▾</span>
         </div>
         <p class="hint" style="margin:6px 0 12px">
-          Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS, over either SMB or rsync. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic, etc.) get re-prompted. rsync over SSH adds delta transfer + hardlinked snapshots, so year-long retention costs near-zero extra disk on the NAS.
+          Daily 1-shot backup of the SQLite database and every credential / settings file in <code>/data</code> to a remote NAS, over either SMB or rsync. The encryption key itself stays on this device — restoring on a fresh install will preserve all telemetry and let you sign in with your existing credentials, but device-side secrets (Kasa, Anthropic/OpenAI, etc.) get re-prompted. rsync over SSH adds delta transfer + hardlinked snapshots, so year-long retention costs near-zero extra disk on the NAS.
         </p>
         <p id="backup-state-line" class="hint" style="margin:6px 0 12px"></p>
 
