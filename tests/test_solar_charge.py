@@ -24,12 +24,14 @@ def _cfg(**overrides):
 def _eval(*, current_soc, predicted_sunrise=80.0, target=20.0,
           telemetry_age=10.0, cfg=None, solar_w=0.0, load_w=0.0,
           ac_input_w=0.0, now_ts=1_700_000_000.0,
-          capacity_wh=None, hours_to_sunrise=None, household_load_w=None):
+          capacity_wh=None, hours_to_sunrise=None, household_load_w=None,
+          predicted_min_soc=None):
     """Convenience wrapper around compute_plan with safe defaults.
 
     The overnight-reserve guard inputs (capacity_wh / hours_to_sunrise /
-    household_load_w) default to None → guard is a no-op unless a test
-    opts in by supplying all three."""
+    household_load_w) and the cloudy-tomorrow guard input
+    (predicted_min_soc) default to None → guards are no-ops unless a
+    test opts in."""
     return solar_charge.compute_plan(
         config=cfg or _cfg(),
         current_soc_pct=current_soc,
@@ -42,6 +44,7 @@ def _eval(*, current_soc, predicted_sunrise=80.0, target=20.0,
         capacity_wh=capacity_wh,
         hours_to_sunrise=hours_to_sunrise,
         household_load_w=household_load_w,
+        predicted_min_soc_pct=predicted_min_soc,
         now_ts=now_ts,
     )
 
@@ -161,6 +164,67 @@ def test_reserve_guard_noop_without_inputs():
     plan = _eval(current_soc=78, predicted_sunrise=80.0, target=30.0,
                  solar_w=0.0, load_w=600.0)
     assert plan.action == "on"
+
+
+# ---------- Cloudy-tomorrow guard (36h trough vs comfort_low) ----------
+def test_cloudy_guard_blocks_when_trough_below_comfort_low():
+    """Sunrise prediction is fine (38%) but the 36h trough dips to 22%
+    < comfort_low 30% (default) — the 2026-07-12/13 case: evening car
+    charge approved on a sunny-refill assumption, overcast next day
+    drained the pack to 20%. Guard must force OFF."""
+    plan = _eval(current_soc=75, predicted_sunrise=38.0, target=30.0,
+                 predicted_min_soc=22.0)
+    assert plan.action == "off"
+    assert "cloudy-tomorrow guard" in plan.reason
+
+
+def test_cloudy_guard_hysteresis_band_holds_state():
+    """Trough in [comfort_low, comfort_low+hyst) → skip (hold current
+    state), so an in-flight session isn't flapped by forecast wobble."""
+    plan = _eval(current_soc=75, predicted_sunrise=80.0, target=30.0,
+                 predicted_min_soc=31.0)
+    assert plan.action == "skip"
+    assert "cloudy-tomorrow hysteresis" in plan.reason
+
+
+def test_cloudy_guard_passes_when_trough_clear():
+    """Trough comfortably above comfort_low+hyst → normal gates decide
+    (ON here: sunrise 80% ≥ threshold, SOC ≥ comfort_high)."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0,
+                 predicted_min_soc=45.0)
+    assert plan.action == "on"
+
+
+def test_cloudy_guard_noop_without_input():
+    """Back-compat: predicted_min_soc=None → guard skipped entirely."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0)
+    assert plan.action == "on"
+
+
+def test_cloudy_guard_boundaries():
+    """Exact-equality semantics mirror the sunrise gate (strict <):
+    trough == comfort_low lands in the skip band, trough ==
+    comfort_low+hyst passes to the normal gates."""
+    at_low = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0,
+                   predicted_min_soc=30.0)   # == comfort_low (default 30)
+    assert at_low.action == "skip"
+    at_band_top = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0,
+                        predicted_min_soc=33.0)  # == comfort_low + hyst 3
+    assert at_band_top.action == "on"
+
+
+def test_cloudy_guard_band_holds_inflight_on_through_min_hold():
+    """Composition: a band 'skip' must pass through gate_min_hold
+    untouched, so an in-flight ON session keeps running (skip = hold
+    state, not a toggle)."""
+    plan = _eval(current_soc=75, predicted_sunrise=80.0, target=30.0,
+                 predicted_min_soc=31.5, now_ts=1_700_000_000.0)
+    assert plan.action == "skip"
+    held = solar_charge.gate_min_hold(
+        plan, last_toggle_ts=1_700_000_000.0 - 5.0,  # toggled 5s ago
+        min_hold_s=30, plug_state_before="on")
+    assert held.action == "skip"          # no OFF injected — plug stays on
+    assert "cloudy-tomorrow" in held.reason
 
 
 # ---------- Fail-closed safety paths ----------

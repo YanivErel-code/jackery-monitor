@@ -378,6 +378,10 @@ class Plan:
     surplus_w: float | None = None             # solar_w - load_w (net of plug)
     car_load_w: float | None = None            # configured assumption
     plug_state_before: str | None = None       # "on" | "off"
+    # Cloudy-tomorrow guard input: baseline forecast's minimum predicted
+    # SOC over the guard horizon. Surfaced for audit/backtest parity with
+    # the other gating inputs (not persisted to the decisions table).
+    predicted_min_soc_pct: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -397,6 +401,8 @@ def compute_plan(
     capacity_wh: float | None = None,
     hours_to_sunrise: float | None = None,
     household_load_w: float | None = None,
+    predicted_min_soc_pct: float | None = None,
+    guard_horizon_h: float = 36.0,
     now_ts: float | None = None,
 ) -> Plan:
     """Pure decision function. All inputs explicit; no globals read.
@@ -426,6 +432,19 @@ def compute_plan(
             no-op (back-compat). `household_load_w` is the live load with
             the EV charger EXCLUDED — i.e. what the battery would drain at
             if the plug were OFF right now.
+        predicted_min_soc_pct: the BASELINE (no-diversion) forecast's
+            MINIMUM predicted SOC over `guard_horizon_h` (through the
+            NEXT day's recharge, not just sunrise). Gates the
+            cloudy-tomorrow guard: the sunrise target alone approved an
+            evening car charge on 2026-07-12 assuming a sunny refill, and
+            the overcast 07-13 then dropped the pack to 20% by midday.
+            MUST come from the baseline trajectory — the with-diversion
+            simulator rides its trough down to its allocation floor
+            (target+margin+hyst) by design, which would false-block sunny
+            days. None → guard is a no-op (back-compat).
+        guard_horizon_h: hours the cloudy-tomorrow guard looks ahead;
+            audit/reason strings quote it, so keep it in sync with the
+            window the caller used to compute predicted_min_soc_pct.
         now_ts: clock injection for tests; defaults to time.time().
     """
     now = float(now_ts if now_ts is not None else time.time())
@@ -460,6 +479,7 @@ def compute_plan(
             surplus_w=(None if (solar_w is None or load_w is None)
                        else (solar_w - load_w)),
             car_load_w=car_load,
+            predicted_min_soc_pct=predicted_min_soc_pct,
         )
 
     if mode == "off":
@@ -533,6 +553,34 @@ def compute_plan(
                 f"would reach {reserve_at_sunrise:.0f}% by sunrise < "
                 f"target{target_sunrise_soc_pct:.0f}%+margin = {safe_sunrise_floor:.0f}%; "
                 f"diverting would eat the overnight reserve",
+            )
+
+    # Cloudy-tomorrow guard. The sunrise gate only protects the trough
+    # BEFORE the next solar ramp — it approved the 2026-07-12 evening car
+    # charge (sunrise landed at 36%, above target) and then the overcast
+    # 07-13 kept draining the pack to 20% by midday because the refill
+    # never came. Guard on the BASELINE forecast's MINIMUM over the
+    # extended horizon (through the next day's recharge): if the natural
+    # household trajectory dips below comfort_low, diverting now spends
+    # reserve the cloudy tomorrow needs. Same hysteresis pattern as the
+    # sunrise gate: hard OFF below comfort_low, a skip band above it so
+    # an in-flight session isn't flapped by forecast wobble.
+    if predicted_min_soc_pct is not None:
+        min_on_threshold = comfort_low + on_hysteresis_pp
+        if predicted_min_soc_pct < comfort_low:
+            return _plan(
+                "off",
+                f"cloudy-tomorrow guard: predicted {predicted_min_soc_pct:.1f}% "
+                f"trough within {guard_horizon_h:.0f}h < comfort_low "
+                f"{comfort_low:.0f}%; reserving for the next day's recharge",
+            )
+        if predicted_min_soc_pct < min_on_threshold:
+            return _plan(
+                "skip",
+                f"in cloudy-tomorrow hysteresis band: predicted "
+                f"{predicted_min_soc_pct:.1f}% trough within "
+                f"{guard_horizon_h:.0f}h in "
+                f"[{comfort_low:.0f}%, {min_on_threshold:.0f}%); holding state",
             )
 
     # Forecast-driven decision, gated by asymmetric SOC bands:

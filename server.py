@@ -115,6 +115,14 @@ FORECASTER_BREAKING_CHANGE_TS = int(
 # user has paused polling or the session is in contested cooldown.
 CLOUD_STALL_ALERT_S = 8 * 60
 
+# Cloudy-tomorrow guard horizon for solar_charge: how far ahead the
+# with-diversion forecast's minimum SOC must stay above comfort_low
+# before the controller is allowed to divert. 36h covers tonight + the
+# whole next day's recharge + into the following evening, so an evening
+# car-charge decision "sees" a forecast-cloudy tomorrow instead of
+# assuming a sunny refill.
+SC_GUARD_HORIZON_S = 36 * 3600
+
 # Per-browser "viewing this Jackery" preference. Independent of the bridge's
 # active-device (which the worker manages), so two browsers can look at
 # different Jackerys at the same time without stomping each other. Plain
@@ -2003,6 +2011,7 @@ async def _solar_charge_evaluate(record: bool = True,
     loc = device_location.get() or {}
     predicted_sunrise_baseline = None
     predicted_sunrise_with_div = None
+    predicted_min_baseline = None
     if loc.get("latitude"):
         try:
             weather = await weather_client.fetch_irradiance(
@@ -2082,6 +2091,33 @@ async def _solar_charge_evaluate(record: bool = True,
                               if (h.get("ts") or 0) >= time.time()]
                 sc_sunrise_ts = (smart_charge._find_next_sunrise(_bl_future)
                                  if _bl_future else None)
+                # Cloudy-tomorrow guard input: the BASELINE forecast's
+                # minimum predicted SOC through the NEXT day's recharge
+                # (~36h), not just sunrise. A sunny-refill assumption
+                # baked into the sunrise-only gate let the 07-12 evening
+                # car charge proceed ahead of an overcast 07-13 that
+                # drained the pack to 20% by midday.
+                #
+                # Deliberately the BASELINE (no-car) trajectory, NOT
+                # fcast_with_div: the with-div simulator by design rides
+                # its trough down to sim_floor (= target+margin+hyst,
+                # 33% at default target 25), which sits at/below the
+                # guard threshold — reading it would false-block sunny
+                # days (permanent lockout when target+margin <
+                # comfort_low). The natural household trajectory is the
+                # honest "is a cloudy sag coming?" signal, independent
+                # of the allocator's floor, and cannot be dragged down
+                # by the injected car load itself (no circular
+                # self-block).
+                _now = time.time()
+                _bl_window = [
+                    h.get("predicted_soc")
+                    for h in (fcast_baseline.get("forecast") or [])
+                    if _now <= (h.get("ts") or 0) <= _now + SC_GUARD_HORIZON_S
+                    and h.get("predicted_soc") is not None
+                ]
+                predicted_min_baseline = (min(_bl_window)
+                                          if _bl_window else None)
         except Exception as e:
             log.debug("solar_charge forecast fetch failed: %s", e)
 
@@ -2189,6 +2225,8 @@ async def _solar_charge_evaluate(record: bool = True,
             hours_to_sunrise=(max(0.0, (sc_sunrise_ts - now_ts) / 3600.0)
                               if sc_sunrise_ts else None),
             household_load_w=household_load_w,
+            predicted_min_soc_pct=predicted_min_baseline,
+            guard_horizon_h=SC_GUARD_HORIZON_S / 3600.0,
         )
         plan = solar_charge.gate_min_hold(
             plan,
