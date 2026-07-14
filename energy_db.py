@@ -644,6 +644,53 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         return [self.totals(d["device_sn"]) | {"name": d["name"]}
                 for d in self.list_devices()]
 
+    def daily_rollup(self, device_sn: str, days: int = 90,
+                     tz_offset_s: int = 0) -> list[dict]:
+        """Per-LOCAL-day energy rollups for the Energy tab's daily view
+        (served by /api/energy/daily). One GROUP BY over `samples` keyed
+        on date(bucket + tz_offset_s, 'unixepoch') — shifting the epoch
+        by the user's UTC offset before taking the date is what makes a
+        23:30 local bucket land on the local day instead of the next UTC
+        day; without it every evening's solar tail would bleed into
+        tomorrow's bar. Records (peak solar day, peak consumption day,
+        etc.) are computed CLIENT-side from this payload, so peaks and
+        SOC extremes ride along per row — no second query. kWh values
+        are rounded to 2dp (the UI shows 2dp anyway; rounding here keeps
+        the payload compact over 365 rows). MIN/MAX of last_battery_pct
+        ignore NULLs naturally in SQLite; all-NULL days return None."""
+        since = int(time.time()) - int(days) * 86400
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT date(bucket + ?, 'unixepoch') AS d,
+                          COALESCE(SUM(solar_wh), 0) AS sol_wh,
+                          COALESCE(SUM(output_wh), 0) AS out_wh,
+                          COALESCE(SUM(input_wh), 0) AS in_wh,
+                          COALESCE(SUM(ac_input_wh), 0) AS ac_wh,
+                          COALESCE(SUM(solar_charge_diverted_wh), 0) AS div_wh,
+                          MAX(last_solar_w) AS peak_sol_w,
+                          MAX(last_output_w) AS peak_out_w,
+                          MIN(last_battery_pct) AS min_soc,
+                          MAX(last_battery_pct) AS max_soc
+                     FROM samples
+                    WHERE device_sn = ? AND bucket >= ?
+                    GROUP BY d
+                    ORDER BY d ASC""",
+                (int(tz_offset_s), device_sn, since),
+            ).fetchall()
+        return [
+            {"date": r[0],
+             "solar_kwh": round(r[1] / 1000.0, 2),
+             "consumed_kwh": round(r[2] / 1000.0, 2),
+             "charged_kwh": round(r[3] / 1000.0, 2),
+             "grid_kwh": round(r[4] / 1000.0, 2),
+             "diverted_kwh": round(r[5] / 1000.0, 2),
+             "peak_solar_w": int(r[6] or 0),
+             "peak_output_w": int(r[7] or 0),
+             "min_soc": int(r[8]) if r[8] is not None else None,
+             "max_soc": int(r[9]) if r[9] is not None else None}
+            for r in rows
+        ]
+
     def _packs_in_target_range(self, c, device_sn: str,
                                rows: list,
                                main_wh: int | None,

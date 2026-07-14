@@ -173,6 +173,97 @@ def test_weather_forecast_replace_and_get(db):
     assert db.get_weather_forecast(since_ts=now + 20000) == ([], 0)
 
 
+def _put_sample(db, sn, bucket, *, input_wh=0.0, output_wh=0.0, solar_wh=0.0,
+                ac_input_wh=0.0, diverted_wh=0.0, solar_w=0, output_w=0,
+                pct=None):
+    """Raw bucket insert (record()'s gap guard drops sparse synthetic
+    samples — same pattern as test_last_battery_full_ts, extended with
+    the energy columns daily_rollup aggregates)."""
+    with db._conn() as c:
+        c.execute(
+            """INSERT OR REPLACE INTO samples
+                   (device_sn, bucket, input_wh, output_wh, solar_wh,
+                    ac_input_wh, solar_charge_diverted_wh,
+                    last_input_w, last_output_w, last_solar_w,
+                    last_ac_input_w, last_battery_pct, sample_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, 1)""",
+            (sn, bucket, input_wh, output_wh, solar_wh, ac_input_wh,
+             diverted_wh, output_w, solar_w, pct))
+
+
+def test_daily_rollup_multi_day_values(db):
+    sn = "TEST-DAILY"
+    db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")
+    now = int(time.time())
+    day0 = (now // 86400) * 86400          # start of today, UTC (tz=0)
+    day_a = day0 - 86400                   # yesterday
+    # Yesterday: two buckets that must merge into one row.
+    _put_sample(db, sn, day_a + 3600, input_wh=1000, output_wh=2000,
+                solar_wh=1500, ac_input_wh=500, diverted_wh=100,
+                solar_w=1200, output_w=800, pct=40)
+    _put_sample(db, sn, day_a + 7200, input_wh=200, output_wh=1000,
+                solar_wh=500, diverted_wh=50,
+                solar_w=3618, output_w=500, pct=90)
+    # Today: one bucket with NULL soc (min/max must stay None).
+    _put_sample(db, sn, day0 + 60, output_wh=111, solar_wh=333)
+
+    rows = db.daily_rollup(sn, days=7, tz_offset_s=0)
+    assert len(rows) == 2
+    a, b = rows                            # oldest -> newest
+    assert a["date"] < b["date"]
+    assert a == {"date": a["date"], "solar_kwh": 2.0, "consumed_kwh": 3.0,
+                 "charged_kwh": 1.2, "grid_kwh": 0.5, "diverted_kwh": 0.15,
+                 "peak_solar_w": 3618, "peak_output_w": 800,
+                 "min_soc": 40, "max_soc": 90}
+    assert b["solar_kwh"] == 0.33 and b["consumed_kwh"] == 0.11
+    assert b["min_soc"] is None and b["max_soc"] is None
+    assert b["peak_solar_w"] == 0 and b["peak_output_w"] == 0
+
+
+def test_daily_rollup_local_day_boundary(db):
+    # A bucket at 23:30 LOCAL (UTC-7 -> 06:30 UTC the next day) must land
+    # on the local date, not the UTC date.
+    sn = "TEST-DAILY-TZ"
+    db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")
+    tz = -25200
+    now = int(time.time())
+    local_day = ((now + tz) // 86400) - 1  # yesterday, local
+    bucket = (local_day * 86400 + 23 * 3600 + 30 * 60) - tz  # 23:30 local
+    _put_sample(db, sn, bucket, solar_wh=1000, pct=50)
+
+    from datetime import datetime, timezone
+    local_date = datetime.fromtimestamp(
+        local_day * 86400, tz=timezone.utc).strftime("%Y-%m-%d")
+    utc_date = datetime.fromtimestamp(
+        bucket, tz=timezone.utc).strftime("%Y-%m-%d")
+    assert utc_date != local_date          # boundary actually straddled
+
+    rows = db.daily_rollup(sn, days=7, tz_offset_s=tz)
+    assert len(rows) == 1
+    assert rows[0]["date"] == local_date
+    assert rows[0]["solar_kwh"] == 1.0
+
+
+def test_daily_rollup_days_bound_excludes_old_rows(db):
+    sn = "TEST-DAILY-BOUND"
+    db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")
+    now = int(time.time())
+    old_bucket = ((now - 10 * 86400) // 60) * 60
+    recent_bucket = ((now - 3600) // 60) * 60
+    _put_sample(db, sn, old_bucket, solar_wh=5000, pct=10)
+    _put_sample(db, sn, recent_bucket, solar_wh=250, pct=60)
+
+    rows = db.daily_rollup(sn, days=5, tz_offset_s=0)
+    assert len(rows) == 1
+    assert rows[0]["solar_kwh"] == 0.25
+    # Widening the window brings the old day back.
+    assert len(db.daily_rollup(sn, days=30, tz_offset_s=0)) == 2
+
+
+def test_daily_rollup_empty_device(db):
+    assert db.daily_rollup("TEST-DAILY-NONE") == []
+
+
 def test_history_omits_plug_on_frac_when_no_decisions(db):
     # Buckets with no decision coverage must not carry the field — the
     # forecaster then falls back to raw output / recorded diverted_wh.

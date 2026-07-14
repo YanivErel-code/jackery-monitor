@@ -29,6 +29,7 @@ let lastStatus = null;
 let lastDevices = [];
 let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
+let energyDailyCache = null;   // last /api/energy/daily payload (365d, per device)
 let forecastCache = null;     // last /api/forecast response
 let activeTab = 'live';
 
@@ -408,7 +409,7 @@ function switchTab(name, opts = {}) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.toggleAttribute('hidden', p.id !== `tab-${name}`));
   if (name === 'live')     { drawLiveChart(lastStatus); }
-  if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); }
+  if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); fetchEnergyDaily(); }
   if (name === 'forecast') { fetchForecast(); }
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadAIProvider(); loadOpenAIKeyStatus(); loadOpenAIModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
   if (name === 'logs')     { loadLogs(); }
@@ -3826,6 +3827,11 @@ function applyStatus(s) {
       forecastCache = null;
       fetchForecast();
     }
+    // Daily table/records are per-device — drop the old cache so a CSV
+    // export can't carry the previous device's data, and refresh in
+    // place if the Energy tab is what the user is looking at.
+    energyDailyCache = null;
+    if (activeTab === 'energy') fetchEnergyDaily();
     fetchEodForecast();
     // Pack list is per-device — drop the previous device's cache so we
     // don't briefly show the old packs while the new fetch is in flight.
@@ -4470,6 +4476,240 @@ async function fetchEnergyAllDevices() {
     }
   } catch (e) { console.warn('energy devices fetch failed', e); }
 }
+
+// ============================================================
+// ENERGY DAILY BREAKDOWN + RECORDS
+// One /api/energy/daily?days=365 fetch per tab-open, cached per
+// device (energyDailyCache). Range picker / search / column sort
+// all re-render client-side from that cache — no refetch.
+// ============================================================
+let energyDailyDays = 90;                            // table range (client-side slice)
+let energyDailySort = { key: 'date', dir: 'desc' };  // default: newest first
+let energyDailySearch = '';
+let _energyDailyRetries = 0;
+
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// "2026-07-13" -> "Jul 13". String parse (no Date()) so the browser's
+// timezone can't shift the local-day bucket the server computed.
+function fmtDayShort(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!m) return String(iso || '');
+  return `${MONTHS_SHORT[Number(m[2]) - 1] || m[2]} ${Number(m[3])}`;
+}
+
+// Today's YYYY-MM-DD in the DEVICE's local tz (endpoint reports tz_offset_s).
+function energyDailyToday() {
+  const off = Number(energyDailyCache?.tz_offset_s) || 0;
+  return new Date(Date.now() + off * 1000).toISOString().slice(0, 10);
+}
+
+async function fetchEnergyDaily() {
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) {
+    // The tab can open before the first WS status delivers the device
+    // list — retry briefly while the Energy tab is still in front.
+    if (activeTab === 'energy' && _energyDailyRetries < 5) {
+      _energyDailyRetries++;
+      setTimeout(fetchEnergyDaily, 1200);
+    }
+    return;
+  }
+  _energyDailyRetries = 0;
+  // Serve from cache only while it's fresh — the daily rollup changes as
+  // the day accrues, so a long-lived dashboard refetches on tab open
+  // rather than freezing the Records card at first render.
+  const cacheFresh = energyDailyCache
+    && energyDailyCache.device_sn === deviceSn
+    && (Date.now() - (energyDailyCache._fetched_at || 0)) < 10 * 60 * 1000;
+  if (cacheFresh) {
+    renderEnergyRecords();
+    renderEnergyDailyTable();
+    return;
+  }
+  try {
+    const r = await fetch(`/api/energy/daily?device_sn=${encodeURIComponent(deviceSn)}&days=365`);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!Array.isArray(j.daily)) return;
+    j._fetched_at = Date.now();
+    energyDailyCache = j;
+    renderEnergyRecords();
+    renderEnergyDailyTable();
+  } catch (e) { console.warn('energy daily fetch failed', e); }
+}
+
+// Day entry with the highest strictly-positive `key`, or null. Used for
+// both the Records tiles and the record-row highlights in the table.
+function _maxDay(daily, key) {
+  let best = null;
+  for (const d of daily) {
+    const v = Number(d[key]);
+    if (!Number.isFinite(v) || v <= 0) continue;
+    if (!best || v > Number(best[key])) best = d;
+  }
+  return best;
+}
+
+function renderEnergyRecords() {
+  const grid = $('energy-records-grid');
+  const card = $('energy-records');
+  if (!grid || !card) return;
+  const daily = energyDailyCache?.daily || [];
+  if (!daily.length) { show(card, false); return; }
+
+  const tiles = [];
+  const addRecord = (label, key) => {
+    const day = _maxDay(daily, key);
+    if (!day) return;
+    tiles.push({ label, value: Number(day[key]).toFixed(2), sub: fmtDayShort(day.date) });
+  };
+  addRecord('Peak solar day',       'solar_kwh');
+  addRecord('Peak consumption day', 'consumed_kwh');
+  addRecord('Peak grid day',        'grid_kwh');
+  addRecord('Best diversion day',   'diverted_kwh');
+
+  // 30-day daily averages (most recent 30 local-day buckets).
+  const last30 = daily.slice(-30);
+  const avg = (key) =>
+    last30.reduce((s, d) => s + (Number(d[key]) || 0), 0) / (last30.length || 1);
+  tiles.push({ label: 'Avg solar/day',    value: avg('solar_kwh').toFixed(2),    sub: 'last 30 days' });
+  tiles.push({ label: 'Avg consumed/day', value: avg('consumed_kwh').toFixed(2), sub: 'last 30 days' });
+
+  grid.innerHTML = tiles.map((t) => `
+    <div class="energy-record">
+      <div class="kpi-sub rec-label">${escapeHtml(t.label)}</div>
+      <div class="kpi-value">${escapeHtml(t.value)}<small>kWh</small></div>
+      <div class="kpi-sub">${escapeHtml(t.sub)}</div>
+    </div>`).join('');
+  show(card, true);
+}
+
+// kWh cell: 0 / null renders as an em dash so real energy pops.
+function _kwhCell(v) {
+  const n = Number(v);
+  return (!Number.isFinite(n) || n === 0) ? '—' : n.toFixed(2);
+}
+
+function _wattsCell(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? String(Math.round(n)) : '—';
+}
+
+// Range slice + search filter + sort over the cached 365d payload.
+// Search matches the ISO date AND the human "Jul 13" form (case-insensitive).
+function _energyDailyRows() {
+  const daily = energyDailyCache?.daily || [];
+  let rows = daily.slice(-energyDailyDays);   // payload is oldest -> newest
+  const q = energyDailySearch.trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((d) =>
+      String(d.date || '').toLowerCase().includes(q) ||
+      fmtDayShort(d.date).toLowerCase().includes(q));
+  }
+  const { key, dir } = energyDailySort;
+  const sign = dir === 'asc' ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    if (key === 'date') return sign * String(a.date).localeCompare(String(b.date));
+    // Explicit null check first: Number(null) === 0, which would sort
+    // missing values mid-list instead of last.
+    const av = a[key], bv = b[key];
+    const an = (av == null || !Number.isFinite(Number(av))) ? -Infinity : Number(av);
+    const bn = (bv == null || !Number.isFinite(Number(bv))) ? -Infinity : Number(bv);
+    if (an !== bn) return sign * (an - bn);
+    return String(b.date).localeCompare(String(a.date)); // deterministic tiebreak
+  });
+}
+
+function renderEnergyDailyTable() {
+  const body = $('energy-daily-body');
+  const card = $('energy-daily');
+  if (!body || !card) return;
+  const daily = energyDailyCache?.daily || [];
+  if (!daily.length) { show(card, false); return; }
+
+  const rows = _energyDailyRows();
+  const today = energyDailyToday();
+  // Record highlights are computed on the FULL payload, not the visible
+  // slice, so a record day is marked in every range that contains it.
+  const peakSolarDate = _maxDay(daily, 'solar_kwh')?.date;
+  const peakLoadDate  = _maxDay(daily, 'consumed_kwh')?.date;
+
+  body.innerHTML = rows.map((d) => {
+    const cls = [
+      d.date === peakSolarDate && 'record-solar',
+      d.date === peakLoadDate  && 'record-load',
+    ].filter(Boolean).join(' ');
+    const soc = (d.min_soc != null && d.max_soc != null)
+      ? `${escapeHtml(d.min_soc)}–${escapeHtml(d.max_soc)}%` : '—';
+    const badge = d.date === today ? ' <span class="today-badge">today</span>' : '';
+    return `
+      <tr${cls ? ` class="${cls}"` : ''}>
+        <td title="${escapeHtml(d.date)}">${escapeHtml(fmtDayShort(d.date))}${badge}</td>
+        <td class="num">${_kwhCell(d.solar_kwh)}</td>
+        <td class="num">${_kwhCell(d.consumed_kwh)}</td>
+        <td class="num">${_kwhCell(d.charged_kwh)}</td>
+        <td class="num">${_kwhCell(d.grid_kwh)}</td>
+        <td class="num">${_kwhCell(d.diverted_kwh)}</td>
+        <td class="num">${_wattsCell(d.peak_solar_w)}</td>
+        <td class="num">${_wattsCell(d.peak_output_w)}</td>
+        <td class="num">${soc}</td>
+      </tr>`;
+  }).join('');
+  show($('energy-daily-empty'), rows.length === 0);
+  show(card, true);
+}
+
+// ---- Daily breakdown controls (static DOM, bound once at load) ----
+document.querySelectorAll('.drange-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.drange-btn').forEach((b) => b.classList.toggle('on', b === btn));
+    energyDailyDays = parseInt(btn.dataset.days, 10) || 90;
+    renderEnergyDailyTable();
+  });
+});
+
+document.querySelectorAll('.daily-table th.sortable').forEach((th) => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (energyDailySort.key === key) {
+      energyDailySort.dir = energyDailySort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      energyDailySort = { key, dir: 'desc' };  // new column: biggest/newest first
+    }
+    document.querySelectorAll('.daily-table th.sortable').forEach((t) => {
+      t.classList.toggle('sort-asc',  t === th && energyDailySort.dir === 'asc');
+      t.classList.toggle('sort-desc', t === th && energyDailySort.dir === 'desc');
+    });
+    renderEnergyDailyTable();
+  });
+});
+
+$('energy-daily-search')?.addEventListener('input', (e) => {
+  energyDailySearch = e.target.value || '';
+  renderEnergyDailyTable();
+});
+
+// Export the CURRENTLY FILTERED rows (range + search + sort applied).
+$('energy-daily-export')?.addEventListener('click', () => {
+  if (!energyDailyCache) return;
+  const cols = ['date', 'solar_kwh', 'consumed_kwh', 'charged_kwh', 'grid_kwh',
+                'diverted_kwh', 'peak_solar_w', 'peak_output_w', 'min_soc', 'max_soc'];
+  const lines = [cols.join(',')];
+  for (const d of _energyDailyRows()) {
+    lines.push(cols.map((c) => (d[c] == null ? '' : String(d[c]))).join(','));
+  }
+  const sn = String(energyDailyCache.device_sn || 'device').replace(/[^A-Za-z0-9._-]/g, '_');
+  const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `energy-daily-${sn}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
 
 // ============================================================
 // CHART RENDERERS (canvas, no deps)

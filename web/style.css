@@ -2594,3 +2594,95 @@ footer {
 @media (max-width: 600px) {
   .acc-summary { grid-template-columns: 1fr; }
 }
+
+/* ============== Energy: Records + Daily breakdown ============== */
+.energy-records-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 16px;
+}
+.energy-record .kpi-value { font-size: 22px; }
+.energy-record .rec-label {
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-size: 10px;
+  color: var(--text-mute);
+  margin-bottom: 4px;
+}
+
+/* Header controls: range picker + search + export on one wrapping row. */
+.daily-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.daily-search {
+  padding: 6px 10px;
+  width: 170px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .15s, background .15s;
+}
+.daily-search:focus { border-color: var(--accent); }
+.daily-search::placeholder { color: var(--text-mute); }
+
+/* Same look as .range-btn, but a separate class so the energy-history
+   chart's global .range-btn click handler can't grab these buttons. */
+.drange-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  transition: background .15s, color .15s;
+}
+.drange-btn:hover { color: var(--text); }
+.drange-btn.on { background: var(--accent); color: #032012; }
+
+/* Mobile: the table scrolls inside its wrapper, never the page.
+   Vertical cap + sticky header keep a year of rows navigable. */
+.table-scroll {
+  overflow: auto;
+  max-height: 480px;
+  border-radius: var(--radius-sm);
+}
+.table-scroll .data-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  z-index: 1;
+}
+.daily-table th, .daily-table td { white-space: nowrap; }
+.daily-table th.num, .daily-table td.num { text-align: right; }
+.daily-table th.sortable { cursor: pointer; user-select: none; }
+.daily-table th.sortable:hover { color: var(--text); }
+.daily-table th.sortable::after { content: ""; display: inline-block; width: 12px; }
+.daily-table th.sortable.sort-asc::after  { content: " ▲"; color: var(--accent); width: auto; }
+.daily-table th.sortable.sort-desc::after { content: " ▼"; color: var(--accent); width: auto; }
+
+/* Record rows: subtle colored left edge (inset shadow = no layout shift).
+   Gold for the peak-solar day, red for the peak-consumption day. */
+.daily-table tr.record-solar td:first-child { box-shadow: inset 3px 0 0 var(--accent-3); }
+.daily-table tr.record-load  td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.daily-table tr.record-solar.record-load td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-3), inset 6px 0 0 var(--danger);
+}
+
+.today-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: 1px;
+}

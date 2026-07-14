@@ -329,3 +329,50 @@ def test_review_now_requires_device(client):
 def test_unknown_route_returns_404(client):
     r = client.get("/api/totally/made/up")
     assert r.status_code == 404
+
+
+# ---------- energy daily rollup ----------
+
+def test_energy_daily_route_shape_and_clamp(app, client):
+    """/api/energy/daily: contract shape, days clamp, and per-device
+    resolution. DB-level rollup math is covered in test_energy_db; this
+    is the route-layer regression the integration review flagged."""
+    sn = "TEST-DAILY-RT"
+    app.state.energy.upsert_device(sn, "Rig", 13, "Explorer 5000 Plus")
+    bucket = (int(__import__("time").time()) - 3600) // 60 * 60
+    with app.state.energy._conn() as c:
+        c.execute(
+            """INSERT OR REPLACE INTO samples
+                   (device_sn, bucket, solar_wh, output_wh, input_wh,
+                    ac_input_wh, solar_charge_diverted_wh,
+                    last_solar_w, last_output_w, last_battery_pct,
+                    sample_count)
+               VALUES (?, ?, 1500, 800, 900, 200, 100, 3200, 1900, 42, 1)""",
+            (sn, bucket))
+
+    r = client.get(f"/api/energy/daily?device_sn={sn}&days=9999")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["device_sn"] == sn
+    assert j["days"] == 365                      # clamped
+    assert isinstance(j["tz_offset_s"], int)
+    assert len(j["daily"]) == 1
+    row = j["daily"][0]
+    assert set(row) == {"date", "solar_kwh", "consumed_kwh", "charged_kwh",
+                        "grid_kwh", "diverted_kwh", "peak_solar_w",
+                        "peak_output_w", "min_soc", "max_soc"}
+    assert row["solar_kwh"] == 1.5
+    assert row["peak_output_w"] == 1900
+    assert row["min_soc"] == 42 and row["max_soc"] == 42
+
+    # Unknown device -> empty, not an error.
+    r2 = client.get("/api/energy/daily?device_sn=NOPE")
+    assert r2.status_code == 200 and r2.json()["daily"] == []
+
+
+def test_energy_daily_requires_auth(unauth_client):
+    unauth_client.post("/api/auth/setup",
+                       json={"username": "u", "password": "p" * 12})
+    unauth_client.post("/api/auth/logout")
+    r = unauth_client.get("/api/energy/daily")
+    assert r.status_code == 401

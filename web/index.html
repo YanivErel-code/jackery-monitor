@@ -388,6 +388,54 @@
           <tbody id="energy-devices-body"></tbody>
         </table>
       </section>
+
+      <!-- Records: client-side stats computed from /api/energy/daily (365d).
+           Hidden until the payload arrives so a missing/failed endpoint
+           doesn't leave an empty card on screen. -->
+      <section id="energy-records" class="card" hidden>
+        <div class="card-header">
+          <h2>Records</h2>
+        </div>
+        <div id="energy-records-grid" class="energy-records-grid"></div>
+      </section>
+
+      <!-- Daily breakdown: sortable/filterable per-day table from the same
+           cached 365d payload; range filtering is client-side (no refetch). -->
+      <section id="energy-daily" class="card" hidden>
+        <div class="card-header">
+          <h2>Daily breakdown</h2>
+          <div class="daily-controls">
+            <div class="range-picker" role="tablist">
+              <button type="button" class="drange-btn"    data-days="30">30d</button>
+              <button type="button" class="drange-btn on" data-days="90">90d</button>
+              <button type="button" class="drange-btn"    data-days="180">180d</button>
+              <button type="button" class="drange-btn"    data-days="365">365d</button>
+            </div>
+            <input id="energy-daily-search" class="daily-search" type="search"
+                   placeholder="filter: 2026-07, Jul…" autocomplete="off" spellcheck="false" />
+            <button id="energy-daily-export" type="button" class="btn btn-small">Export CSV</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table daily-table">
+            <thead>
+              <tr>
+                <th class="sortable sort-desc" data-sort="date">Date</th>
+                <th class="sortable num" data-sort="solar_kwh">Solar kWh</th>
+                <th class="sortable num" data-sort="consumed_kwh">Consumed kWh</th>
+                <th class="sortable num" data-sort="charged_kwh">Charged kWh</th>
+                <th class="sortable num" data-sort="grid_kwh">Grid kWh</th>
+                <th class="sortable num" data-sort="diverted_kwh">Car kWh</th>
+                <th class="sortable num" data-sort="peak_solar_w">Peak solar W</th>
+                <th class="sortable num" data-sort="peak_output_w">Peak load W</th>
+                <th class="sortable num" data-sort="min_soc">SOC min–max</th>
+              </tr>
+            </thead>
+            <tbody id="energy-daily-body"></tbody>
+          </table>
+        </div>
+        <p id="energy-daily-empty" class="hint" hidden>No matching days.</p>
+      </section>
     </section>
 
     <!-- ============== FORECAST TAB ============== -->

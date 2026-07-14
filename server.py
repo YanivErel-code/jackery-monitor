@@ -3062,6 +3062,26 @@ def api_energy_devices():
     return {"devices": state.energy.all_totals()}
 
 
+@app.get("/api/energy/daily")
+def api_energy_daily(device_sn: str | None = None, days: int = 90):
+    """Per-local-day energy rollups for the Energy tab's daily view.
+       days: window length in days, clamped to [1, 365] (default 90).
+       Records (peak solar day, etc.) are computed client-side."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        return {"device_sn": None, "days": 0, "tz_offset_s": 0, "daily": []}
+    days = max(1, min(days, 365))
+    tz_offset_s = int(device_location.get_tz_offset() or 0)
+    return {
+        "device_sn": device_sn,
+        "days": days,
+        "tz_offset_s": tz_offset_s,
+        "daily": state.energy.daily_rollup(device_sn, days=days,
+                                           tz_offset_s=tz_offset_s),
+    }
+
+
 async def _build_and_record_forecast(device_sn: str | None) -> dict:
     """Resolve per-device context (model_code, current SOC, capacity)
     and build a forecast, persisting the resulting predictions to
