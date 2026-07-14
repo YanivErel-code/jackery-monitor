@@ -227,6 +227,59 @@ def test_cloudy_guard_band_holds_inflight_on_through_min_hold():
     assert "cloudy-tomorrow" in held.reason
 
 
+# ---------- Pack-balance window ----------
+def test_balance_due_blocks_diversion_despite_perfect_conditions():
+    """Every 60 days the packs need a genuine full charge to balance:
+    with balance_due, the car gets nothing even when every other gate
+    would say ON (great forecast, high SOC, daytime surplus)."""
+    plan = solar_charge.compute_plan(
+        config=_cfg(), current_soc_pct=85,
+        solar_w=3000.0, load_w=450.0, ac_input_w=0.0,
+        telemetry_age_s=10.0, target_sunrise_soc_pct=30.0,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        balance_due=True, days_since_full=61.0,
+        now_ts=1_700_000_000.0,
+    )
+    assert plan.action == "off"
+    assert "pack-balance" in plan.reason
+    assert "61d" in plan.reason
+
+
+def test_balance_due_reports_never_full():
+    plan = solar_charge.compute_plan(
+        config=_cfg(), current_soc_pct=85,
+        solar_w=3000.0, load_w=450.0, ac_input_w=0.0,
+        telemetry_age_s=10.0, target_sunrise_soc_pct=30.0,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        balance_due=True, days_since_full=None,
+        now_ts=1_700_000_000.0,
+    )
+    assert plan.action == "off"
+    assert "no full charge on record" in plan.reason
+
+
+def test_balance_not_due_is_noop():
+    """balance_due=False (default) leaves the normal gates in charge."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0)
+    assert plan.action == "on"
+
+
+def test_balance_config_validates():
+    cfg = solar_charge._validate_config(
+        {**solar_charge.DEFAULT_CONFIG,
+         "balance_every_days": 90, "balance_target_main_pct": 98})
+    assert cfg["balance_every_days"] == 90
+    assert cfg["balance_target_main_pct"] == 98
+    # Out-of-range falls back to defaults.
+    cfg = solar_charge._validate_config(
+        {**solar_charge.DEFAULT_CONFIG,
+         "balance_every_days": 9999, "balance_target_main_pct": 10})
+    assert cfg["balance_every_days"] == solar_charge.DEFAULT_CONFIG["balance_every_days"]
+    assert cfg["balance_target_main_pct"] == solar_charge.DEFAULT_CONFIG["balance_target_main_pct"]
+
+
 # ---------- Fail-closed safety paths ----------
 def test_off_on_stale_telemetry():
     plan = _eval(current_soc=80, predicted_sunrise=80.0, telemetry_age=120)

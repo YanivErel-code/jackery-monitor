@@ -716,6 +716,24 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             for r in rows
         ]
 
+    def last_battery_full_ts(self, device_sn: str, full_pct: int = 100,
+                             lookback_days: int = 365) -> int | None:
+        """Most recent sample bucket where the MAIN unit reported at
+        least `full_pct` percent. Drives the pack-balance scheduler:
+        older than balance_every_days (or absent) → the solar-charge
+        controller holds diversion OFF so surplus can push the rig to a
+        genuine full charge. Bounded lookback keeps the scan cheap on
+        the (device_sn, bucket) index."""
+        since = int(time.time()) - int(lookback_days) * 86400
+        with self._conn() as c:
+            r = c.execute(
+                """SELECT MAX(bucket) FROM samples
+                    WHERE device_sn = ? AND bucket >= ?
+                      AND last_battery_pct >= ?""",
+                (device_sn, since, int(full_pct)),
+            ).fetchone()
+        return int(r[0]) if r and r[0] is not None else None
+
     # ---------- last-good weather forecast (future hours) ----------
     def replace_weather_forecast(self, rows: list[dict], fetched_at: int) -> int:
         """Store the latest forecast (future hourly GHI + cloud), replacing

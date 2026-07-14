@@ -147,6 +147,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # diversion itself, so blocking would be wrong). Default 800W
     # leaves comfortable headroom under the 2100W trip threshold.
     "max_system_load_w": 800,
+    # Pack balancing: the BMS balances the expansion packs only when the
+    # rig is held at a genuine full charge, so once every
+    # `balance_every_days` the controller stops diverting to the car and
+    # lets surplus solar drive the MAIN unit to
+    # `balance_target_main_pct`. The window opens when the last
+    # main>=target telemetry sample is older than the interval and
+    # closes the moment main reports the target again (derived from
+    # telemetry history — no extra state file). 0 disables.
+    "balance_every_days": 60,
+    "balance_target_main_pct": 100,
 }
 
 # When solar drops below this for SUNSET_SUSTAIN_S seconds, treat it as
@@ -212,6 +222,8 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     _int_in_range("inverter_protect_load_w", 500, 4500)
     _int_in_range("inverter_protect_cooldown_s", 60, 86400)
     _int_in_range("max_system_load_w", 100, 4500)
+    _int_in_range("balance_every_days", 0, 365)   # 0 = disabled
+    _int_in_range("balance_target_main_pct", 80, 100)
     # Defensive sanity: comfort_low must be < comfort_high or we'd
     # paint an unreachable state (plug can never be on).
     if out["comfort_low_pct"] >= out["comfort_high_pct"]:
@@ -403,6 +415,8 @@ def compute_plan(
     household_load_w: float | None = None,
     predicted_min_soc_pct: float | None = None,
     guard_horizon_h: float = 36.0,
+    balance_due: bool = False,
+    days_since_full: float | None = None,
     now_ts: float | None = None,
 ) -> Plan:
     """Pure decision function. All inputs explicit; no globals read.
@@ -505,6 +519,28 @@ def compute_plan(
             f"grid charging active ({ac_input_w:.0f}W AC input ≥ "
             f"{AC_INPUT_GRID_CHARGE_THRESHOLD_W:.0f}W); yielding to avoid "
             f"inverter overdraw",
+        )
+
+    # Pack-balance window: the BMS balances the expansion packs only at
+    # a genuine full charge, so once every balance_every_days the car
+    # gets nothing — every surplus watt goes to driving the main unit to
+    # balance_target_main_pct. The server flips balance_due back off the
+    # moment main reports the target, so diversion resumes automatically.
+    # Placed above the forecast gates: a balance hold applies even when
+    # the forecast is down, and it must also stop an in-flight session.
+    if balance_due:
+        bal_days = int(config.get("balance_every_days")
+                       or DEFAULT_CONFIG["balance_every_days"])
+        bal_target = int(config.get("balance_target_main_pct")
+                         or DEFAULT_CONFIG["balance_target_main_pct"])
+        since_txt = (f"{days_since_full:.0f}d since last full charge"
+                     if days_since_full is not None
+                     else "no full charge on record")
+        return _plan(
+            "off",
+            f"pack-balance window: {since_txt} (interval {bal_days}d) — "
+            f"diversion held OFF so surplus drives main to {bal_target}% "
+            f"and the BMS can balance the packs",
         )
 
     if predicted_sunrise_soc_with_diversion is None:

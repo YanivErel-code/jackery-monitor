@@ -125,6 +125,37 @@ def test_history_computes_plug_on_frac_from_decisions(db):
     assert row["solar_charge_plug_on_frac"] == pytest.approx(0.75)
 
 
+def test_last_battery_full_ts(db):
+    """Exercises the scheduler query directly (raw bucket inserts —
+    record()'s gap guard drops sparse synthetic samples)."""
+    sn = "TEST-BAL"
+    db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")
+    now = int(time.time())
+    full_t = (now - 2 * 86400) // 60 * 60
+
+    def put(bucket, pct):
+        with db._conn() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO samples
+                       (device_sn, bucket, last_battery_pct, sample_count)
+                   VALUES (?, ?, ?, 1)""", (sn, bucket, pct))
+
+    put(full_t, 100)
+    put(full_t + 60, 100)
+    put((now - 3600) // 60 * 60, 50)
+    got = db.last_battery_full_ts(sn, full_pct=100)
+    assert got == full_t + 60                  # newest >=100 bucket
+    # 99% must not count as full at full_pct=100...
+    put((now - 1800) // 60 * 60, 99)
+    assert db.last_battery_full_ts(sn, full_pct=100) == full_t + 60
+    # ...but does at full_pct=99.
+    assert db.last_battery_full_ts(sn, full_pct=99) == (now - 1800) // 60 * 60
+    # Outside the bounded lookback -> None.
+    assert db.last_battery_full_ts(sn, full_pct=100, lookback_days=1) is None
+    # Unknown device -> None.
+    assert db.last_battery_full_ts("NOPE") is None
+
+
 def test_weather_forecast_replace_and_get(db):
     now = int(time.time())
     rows = [{"ts": now + 3600, "ghi_w_m2": 500.0, "cloud_cover_pct": 10.0},

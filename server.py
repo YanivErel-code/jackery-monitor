@@ -1929,6 +1929,40 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
 
 # ---------- Solar-charge (inverse controller: Jackery → car) ----------
 _PLUG_POWER_FRESH_S = 90.0           # accept cached plug_power_w up to 90s old
+# Pack-balance scheduler cache: {device_sn: (checked_at, last_full_ts)}.
+# The DB lookup is bounded but there's no need to run it every 30s tick;
+# refresh every 5 min, and stamp completion instantly when a live main
+# reading hits the target so diversion resumes without waiting a tick.
+_BALANCE_LAST_FULL: dict[str, tuple[float, int | None]] = {}
+_BALANCE_CACHE_TTL_S = 300.0
+
+
+def _balance_due_for(device_sn: str, cfg: dict, main_soc: float | None):
+    """Returns (balance_due, days_since_full) for the pack-balance gate."""
+    bal_days = int(cfg.get("balance_every_days") or 0)
+    if bal_days <= 0:
+        return False, None
+    target_pct = int(cfg.get("balance_target_main_pct") or 100)
+    now = time.time()
+    if main_soc is not None and float(main_soc) >= target_pct:
+        # Live completion — the rig is full right now. Stamp and resume.
+        _BALANCE_LAST_FULL[device_sn] = (now, int(now))
+    cached = _BALANCE_LAST_FULL.get(device_sn)
+    if cached is None or (now - cached[0]) > _BALANCE_CACHE_TTL_S:
+        try:
+            lf = state.energy.last_battery_full_ts(device_sn,
+                                                   full_pct=target_pct)
+        except Exception as e:
+            log.debug("balance: last-full lookup failed for %s: %s",
+                      device_sn, e)
+            return False, None  # fail open — don't block diversion on a DB error
+        _BALANCE_LAST_FULL[device_sn] = (now, lf)
+        cached = _BALANCE_LAST_FULL[device_sn]
+    last_full = cached[1]
+    if last_full is None:
+        return True, None  # never seen full in the lookback — overdue
+    days = (now - last_full) / 86400.0
+    return days >= bal_days, days
 _PLUG_POWER_NOISE_FLOOR_W = 5.0      # below this, treat as "nothing plugged in"
 _LEARNED_LOAD_PRESENT_RATIO = 0.5    # delta must stay ≥ half of learned to count
 
@@ -2293,6 +2327,7 @@ async def _solar_charge_evaluate(record: bool = True,
         # the input the overnight-reserve guard projects to sunrise.
         sc_car_w = float(cfg.get("car_load_w") or 0)
         household_load_w = max(0.0, load_w - (sc_car_w if rs.plug_is_on else 0.0))
+        balance_due, days_since_full = _balance_due_for(device_sn, cfg, main_soc)
         plan = solar_charge.compute_plan(
             config=cfg,
             current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
@@ -2308,6 +2343,8 @@ async def _solar_charge_evaluate(record: bool = True,
             household_load_w=household_load_w,
             predicted_min_soc_pct=predicted_min_baseline,
             guard_horizon_h=SC_GUARD_HORIZON_S / 3600.0,
+            balance_due=balance_due,
+            days_since_full=days_since_full,
         )
         plan = solar_charge.gate_min_hold(
             plan,
