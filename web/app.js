@@ -91,6 +91,26 @@ function fmtKwh(wh) {
   if (k >= 10)  return k.toFixed(1);
   return k.toFixed(2);
 }
+
+// Charged-source split under the "kWh charged" KPI: shown only when
+// BOTH solar and AC contributed meaningfully today (>=0.05 kWh each),
+// so pure-solar days keep the clean single number. Shares come from
+// the same samples the total does (input ≈ solar + AC + car-in), so
+// they annotate rather than exactly sum to the total.
+function renderChargedSplit(rowId, w) {
+  const row = $(rowId);
+  if (!row) return;
+  const solarWh = w?.solar_wh || 0;
+  const acWh = w?.ac_input_wh || 0;
+  if (solarWh >= 50 && acWh >= 50) {
+    const set = (id, wh) => { const el = $(id); if (el) el.textContent = fmtKwh(wh); };
+    set(rowId + '-solar', solarWh);
+    set(rowId + '-ac', acWh);
+    row.hidden = false;
+  } else {
+    row.hidden = true;
+  }
+}
 function show(el, on = true) { if (!el) return; if (on) el.removeAttribute('hidden'); else el.setAttribute('hidden', ''); }
 
 // Animate a number element from its current value to a new one, with a brief
@@ -3979,6 +3999,7 @@ function applyStatus(s) {
   if (s.energy?.today) {
     $('today-out-kwh').textContent = fmtKwh(s.energy.today.output_wh);
     $('today-in-kwh').textContent  = fmtKwh(s.energy.today.input_wh);
+    renderChargedSplit('today-charged-split', s.energy.today);
     // Excess-diversion line: show only when there's something to show.
     // Threshold at 50Wh so a brief sensor blip doesn't surface the row;
     // a real diversion session is kWh-scale.
@@ -4392,6 +4413,7 @@ function renderEnergyKpis(e) {
   const set = (id, wh) => { const el = $(id); if (el) el.textContent = fmtKwh(wh); };
   set('e-today-out', e.today?.output_wh);
   set('e-today-in',  e.today?.input_wh);
+  renderChargedSplit('e-today-charged-split', e.today);
   set('e-7d-out',    e.last_7d?.output_wh);
   set('e-7d-in',     e.last_7d?.input_wh);
   set('e-30d-out',   e.last_30d?.output_wh);

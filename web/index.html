@@ -239,6 +239,11 @@
           <div class="kpi-sub">
             <span id="today-in-kwh">—</span><small>kWh charged</small>
           </div>
+          <!-- Charged-source split: shown only when BOTH solar and AC
+               contributed today, so solar-only days stay clean. -->
+          <div class="kpi-sub charged-split" id="today-charged-split" hidden>
+            <small>☀ <span id="today-charged-split-solar">—</span> solar · ⚡ <span id="today-charged-split-ac">—</span> AC kWh</small>
+          </div>
           <!-- Diverted to a downstream load by the Excess Diversion
                controller. Hidden when zero so the card stays clean for
                users who don't have the feature enabled. The diverted
@@ -324,6 +329,9 @@
           <div class="kpi-row">
             <div><div class="kpi-value"><span id="e-today-out">—</span><small>kWh</small></div><div class="kpi-sub">consumed</div></div>
             <div><div class="kpi-value alt"><span id="e-today-in">—</span><small>kWh</small></div><div class="kpi-sub">charged</div></div>
+          </div>
+          <div class="kpi-sub charged-split" id="e-today-charged-split" hidden>
+            <small>charged: ☀ <span id="e-today-charged-split-solar">—</span> solar · ⚡ <span id="e-today-charged-split-ac">—</span> AC kWh</small>
           </div>
         </section>
         <section class="card">

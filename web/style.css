@@ -2686,3 +2686,8 @@ footer {
   margin-left: 6px;
   vertical-align: 1px;
 }
+
+/* Charged-source split (solar vs AC) under the Today "kWh charged" KPI —
+   muted annotation line, hidden entirely on single-source days. */
+.charged-split small { color: var(--text-dim); letter-spacing: .2px; }
+.charged-split { margin-top: 2px; }

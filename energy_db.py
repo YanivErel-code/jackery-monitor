@@ -619,24 +619,28 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             r = c.execute(
                 "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
                 "COALESCE(SUM(solar_wh),0), "
-                "COALESCE(SUM(solar_charge_diverted_wh),0) "
+                "COALESCE(SUM(solar_charge_diverted_wh),0), "
+                "COALESCE(SUM(ac_input_wh),0) "
                 "FROM samples WHERE device_sn = ?", (device_sn,)
             ).fetchone()
             out["lifetime"] = {"input_wh": r[0], "output_wh": r[1],
                                "solar_wh": r[2],
-                               "solar_charge_diverted_wh": r[3]}
+                               "solar_charge_diverted_wh": r[3],
+                               "ac_input_wh": r[4]}
             # Windows
             for label, since in windows.items():
                 r = c.execute(
                     "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
                     "COALESCE(SUM(solar_wh),0), "
-                    "COALESCE(SUM(solar_charge_diverted_wh),0) "
+                    "COALESCE(SUM(solar_charge_diverted_wh),0), "
+                    "COALESCE(SUM(ac_input_wh),0) "
                     "FROM samples WHERE device_sn = ? AND bucket >= ?",
                     (device_sn, since),
                 ).fetchone()
                 out[label] = {"input_wh": r[0], "output_wh": r[1],
                               "solar_wh": r[2],
                               "solar_charge_diverted_wh": r[3],
+                              "ac_input_wh": r[4],
                               "since": since}
         return out  # type: ignore[return-value]
 
