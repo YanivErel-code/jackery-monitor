@@ -50,6 +50,7 @@ import inverter_watchdog
 import kasa_client
 import kasa_creds
 import location as device_location
+import rescue
 import settings as user_settings
 import smart_charge
 import solar_charge
@@ -199,6 +200,12 @@ class AppState:
         self.automation: AutomationEngine = AutomationEngine(
             firing_recorder=self.energy.record_automation_fire,
         )
+        # Dead-man rescue watchdog state, keyed by device SN. Tracks the
+        # last FRESH main-unit SOC so the poll loop can fire the rescue
+        # plug blind when a unit goes silent after being seen critically
+        # low (2026-07-14: the unit died with its frozen telemetry still
+        # reading above the automation rule's threshold).
+        self.rescue_by_sn: dict[str, rescue.RescueState] = {}
         # Saved Kasa device registry — devices the user has manually added &
         # tested. Rule editor picks from this list instead of asking for an
         # IP each time.
@@ -270,6 +277,24 @@ async def connect_device() -> bool:
              info.name if info else "?")
     await broadcast_status("status")
     return True
+
+
+def _rescue_host_for(device_sn: str) -> str | None:
+    """Kasa host to fire for a dead-man rescue: borrow the plug from the
+    user's enabled grid-ON automation rule for this device, so the UI
+    rule stays the single source of truth (no second config to drift)."""
+    try:
+        for r in state.automation.list_rules():
+            if not r.get("enabled", True) or r.get("action") != "on":
+                continue
+            sn = r.get("jackery_device_sn")
+            if sn and sn != device_sn:
+                continue
+            if r.get("kasa_host"):
+                return r["kasa_host"]
+    except Exception as e:
+        log.debug("rescue: rule lookup failed: %s", e)
+    return None
 
 
 async def poll_loop() -> None:
@@ -579,6 +604,59 @@ async def poll_loop() -> None:
                             })
                     except Exception as e:
                         log.warning("automation evaluate failed: %s", e)
+
+                # Dead-man rescue watchdog (2026-07-14 incident). Watches
+                # the MAIN unit's battery_percent — the number on the
+                # device — NOT system SOC (the inverter shuts down while
+                # system still reads ~12%, so a system-SOC trigger below
+                # that is unfireable live). If a unit was last seen at or
+                # below rescue.ARM_MAIN_SOC_PCT and then goes silent for
+                # rescue.STALE_FIRE_S, fire its grid plug BLIND: the NAS,
+                # router, and plug are on the UPS, so the toggle works
+                # while the unit itself is dark. Runs every tick against
+                # the bridge's cached entries — their `ts` freezes at
+                # death, which is exactly the silence signal we need.
+                rescue_now = time.time()
+                for r_sn, r_entry in devs_telemetry.items():
+                    r_t = (r_entry or {}).get("telemetry") or {}
+                    r_st = state.rescue_by_sn.setdefault(
+                        r_sn, rescue.RescueState())
+                    r_why = rescue.decide(
+                        rescue_now, (r_entry or {}).get("ts"),
+                        r_t.get("battery_percent"), r_st)
+                    if not r_why:
+                        continue
+                    r_host = _rescue_host_for(r_sn)
+                    if not r_host:
+                        log.warning("rescue watchdog: would fire (%s) for %s "
+                                    "but no enabled grid-ON rule provides a "
+                                    "plug host", r_why, r_sn)
+                        continue
+                    try:
+                        await kasa_client.set_state(r_host, True)
+                    except Exception as e:
+                        # Don't latch — retry every tick until it lands.
+                        log.warning("rescue watchdog: Kasa ON failed for %s "
+                                    "(%s), retrying next tick: %s",
+                                    r_sn, r_host, e)
+                        continue
+                    rescue.mark_fired(r_st, r_why, rescue_now)
+                    log.warning(
+                        "RESCUE FIRED (%s) for %s: main last seen %.0f%% "
+                        "(%.0fs ago) -> %s ON",
+                        r_why, r_sn, r_st.last_fresh_main or -1,
+                        rescue_now - r_st.last_fresh_ts, r_host)
+                    try:
+                        state.energy.record_automation_fire(
+                            rule_id="rescue-watchdog",
+                            rule_name=f"Rescue watchdog ({r_why})",
+                            action="on", kasa_host=r_host, jackery_sn=r_sn,
+                            soc_at_fire=float(r_st.last_fresh_main or 0),
+                            operator="<=",
+                            threshold=rescue.ARM_MAIN_SOC_PCT,
+                        )
+                    except Exception as e:
+                        log.debug("rescue firing audit write failed: %s", e)
             bo.reset()
         except Exception as e:
             bo.record_failure()
