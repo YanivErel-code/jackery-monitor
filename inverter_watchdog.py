@@ -22,9 +22,15 @@ State machine (per device):
     AC observed OFF, attempts == max  → set error → "error"
 
 After `max_attempts` (default 5) attempts at 10s intervals (~50s total),
-the watchdog latches an error_message and stops retrying. The UI shows
-this on the AC button; clicking dismisses (resets counter; the next AC=OFF
-observation will trigger a fresh sequence).
+the watchdog latches an error_message (shown on the AC button) but does
+NOT stop: it keeps retrying at the slow interval (default 60s) forever.
+The 2026-07-14 rescue exposed why the old give-up-after-5 design failed
+the "AC ON 100%" invariant: after a dead-battery shutdown the unit
+refuses inverter-ON commands for a minute or more while it boots on
+grid power — the 5 fast attempts all landed in that refusal window and
+the watchdog then latched off permanently, leaving the house dark until
+a manual toggle. Slow retries continue until the unit accepts; AC=ON
+clears everything including the badge.
 """
 from __future__ import annotations
 
@@ -58,6 +64,9 @@ class WatchdogState:
 DEFAULT_RETRY_INTERVAL_S = 10.0
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_USER_GRACE_S = 60.0
+# After max_attempts fast retries, keep trying at this cadence forever
+# (post-shutdown the unit refuses AC-on for 1min+ while it boots).
+DEFAULT_SLOW_RETRY_INTERVAL_S = 60.0
 
 
 def evaluate(
@@ -68,6 +77,7 @@ def evaluate(
     retry_interval_s: float = DEFAULT_RETRY_INTERVAL_S,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     user_grace_s: float = DEFAULT_USER_GRACE_S,
+    slow_retry_interval_s: float = DEFAULT_SLOW_RETRY_INTERVAL_S,
 ) -> Action:
     """Drive the recovery state machine one tick. Mutates `state`.
 
@@ -76,15 +86,20 @@ def evaluate(
         ac_on: current AC-port state from the latest telemetry.
         now_ts: clock injection for tests; defaults to time.time().
         retry_interval_s: seconds between retry attempts.
-        max_attempts: how many attempts before latching an error.
+        max_attempts: fast attempts before latching the error badge.
         user_grace_s: skip watchdog this long after a user-initiated OFF.
+        slow_retry_interval_s: retry cadence AFTER the error badge is
+            latched — recovery never stops (post-shutdown the unit
+            refuses AC-on for 1min+; the badge clears when AC comes back).
 
     Returns one of the Action strings. Callers should:
         - "retry"       → send AC-on MQTT command
         - "idle"        → AC recovered (or was already ON); nothing to do
         - "waiting"     → mid-recovery, holding for retry interval
         - "user_grace"  → user turned AC off recently; suppressed
-        - "error"       → all attempts failed; surface to UI
+        - "error"       → badge latched, holding for the slow interval
+                          (retries still fire as "retry" every
+                          slow_retry_interval_s)
     """
     now = float(now_ts if now_ts is not None else time.time())
     if ac_on:
@@ -98,13 +113,22 @@ def evaluate(
     if state.last_user_off_ts and (now - state.last_user_off_ts) < user_grace_s:
         return "user_grace"
     if state.error_message:
+        # Badge latched — but never give up. Keep nudging AC on at the
+        # slow cadence; a dead-battery reboot accepts the command only
+        # after a minute or more, and the "AC ON 100%" invariant means
+        # someone is depending on this output coming back.
+        if (now - state.last_attempt_ts) >= slow_retry_interval_s:
+            state.consecutive_attempts += 1
+            state.last_attempt_ts = now
+            return "retry"
         return "error"
     if state.consecutive_attempts >= max_attempts:
         state.error_message = (
             f"AC output remained OFF after {max_attempts} retry attempts "
-            f"(~{int(max_attempts * retry_interval_s)}s). The inverter "
-            f"may have a stuck fault — check the Jackery in person and "
-            f"click to dismiss this error to try again."
+            f"(~{int(max_attempts * retry_interval_s)}s). Still retrying "
+            f"every {int(slow_retry_interval_s)}s — after a dead-battery "
+            f"shutdown the unit can take a minute or more to accept "
+            f"AC-on. Dismiss to reset the fast-retry sequence."
         )
         return "error"
     # First attempt: fire immediately on first AC=OFF observation.

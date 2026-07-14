@@ -82,18 +82,28 @@ def test_latches_error_after_max_attempts():
     assert str(inverter_watchdog.DEFAULT_MAX_ATTEMPTS) in s.error_message
 
 
-def test_error_stays_latched():
-    """Once latched, subsequent ticks keep returning 'error' until AC
-    recovers or dismiss() is called."""
+def test_error_badge_latched_but_slow_retries_continue():
+    """The 2026-07-14 case: after a dead-battery shutdown the unit
+    refuses AC-on for 1min+, so all 5 fast attempts fail. The badge
+    latches, but recovery must NEVER stop — slow retries keep firing
+    every DEFAULT_SLOW_RETRY_INTERVAL_S until the unit accepts."""
     s = _fresh()
     t = 1000.0
     for _ in range(6):
         inverter_watchdog.evaluate(s, False, now_ts=t)
         t += 10.0
-    # Latched.
+    # Badge latched after the fast phase...
     assert s.error_message is not None
-    # 5 minutes pass — still error.
-    assert inverter_watchdog.evaluate(s, False, now_ts=t + 300) == "error"
+    last_attempt = s.last_attempt_ts
+    # ...within the slow interval: hold (reported as "error").
+    assert inverter_watchdog.evaluate(s, False, now_ts=last_attempt + 30) == "error"
+    # ...past the slow interval: a retry fires, badge stays.
+    assert inverter_watchdog.evaluate(
+        s, False, now_ts=last_attempt + 61) == "retry"
+    assert s.error_message is not None
+    # And it keeps going indefinitely (another interval, another retry).
+    assert inverter_watchdog.evaluate(
+        s, False, now_ts=last_attempt + 61 + 61) == "retry"
 
 
 def test_ac_recovery_clears_latched_error():

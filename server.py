@@ -1903,9 +1903,11 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
     # Edge-triggered logging: only log on state transitions so the
     # event log stays clean while we're idle.
     if action == "retry":
+        phase = ("slow" if rs.consecutive_attempts
+                 > inverter_watchdog.DEFAULT_MAX_ATTEMPTS else "fast")
         log.warning(
-            "inverter_watchdog: AC=OFF for %s — sending AC-on (attempt %d/%d)",
-            device_sn, rs.consecutive_attempts, inverter_watchdog.DEFAULT_MAX_ATTEMPTS,
+            "inverter_watchdog: AC=OFF for %s — sending AC-on (%s attempt %d)",
+            device_sn, phase, rs.consecutive_attempts,
         )
         setter = getattr(state.client, "set_output", None)
         if setter:
@@ -1916,9 +1918,10 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
                              device_sn, e)
     elif action == "error" and not prior_error:
         log.error(
-            "inverter_watchdog: %s exhausted %d retries; AC stayed OFF — "
-            "manual intervention required",
+            "inverter_watchdog: %s exhausted %d fast retries; AC still OFF — "
+            "continuing slow retries every %ds until it comes back",
             device_sn, inverter_watchdog.DEFAULT_MAX_ATTEMPTS,
+            int(inverter_watchdog.DEFAULT_SLOW_RETRY_INTERVAL_S),
         )
     elif action == "idle" and (prior_attempts > 0 or prior_error):
         log.info("inverter_watchdog: %s recovered (AC back ON)", device_sn)
