@@ -3836,17 +3836,24 @@ function applyStatus(s) {
   if (!s) return;
   // During a user-initiated device switch, ignore frames that were
   // rendered for a different device (stale in-flight REST polls, WS
-  // frames from before the server-side view bump). Fail-open after 8s
-  // so a lost frame can never wedge the UI.
+  // frames from before the server-side view bump). The latch holds for
+  // the WHOLE window — clearing it on the first matching frame left a
+  // hole where a still-in-flight old-cookie /api/status response landed
+  // right after and repainted the previous device, re-triggering the
+  // device-change refetch storm (the "jumps between units for a few
+  // seconds" bug, round 2). Fail-open after the window so a lost frame
+  // can never wedge the UI.
   if (_pendingViewSwitch) {
-    const frameId = s.cloud?.selected_device_id != null
-      ? String(s.cloud.selected_device_id) : null;
     if (Date.now() > _pendingViewSwitch.until) {
       _pendingViewSwitch = null;
-    } else if (frameId === String(_pendingViewSwitch.id)) {
-      _pendingViewSwitch = null;      // switch completed — accept this frame
-    } else if (frameId) {
-      return;                          // stale frame from the previous view
+    } else {
+      const frameId = s.cloud?.selected_device_id != null
+        ? String(s.cloud.selected_device_id) : null;
+      if (frameId && frameId !== String(_pendingViewSwitch.id)) {
+        return;                        // stale frame from the previous view
+      }
+      // Matching (or device-less) frame: render it, but KEEP the latch
+      // until the window expires so late stragglers stay blocked.
     }
   }
   const prevDeviceSn = activeJackeryDevice()?.device_sn;
@@ -4494,6 +4501,8 @@ async function fetchEnergyHistory() {
     const histSn = activeJackeryDevice()?.device_sn;
     const r = await fetch(`/api/energy/history?hours=${energyRangeHours}`
       + (histSn ? `&device_sn=${encodeURIComponent(histSn)}` : ''));
+    if (histSn && activeJackeryDevice()?.device_sn
+        && histSn !== activeJackeryDevice().device_sn) return;
     if (!r.ok) return;
     const j = await r.json();
     energyHistoryCache = j;
@@ -4582,6 +4591,9 @@ async function fetchEnergyDaily() {
     if (!r.ok) return;
     const j = await r.json();
     if (!Array.isArray(j.daily)) return;
+    if (deviceSn !== (activeJackeryDevice()?.device_sn || deviceSn)) {
+      return;  // switched devices while in flight — discard
+    }
     j._fetched_at = Date.now();
     energyDailyCache = j;
     renderEnergyRecords();
@@ -6195,6 +6207,10 @@ async function fetchBatteryPacks() {
     const r = await fetch('/api/devices/battery_packs'
       + (viewSn ? `?device_sn=${encodeURIComponent(viewSn)}` : ''));
     const j = r.ok ? await r.json() : { error: `HTTP ${r.status}` };
+    // A switch may have happened while this was in flight — discard
+    // rather than repaint the previous unit's packs.
+    const nowSn = activeJackeryDevice()?.device_sn;
+    if (viewSn && nowSn && viewSn !== nowSn) return;
     console.debug('battery_packs response', j);
     window._cachedPacks = Array.isArray(j.packs) ? j.packs : [];
     window._cachedPackDeviceSn = j.device_sn || null;
