@@ -29,7 +29,13 @@ let lastStatus = null;
 let lastDevices = [];
 let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
-let energyDailyCache = null;   // last /api/energy/daily payload (365d, per device)
+let energyDailyCache = null;
+// Set when the user picks a device in the picker: {id, until}. While
+// pending, status frames rendered for any OTHER device are dropped so
+// in-flight polls/WS frames from the previous view can't fight the new
+// one (the old/new alternation re-triggered the device-change refetch
+// block and the UI visibly ping-ponged for several seconds).
+let _pendingViewSwitch = null;   // last /api/energy/daily payload (365d, per device)
 let forecastCache = null;     // last /api/forecast response
 let activeTab = 'live';
 
@@ -3659,6 +3665,9 @@ function renderBacktestResult(j) {
 $('device-select')?.addEventListener('change', async (e) => {
   const device_id = e.target.value;
   if (!device_id) return;
+  // Latch the choice so applyStatus drops frames from the previous view
+  // until the first frame for THIS device arrives (or 8s pass).
+  _pendingViewSwitch = { id: String(device_id), until: Date.now() + 8000 };
   // Per-browser view selection — sets a cookie so this browser's UI shows
   // the chosen Jackery without changing what other browsers see, and
   // without changing which device the automation worker manages. The
@@ -3671,6 +3680,7 @@ $('device-select')?.addEventListener('change', async (e) => {
       body: JSON.stringify({ device_id }),
     });
   } catch (err) {
+    _pendingViewSwitch = null;  // switch didn't happen — stop dropping frames
     console.warn('view/select_device failed', err);
   }
 });
@@ -3824,6 +3834,21 @@ function _onAutomationFiredPush(data) {
 // ============================================================
 function applyStatus(s) {
   if (!s) return;
+  // During a user-initiated device switch, ignore frames that were
+  // rendered for a different device (stale in-flight REST polls, WS
+  // frames from before the server-side view bump). Fail-open after 8s
+  // so a lost frame can never wedge the UI.
+  if (_pendingViewSwitch) {
+    const frameId = s.cloud?.selected_device_id != null
+      ? String(s.cloud.selected_device_id) : null;
+    if (Date.now() > _pendingViewSwitch.until) {
+      _pendingViewSwitch = null;
+    } else if (frameId === String(_pendingViewSwitch.id)) {
+      _pendingViewSwitch = null;      // switch completed — accept this frame
+    } else if (frameId) {
+      return;                          // stale frame from the previous view
+    }
+  }
   const prevDeviceSn = activeJackeryDevice()?.device_sn;
   lastStatus = s;
   // Stash for fetchBatteryPacks() — it derives the main unit's standalone
@@ -4466,7 +4491,9 @@ document.querySelectorAll('.range-btn').forEach((btn) => {
 
 async function fetchEnergyHistory() {
   try {
-    const r = await fetch(`/api/energy/history?hours=${energyRangeHours}`);
+    const histSn = activeJackeryDevice()?.device_sn;
+    const r = await fetch(`/api/energy/history?hours=${energyRangeHours}`
+      + (histSn ? `&device_sn=${encodeURIComponent(histSn)}` : ''));
     if (!r.ok) return;
     const j = await r.json();
     energyHistoryCache = j;
@@ -6164,7 +6191,9 @@ async function fetchBatteryPacks() {
   const card = $('battery-packs-card');
   if (!card) return;
   try {
-    const r = await fetch('/api/devices/battery_packs');
+    const viewSn = activeJackeryDevice()?.device_sn;
+    const r = await fetch('/api/devices/battery_packs'
+      + (viewSn ? `?device_sn=${encodeURIComponent(viewSn)}` : ''));
     const j = r.ok ? await r.json() : { error: `HTTP ${r.status}` };
     console.debug('battery_packs response', j);
     window._cachedPacks = Array.isArray(j.packs) ? j.packs : [];
