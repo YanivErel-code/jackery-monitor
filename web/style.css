@@ -2691,3 +2691,14 @@ footer {
    muted annotation line, hidden entirely on single-source days. */
 .charged-split small { color: var(--text-dim); letter-spacing: .2px; }
 .charged-split { margin-top: 2px; }
+
+/* Device-switch loading state: header pill with a spinner + dimmed tab
+   content while the new device's first data frame is in flight. */
+.switch-pill { display: inline-flex; align-items: center; gap: 7px;
+  color: var(--text-dim); }
+.spinner { width: 12px; height: 12px; flex: 0 0 auto;
+  border: 2px solid var(--text-dim); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+body.device-switching .tab-panel { opacity: .45; pointer-events: none;
+  transition: opacity .15s ease; }

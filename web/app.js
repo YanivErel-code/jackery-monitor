@@ -35,7 +35,18 @@ let energyDailyCache = null;
 // in-flight polls/WS frames from the previous view can't fight the new
 // one (the old/new alternation re-triggered the device-change refetch
 // block and the UI visibly ping-ponged for several seconds).
-let _pendingViewSwitch = null;   // last /api/energy/daily payload (365d, per device)
+let _pendingViewSwitch = null;
+
+// Loading indicator for the switch window: spinner pill in the header +
+// dimmed tab content. Driven by the same lifecycle as the latch — shown
+// when the user picks a device, hidden the moment the first frame of the
+// NEW device's data renders (or the fail-open window expires), so "the
+// spinner went away" always means "what you see is the new device".
+function setDeviceSwitching(on) {
+  const pill = $('switch-pill');
+  if (pill) pill.hidden = !on;
+  document.body.classList.toggle('device-switching', !!on);
+}   // last /api/energy/daily payload (365d, per device)
 let forecastCache = null;     // last /api/forecast response
 let activeTab = 'live';
 
@@ -3668,6 +3679,7 @@ $('device-select')?.addEventListener('change', async (e) => {
   // Latch the choice so applyStatus drops frames from the previous view
   // until the first frame for THIS device arrives (or 8s pass).
   _pendingViewSwitch = { id: String(device_id), until: Date.now() + 8000 };
+  setDeviceSwitching(true);
   // Per-browser view selection — sets a cookie so this browser's UI shows
   // the chosen Jackery without changing what other browsers see, and
   // without changing which device the automation worker manages. The
@@ -3681,6 +3693,7 @@ $('device-select')?.addEventListener('change', async (e) => {
     });
   } catch (err) {
     _pendingViewSwitch = null;  // switch didn't happen — stop dropping frames
+    setDeviceSwitching(false);
     console.warn('view/select_device failed', err);
   }
 });
@@ -3846,11 +3859,16 @@ function applyStatus(s) {
   if (_pendingViewSwitch) {
     if (Date.now() > _pendingViewSwitch.until) {
       _pendingViewSwitch = null;
+      setDeviceSwitching(false);       // fail-open: never wedge the dim
     } else {
       const frameId = s.cloud?.selected_device_id != null
         ? String(s.cloud.selected_device_id) : null;
       if (frameId && frameId !== String(_pendingViewSwitch.id)) {
         return;                        // stale frame from the previous view
+      }
+      if (frameId === String(_pendingViewSwitch.id)) {
+        // First frame of the NEW device is about to render — loading done.
+        setDeviceSwitching(false);
       }
       // Matching (or device-less) frame: render it, but KEEP the latch
       // until the window expires so late stragglers stay blocked.

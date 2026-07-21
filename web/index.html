@@ -71,6 +71,16 @@
         <span class="dp-label">Device</span>
         <select id="device-select" class="device-select"></select>
       </label>
+      <!-- Shown while a device switch is in flight: appears the moment
+           the picker changes, disappears when the first frame of the
+           new device's data actually renders (or the fail-open window
+           expires). Pairs with body.device-switching, which dims the
+           tab content so it's obvious the numbers on screen are the
+           outgoing device's. -->
+      <span id="switch-pill" class="pill switch-pill" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span>loading device…</span>
+      </span>
       <span id="conn-pill" class="pill pill-conn">
         <span id="conn-dot" class="conn-dot"></span>
         <span id="conn-text">connecting…</span>
