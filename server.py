@@ -440,7 +440,8 @@ async def poll_loop() -> None:
                         {},
                     )
                     samples_to_write.append(
-                        (other_sn, other_t, meta.get("name"), meta.get("model_code"))
+                        (other_sn, other_t, meta.get("name"),
+                         meta.get("model_code"), (entry or {}).get("ts"))
                     )
                 # The active device's status_dict may carry richer fields
                 # than its devices_telemetry mirror — write it explicitly
@@ -449,9 +450,9 @@ async def poll_loop() -> None:
                     samples_to_write.append(
                         (dev_sn, status_dict,
                          getattr(dev, "name", None),
-                         getattr(dev, "model_code", None))
+                         getattr(dev, "model_code", None), ts)
                     )
-                for sn, t, name, model_code in samples_to_write:
+                for sn, t, name, model_code, frame_ts in samples_to_write:
                     state.energy.upsert_device(sn, name, model_code, None)
                     # Inverter recovery watchdog: AC port should stay ON
                     # always; OFF means the inverter tripped on overload.
@@ -459,7 +460,7 @@ async def poll_loop() -> None:
                     # send the AC-on MQTT command. Best-effort; never let
                     # this fail the poll-write path.
                     try:
-                        await _inverter_watchdog_tick(sn, t)
+                        await _inverter_watchdog_tick(sn, t, frame_ts)
                     except Exception as e:
                         log.debug("inverter_watchdog tick failed for %s: %s",
                                    sn, e)
@@ -1885,7 +1886,13 @@ async def smart_charge_loop():
 
 
 # ---------- Inverter recovery watchdog (AC-port auto-restart) ----------
-async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
+# Strong refs for in-flight AC off->on cycle tasks: asyncio holds tasks
+# only weakly, and losing one between the "off" and the "on" is the
+# exact outage this feature exists to prevent.
+_WATCHDOG_CYCLE_TASKS: set = set()
+
+async def _inverter_watchdog_tick(device_sn: str, telemetry: dict,
+                                  frame_ts: float | None = None) -> None:
     """Drive the inverter-recovery state machine for one device.
 
     Called from the poll_loop per-device write-sample loop, so we
@@ -1896,26 +1903,57 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict) -> None:
     if not device_sn:
         return
     ac_on = bool(telemetry.get("ac_on"))
+    out_w = telemetry.get("output_power_w")
     rs = inverter_watchdog.get_state(device_sn)
     prior_attempts = rs.consecutive_attempts
     prior_error = rs.error_message
-    action = inverter_watchdog.evaluate(rs, ac_on)
+    # Hardware-trip detection is OPT-IN: 0 disables. Operators set the
+    # floor below their known 24/7 base load (this rig: house never drops
+    # under ~450W, so 100W can only ever mean the inverter died).
+    collapse_floor = float(
+        user_settings.get("inverter_trip_recovery_min_w") or 0)
+    action = inverter_watchdog.evaluate(
+        rs, ac_on, float(out_w) if out_w is not None else None,
+        sample_ts=frame_ts, collapse_floor_w=collapse_floor)
     # Edge-triggered logging: only log on state transitions so the
     # event log stays clean while we're idle.
-    if action == "retry":
+    if action in ("retry", "cycle"):
         phase = ("slow" if rs.consecutive_attempts
                  > inverter_watchdog.DEFAULT_MAX_ATTEMPTS else "fast")
-        log.warning(
-            "inverter_watchdog: AC=OFF for %s — sending AC-on (%s attempt %d)",
-            device_sn, phase, rs.consecutive_attempts,
-        )
         setter = getattr(state.client, "set_output", None)
-        if setter:
-            try:
-                await setter("ac", True, device_sn=device_sn)
-            except Exception as e:
-                log.warning("inverter_watchdog: AC-on MQTT command failed for %s: %s",
-                             device_sn, e)
+        if action == "cycle":
+            # Hardware trip: the port claims ON with collapsed output, so
+            # a plain AC-on is a no-op — toggle off, pause, on. Runs as a
+            # task so the 2s pause never stalls the poll loop; the 10s
+            # retry pacing prevents overlapping cycles.
+            log.warning(
+                "inverter_watchdog: HARDWARE TRIP for %s — port claims ON "
+                "but output collapsed; cycling AC off->on (%s attempt %d)",
+                device_sn, phase, rs.consecutive_attempts,
+            )
+            if setter:
+                async def _cycle(sn=device_sn, set_fn=setter):
+                    try:
+                        await set_fn("ac", False, device_sn=sn)
+                        await asyncio.sleep(2.0)
+                        await set_fn("ac", True, device_sn=sn)
+                    except Exception as e:
+                        log.warning("inverter_watchdog: AC cycle failed "
+                                    "for %s: %s", sn, e)
+                _task = asyncio.create_task(_cycle())
+                _WATCHDOG_CYCLE_TASKS.add(_task)
+                _task.add_done_callback(_WATCHDOG_CYCLE_TASKS.discard)
+        else:
+            log.warning(
+                "inverter_watchdog: AC=OFF for %s — sending AC-on (%s attempt %d)",
+                device_sn, phase, rs.consecutive_attempts,
+            )
+            if setter:
+                try:
+                    await setter("ac", True, device_sn=device_sn)
+                except Exception as e:
+                    log.warning("inverter_watchdog: AC-on MQTT command failed "
+                                "for %s: %s", device_sn, e)
     elif action == "error" and not prior_error:
         log.error(
             "inverter_watchdog: %s exhausted %d fast retries; AC still OFF — "

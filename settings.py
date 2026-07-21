@@ -57,6 +57,15 @@ SCHEMA: dict[str, dict[str, Any]] = {
         "label": "Session-contested cooldown (s)",
         "hint": "How long the bridge waits before reclaiming the session after the phone app logs in.",
     },
+    "inverter_trip_recovery_min_w": {
+        "env": "INVERTER_TRIP_RECOVERY_MIN_W",
+        "default": 0,
+        "type": "int",
+        "min": 0,
+        "max": 2000,
+        "label": "Inverter trip-recovery floor (W)",
+        "hint": "0 disables. Set BELOW your 24/7 base load (e.g. 100 on a rig that never idles under 450W): if AC output collapses to/below this while the port still reports ON, the watchdog treats it as a hardware trip and cycles AC off/on (max 2x per episode). Leave 0 unless your rig always has load on the inverter — on a rig where ~0W output is normal this would cause false power cycles.",
+    },
     "low_battery_threshold": {
         "env": "LOW_BATTERY_THRESHOLD",
         "default": 20,
