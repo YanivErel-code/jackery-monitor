@@ -280,6 +280,245 @@ def test_balance_config_validates():
     assert cfg["balance_target_main_pct"] == solar_charge.DEFAULT_CONFIG["balance_target_main_pct"]
 
 
+# ---------- Pack-balance: spread trigger ----------
+def _packs(*socs):
+    """Cloud-shaped pack rows as server.state.battery_packs_by_sn holds
+    them: SOC lives under "rb"."""
+    return [{"deviceSn": f"TEST-P{i}", "deviceOrder": i, "rb": s}
+            for i, s in enumerate(socs)]
+
+
+def test_pack_spread_uses_max_minus_min():
+    # Real 5-pack reading from 2026-08-31, 26 days after the last full
+    # charge: 35pp apart. This is the case the calendar alone missed.
+    assert solar_charge.pack_soc_spread_pp(_packs(60, 60, 59, 52, 87)) == 35
+    # Freshly balanced (2026-08-06) — nothing to do.
+    assert solar_charge.pack_soc_spread_pp(_packs(78, 78, 80, 77, 78)) == 3
+
+
+def test_pack_spread_is_robust_to_junk_rows():
+    """A half-populated cloud snapshot must not read as a 0% pack."""
+    packs = [*_packs(80, 60),
+             {"deviceSn": "TEST-P9"},                   # no "rb" at all
+             {"deviceSn": "TEST-P8", "rb": None},
+             {"deviceSn": "TEST-P7", "rb": "n/a"},
+             "not-a-dict"]
+    assert solar_charge.pack_soc_spread_pp(packs) == 20
+
+
+def test_pack_spread_needs_two_packs():
+    assert solar_charge.pack_soc_spread_pp([]) is None
+    assert solar_charge.pack_soc_spread_pp(None) is None
+    assert solar_charge.pack_soc_spread_pp(_packs(80)) is None
+    # One usable reading among several rows is still not a spread.
+    assert solar_charge.pack_soc_spread_pp(
+        [*_packs(80), {"deviceSn": "TEST-P1", "rb": None}]) is None
+
+
+def test_spread_trigger_fires_at_or_above_threshold():
+    cfg = _cfg(balance_spread_trigger_pp=25)
+    assert solar_charge.spread_trigger_fired(cfg, 35) is True
+    assert solar_charge.spread_trigger_fired(cfg, 25) is True     # boundary
+    assert solar_charge.spread_trigger_fired(cfg, 24.9) is False
+    assert solar_charge.spread_trigger_fired(cfg, None) is False
+
+
+def test_spread_trigger_zero_disables():
+    """0 = disabled: no spread, however wide, opens a window."""
+    cfg = _cfg(balance_spread_trigger_pp=0)
+    assert solar_charge.spread_trigger_fired(cfg, 99) is False
+
+
+def test_spread_trigger_mutes_for_a_day_after_a_full_charge():
+    """This is what makes a spread-triggered window END at the full
+    charge it asked for: the packs still read wide the moment main hits
+    100% (2026-08-11 caught a charge in flight at 21pp), so without the
+    mute the window would close and reopen on the same reading."""
+    cfg = _cfg()
+    assert solar_charge.spread_trigger_fired(cfg, 35, 0.0) is False
+    assert solar_charge.spread_trigger_fired(cfg, 35, 0.9) is False
+    assert solar_charge.spread_trigger_fired(cfg, 35, 1.0) is True
+    # Unknown / never full doesn't mute — there's no settling to wait on.
+    assert solar_charge.spread_trigger_fired(cfg, 35, None) is True
+
+
+def test_balance_reason_names_the_spread_trigger():
+    """The dashboard card must say WHICH trigger fired — an early window
+    opened on evidence reads very differently from the calendar rolling
+    over, and the spread number is the diagnostic."""
+    plan = solar_charge.compute_plan(
+        config=_cfg(), current_soc_pct=85,
+        solar_w=3000.0, load_w=450.0, ac_input_w=0.0,
+        telemetry_age_s=10.0, target_sunrise_soc_pct=30.0,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        balance_due=True, days_since_full=12.0, pack_spread_pp=35.0,
+        now_ts=1_700_000_000.0,
+    )
+    assert plan.action == "off"
+    assert "pack spread 35pp ≥ 25pp trigger" in plan.reason
+    assert "12d since last full charge" in plan.reason   # calendar context
+    assert "interval" not in plan.reason                 # not the days text
+    assert len(plan.reason) <= 256                       # DB column width
+
+
+def test_balance_reason_keeps_days_text_when_spread_is_low():
+    """Same open window, different cause: a calendar-triggered window
+    with a healthy spread still reads as the days trigger."""
+    plan = solar_charge.compute_plan(
+        config=_cfg(), current_soc_pct=85,
+        solar_w=3000.0, load_w=450.0, ac_input_w=0.0,
+        telemetry_age_s=10.0, target_sunrise_soc_pct=30.0,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        balance_due=True, days_since_full=31.0, pack_spread_pp=4.0,
+        now_ts=1_700_000_000.0,
+    )
+    assert plan.action == "off"
+    assert "31d since last full charge (interval 30d)" in plan.reason
+    assert "spread" not in plan.reason
+
+
+def test_balance_reason_ignores_spread_when_trigger_disabled():
+    plan = solar_charge.compute_plan(
+        config=_cfg(balance_spread_trigger_pp=0), current_soc_pct=85,
+        solar_w=3000.0, load_w=450.0, ac_input_w=0.0,
+        telemetry_age_s=10.0, target_sunrise_soc_pct=30.0,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        balance_due=True, days_since_full=31.0, pack_spread_pp=40.0,
+        now_ts=1_700_000_000.0,
+    )
+    assert "spread" not in plan.reason
+    assert "interval 30d" in plan.reason
+
+
+def test_healthy_spread_before_the_interval_leaves_diversion_alone():
+    """Below the trigger and not yet due → neither trigger fires and the
+    normal gates stay in charge."""
+    cfg = _cfg()
+    assert solar_charge.spread_trigger_fired(cfg, 5) is False
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0, cfg=cfg)
+    assert plan.action == "on"
+    assert "pack-balance" not in plan.reason
+
+
+def test_balance_defaults_track_measured_drift():
+    """60d let the rig sit at 30pp+ for most of its life; measured drift
+    is back to 20pp within ~10 days of a full charge."""
+    assert solar_charge.DEFAULT_CONFIG["balance_every_days"] == 30
+    assert solar_charge.DEFAULT_CONFIG["balance_spread_trigger_pp"] == 25
+
+
+def test_spread_and_window_config_validates():
+    cfg = solar_charge._validate_config(
+        {**solar_charge.DEFAULT_CONFIG,
+         "balance_spread_trigger_pp": 15, "balance_max_window_days": 3})
+    assert cfg["balance_spread_trigger_pp"] == 15
+    assert cfg["balance_max_window_days"] == 3
+    # 0 is in range for both (disable the trigger / the bound).
+    cfg = solar_charge._validate_config(
+        {**solar_charge.DEFAULT_CONFIG,
+         "balance_spread_trigger_pp": 0, "balance_max_window_days": 0})
+    assert cfg["balance_spread_trigger_pp"] == 0
+    assert cfg["balance_max_window_days"] == 0
+    # Out of range falls back to the default.
+    cfg = solar_charge._validate_config(
+        {**solar_charge.DEFAULT_CONFIG,
+         "balance_spread_trigger_pp": 101, "balance_max_window_days": -1})
+    assert (cfg["balance_spread_trigger_pp"]
+            == solar_charge.DEFAULT_CONFIG["balance_spread_trigger_pp"])
+    assert (cfg["balance_max_window_days"]
+            == solar_charge.DEFAULT_CONFIG["balance_max_window_days"])
+
+
+# ---------- Pack-balance: pathology bound ----------
+_DAY = 86400.0
+
+
+def test_window_status_seeds_a_fresh_attempt():
+    opened, days, stalled = solar_charge.balance_window_status(
+        config=_cfg(), opened_ts=None, now_ts=1_700_000_000.0)
+    assert opened == 1_700_000_000.0
+    assert days == 0.0
+    assert stalled is False
+
+
+def test_window_status_not_stalled_inside_the_bound():
+    now = 1_700_000_000.0
+    opened, days, stalled = solar_charge.balance_window_status(
+        config=_cfg(), opened_ts=now - 6.5 * _DAY, now_ts=now)
+    assert opened == now - 6.5 * _DAY          # clock untouched
+    assert round(days, 1) == 6.5
+    assert stalled is False
+
+
+def test_window_status_stalls_past_the_bound():
+    """A rig that can't reach 100% (dead pack) must not starve the car
+    forever — after balance_max_window_days we give up on this attempt."""
+    now = 1_700_000_000.0
+    _, days, stalled = solar_charge.balance_window_status(
+        config=_cfg(), opened_ts=now - 8 * _DAY, now_ts=now)
+    assert days == 8.0
+    assert stalled is True
+
+
+def test_window_status_retries_after_standing_down_one_interval():
+    """Stalled is not permanent: after the attempt (7d) plus a full
+    interval (30d) the clock restarts, so a rig that was merely clouded
+    over gets another honest attempt."""
+    now = 1_700_000_000.0
+    opened, days, stalled = solar_charge.balance_window_status(
+        config=_cfg(), opened_ts=now - 37 * _DAY, now_ts=now)
+    assert opened == now                       # clock restarted
+    assert days == 0.0
+    assert stalled is False
+
+
+def test_window_status_stand_down_uses_attempt_length_when_calendar_off():
+    """Spread-only setups (balance_every_days=0) still need a stand-down;
+    reusing the attempt length keeps the duty cycle at 50%."""
+    cfg = _cfg(balance_every_days=0, balance_max_window_days=7)
+    now = 1_700_000_000.0
+    _, _, stalled = solar_charge.balance_window_status(
+        config=cfg, opened_ts=now - 10 * _DAY, now_ts=now)
+    assert stalled is True
+    opened, days, stalled = solar_charge.balance_window_status(
+        config=cfg, opened_ts=now - 14 * _DAY, now_ts=now)
+    assert (opened, days, stalled) == (now, 0.0, False)
+
+
+def test_window_status_bound_disabled_never_stalls():
+    now = 1_700_000_000.0
+    opened, days, stalled = solar_charge.balance_window_status(
+        config=_cfg(balance_max_window_days=0),
+        opened_ts=now - 400 * _DAY, now_ts=now)
+    assert opened == now - 400 * _DAY
+    assert days == 400.0
+    assert stalled is False
+
+
+def test_stalled_window_stops_blocking_but_says_so():
+    """The give-up must be loud: diversion resumes, and every decision
+    reason carries the diagnosis so it shows on the card the user reads,
+    not just in a container log."""
+    plan = _eval(current_soc=80, predicted_sunrise=80.0, target=30.0)
+    assert plan.action == "on"
+    stalled = solar_charge.compute_plan(
+        config=_cfg(), current_soc_pct=80,
+        solar_w=0.0, load_w=0.0, ac_input_w=0.0,
+        telemetry_age_s=10.0, target_sunrise_soc_pct=30.0,
+        predicted_sunrise_soc_with_diversion=80.0,
+        predicted_sunrise_soc_baseline=80.0,
+        balance_due=False, days_since_full=40.0, pack_spread_pp=35.0,
+        balance_stalled_days=7.4, now_ts=1_700_000_000.0,
+    )
+    assert stalled.action == "on"              # car is no longer blocked
+    assert "pack-balance STALLED 7d without reaching 100%" in stalled.reason
+    assert stalled.reason.startswith(plan.reason)   # normal reason kept
+    assert len(stalled.reason) <= 256
+
+
 # ---------- Fail-closed safety paths ----------
 def test_off_on_stale_telemetry():
     plan = _eval(current_soc=80, predicted_sunrise=80.0, telemetry_age=120)
@@ -618,3 +857,35 @@ def test_overload_state_resilient_to_corrupt_file(tmp_path, monkeypatch):
     assert solar_charge.read_overload_state() == {
         "SN-A": {"last_overload_ts": 1234.5, "load_w": 2400.0}
     }
+
+
+# ---------- config persistence: partial saves must not clobber ----------
+def test_set_config_merges_onto_stored_config(tmp_path, monkeypatch):
+    """The Solar-charge form posts only the fields it renders. Validating
+    that partial payload against DEFAULT_CONFIG silently reverted every
+    key the form doesn't know about — which would re-arm a deliberately
+    disabled pack-balance trigger on the next unrelated save."""
+    monkeypatch.setattr(solar_charge, "CONFIG_PATH",
+                        str(tmp_path / "solar_charge.json"))
+    sn = "TEST-MERGE"
+    solar_charge.set_config(
+        {"mode": "active", "car_load_w": 1300,
+         "balance_spread_trigger_pp": 0, "balance_every_days": 0},
+        device_sn=sn)
+    # A partial save (no balance_* keys), exactly like the form.
+    solar_charge.set_config({"mode": "active", "car_load_w": 1500},
+                            device_sn=sn)
+    got = solar_charge.get_config(sn)
+    assert got["car_load_w"] == 1500              # updated
+    assert got["balance_spread_trigger_pp"] == 0  # override survived
+    assert got["balance_every_days"] == 0
+
+
+def test_set_config_first_write_still_gets_defaults(tmp_path, monkeypatch):
+    """No prior config -> defaults fill the gaps (unchanged behavior)."""
+    monkeypatch.setattr(solar_charge, "CONFIG_PATH",
+                        str(tmp_path / "solar_charge.json"))
+    got = solar_charge.set_config({"mode": "test"}, device_sn="TEST-FRESH")
+    assert got["mode"] == "test"
+    assert got["balance_spread_trigger_pp"] == \
+        solar_charge.DEFAULT_CONFIG["balance_spread_trigger_pp"]

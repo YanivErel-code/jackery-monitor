@@ -3398,6 +3398,10 @@ async function loadSolarCharge() {
     document.getElementById('solar-car-load-w').value = cfg.car_load_w ?? 1400;
     document.getElementById('solar-comfort-high').value = cfg.comfort_high_pct ?? 70;
     document.getElementById('solar-comfort-low').value = cfg.comfort_low_pct ?? 30;
+    document.getElementById('solar-balance-spread').value =
+      cfg.balance_spread_trigger_pp ?? 25;
+    document.getElementById('solar-balance-days').value =
+      cfg.balance_every_days ?? 30;
     document.getElementById('solar-min-hold').value = cfg.min_hold_s ?? 30;
     document.getElementById('solar-surplus-buffer').value = cfg.surplus_buffer_w ?? 100;
     document.getElementById('solar-on-hysteresis').value = cfg.on_hysteresis_pp ?? 3;
@@ -3472,6 +3476,10 @@ document.getElementById('solar-form')?.addEventListener('submit', async (e) => {
     car_load_w: parseInt(document.getElementById('solar-car-load-w').value, 10) || 1400,
     comfort_high_pct: parseInt(document.getElementById('solar-comfort-high').value, 10) || 70,
     comfort_low_pct: parseInt(document.getElementById('solar-comfort-low').value, 10) || 30,
+    // 0 is a meaningful value (disables the trigger), so these cannot use
+    // the `|| default` idiom the older fields do.
+    balance_spread_trigger_pp: _intOr('solar-balance-spread', 25),
+    balance_every_days: _intOr('solar-balance-days', 30),
     min_hold_s: parseInt(document.getElementById('solar-min-hold').value, 10) || 30,
     surplus_buffer_w: parseInt(document.getElementById('solar-surplus-buffer').value, 10) || 100,
     on_hysteresis_pp: parseInt(document.getElementById('solar-on-hysteresis').value, 10) || 3,
@@ -4152,6 +4160,16 @@ function applyStatus(s) {
 
   // Live chart
   if (activeTab === 'live') drawLiveChart(s);
+}
+
+
+// parseInt that treats 0 as a real value (|| would swallow it) and falls
+// back only when the field is missing or unparseable.
+function _intOr(id, dflt) {
+  const el = document.getElementById(id);
+  if (!el) return dflt;
+  const v = parseInt(el.value, 10);
+  return Number.isFinite(v) ? v : dflt;
 }
 
 // ============================================================

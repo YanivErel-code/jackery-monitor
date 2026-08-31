@@ -1973,13 +1973,43 @@ _PLUG_POWER_FRESH_S = 90.0           # accept cached plug_power_w up to 90s old
 # reading hits the target so diversion resumes without waiting a tick.
 _BALANCE_LAST_FULL: dict[str, tuple[float, int | None]] = {}
 _BALANCE_CACHE_TTL_S = 300.0
+# When each device's currently-open balance window first went due, and
+# which devices we've already shouted about. Both cleared when the window
+# closes. In-memory on purpose — see solar_charge.balance_window_status.
+_BALANCE_WINDOW_OPEN: dict[str, float] = {}
+_BALANCE_STALL_LOGGED: set[str] = set()
+
+
+def _balance_window_closed(device_sn: str) -> None:
+    _BALANCE_WINDOW_OPEN.pop(device_sn, None)
+    _BALANCE_STALL_LOGGED.discard(device_sn)
 
 
 def _balance_due_for(device_sn: str, cfg: dict, main_soc: float | None):
-    """Returns (balance_due, days_since_full) for the pack-balance gate."""
+    """Returns (balance_due, days_since_full, pack_spread_pp, stalled_days)
+    for the pack-balance gate.
+
+    Two triggers open the window, each independently disabled with a 0:
+    the calendar (`balance_every_days` since the main unit last reported
+    full) and the live evidence (`balance_spread_trigger_pp` of max-min
+    pack SOC). Whichever fires, the window closes the same way — the
+    moment main reports the target again, which stamps completion and
+    mutes the spread trigger for a day while the BMS settles.
+
+    `stalled_days` is non-None only when the window overran
+    `balance_max_window_days` without the rig ever getting there; the
+    caller then gets balance_due=False (stop blocking the car) plus the
+    age to report.
+    """
+    packs = state.battery_packs_by_sn.get(device_sn or "", [])
+    spread_pp = solar_charge.pack_soc_spread_pp(packs)
+    # Age-blind pre-check: only worth the last-full lookup below if some
+    # trigger could still fire. The age-aware answer comes after it.
+    spread_wide = solar_charge.spread_trigger_fired(cfg, spread_pp)
     bal_days = int(cfg.get("balance_every_days") or 0)
-    if bal_days <= 0:
-        return False, None
+    if bal_days <= 0 and not spread_wide:
+        _balance_window_closed(device_sn)
+        return False, None, spread_pp, None
     target_pct = int(cfg.get("balance_target_main_pct") or 100)
     now = time.time()
     if main_soc is not None and float(main_soc) >= target_pct:
@@ -1993,14 +2023,49 @@ def _balance_due_for(device_sn: str, cfg: dict, main_soc: float | None):
         except Exception as e:
             log.debug("balance: last-full lookup failed for %s: %s",
                       device_sn, e)
-            return False, None  # fail open — don't block diversion on a DB error
-        _BALANCE_LAST_FULL[device_sn] = (now, lf)
-        cached = _BALANCE_LAST_FULL[device_sn]
+            # Fail open on the CALENDAR trigger — it's the one that needs
+            # the DB. A measured spread still deserves a window, so don't
+            # bail out entirely; and don't poison the cache with a None,
+            # which the next tick would read as "never been full" (i.e.
+            # overdue) rather than "we couldn't look".
+            if not spread_wide:
+                _balance_window_closed(device_sn)
+                return False, None, spread_pp, None
+            cached = (now, None)
+            bal_days = 0
+        else:
+            _BALANCE_LAST_FULL[device_sn] = (now, lf)
+            cached = _BALANCE_LAST_FULL[device_sn]
     last_full = cached[1]
-    if last_full is None:
-        return True, None  # never seen full in the lookback — overdue
-    days = (now - last_full) / 86400.0
-    return days >= bal_days, days
+    days = None if last_full is None else (now - last_full) / 86400.0
+    # No full charge in the lookback → overdue by definition (when the
+    # calendar trigger is enabled at all).
+    days_due = bal_days > 0 and (days is None or days >= bal_days)
+    spread_due = solar_charge.spread_trigger_fired(cfg, spread_pp, days)
+    if not (days_due or spread_due):
+        _balance_window_closed(device_sn)
+        return False, days, spread_pp, None
+
+    opened, window_days, stalled = solar_charge.balance_window_status(
+        config=cfg, opened_ts=_BALANCE_WINDOW_OPEN.get(device_sn), now_ts=now)
+    _BALANCE_WINDOW_OPEN[device_sn] = opened
+    if not stalled:
+        _BALANCE_STALL_LOGGED.discard(device_sn)
+        return True, days, spread_pp, None
+    if device_sn not in _BALANCE_STALL_LOGGED:
+        _BALANCE_STALL_LOGGED.add(device_sn)
+        log.error(
+            "balance: %s has held diversion OFF for %.1fd and the main unit "
+            "still has not reported %d%% (pack spread %s, last full %s) — "
+            "the rig may not be able to reach a full charge (dead/faulted "
+            "pack, or not enough sun). Giving up on this attempt and "
+            "resuming car diversion; will retry after %dd.",
+            device_sn, window_days, target_pct,
+            f"{spread_pp:.0f}pp" if spread_pp is not None else "unknown",
+            f"{days:.1f}d ago" if days is not None else "never",
+            int(cfg.get("balance_every_days") or 0),
+        )
+    return False, days, spread_pp, window_days
 _PLUG_POWER_NOISE_FLOOR_W = 5.0      # below this, treat as "nothing plugged in"
 _LEARNED_LOAD_PRESENT_RATIO = 0.5    # delta must stay ≥ half of learned to count
 
@@ -2365,7 +2430,8 @@ async def _solar_charge_evaluate(record: bool = True,
         # the input the overnight-reserve guard projects to sunrise.
         sc_car_w = float(cfg.get("car_load_w") or 0)
         household_load_w = max(0.0, load_w - (sc_car_w if rs.plug_is_on else 0.0))
-        balance_due, days_since_full = _balance_due_for(device_sn, cfg, main_soc)
+        (balance_due, days_since_full, pack_spread_pp,
+         balance_stalled_days) = _balance_due_for(device_sn, cfg, main_soc)
         plan = solar_charge.compute_plan(
             config=cfg,
             current_soc_pct=_system_soc_pct(main_soc, device_sn, model_code),
@@ -2383,6 +2449,8 @@ async def _solar_charge_evaluate(record: bool = True,
             guard_horizon_h=SC_GUARD_HORIZON_S / 3600.0,
             balance_due=balance_due,
             days_since_full=days_since_full,
+            pack_spread_pp=pack_spread_pp,
+            balance_stalled_days=balance_stalled_days,
         )
         plan = solar_charge.gate_min_hold(
             plan,

@@ -148,15 +148,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # leaves comfortable headroom under the 2100W trip threshold.
     "max_system_load_w": 800,
     # Pack balancing: the BMS balances the expansion packs only when the
-    # rig is held at a genuine full charge, so once every
-    # `balance_every_days` the controller stops diverting to the car and
-    # lets surplus solar drive the MAIN unit to
-    # `balance_target_main_pct`. The window opens when the last
-    # main>=target telemetry sample is older than the interval and
+    # rig is held at a genuine full charge, so the controller
+    # periodically stops diverting to the car and lets surplus solar
+    # drive the MAIN unit to `balance_target_main_pct`. The window
     # closes the moment main reports the target again (derived from
-    # telemetry history — no extra state file). 0 disables.
-    "balance_every_days": 60,
+    # telemetry history — no extra state file).
+    #
+    # Two independent triggers open the window; each is disabled by
+    # setting it to 0, and the feature is off only when both are 0:
+    #
+    #   `balance_every_days` — calendar: the last main>=target sample is
+    #     older than this. 30d comes from measured per-pack drift on the
+    #     5-pack rig: a full charge levels the packs, and the max-min
+    #     spread is back to 20pp within ~10 days and 35pp by day 26. The
+    #     old 60d default left the rig badly imbalanced most of its life.
+    #
+    #   `balance_spread_trigger_pp` — evidence: the CURRENT max-min pack
+    #     SOC spread is at or above this. Drift rate varies with load and
+    #     pack health, so the calendar alone is either too eager or far
+    #     too slow; 25pp is comfortably above the 3-5pp a freshly
+    #     balanced rig shows and below the 31-35pp seen after ~26 days.
+    #
+    # `balance_max_window_days` bounds the pathology where the rig can no
+    # longer reach the target at all (dead pack, a shaded winter
+    # fortnight): an evidence trigger would otherwise hold the car off
+    # forever, because the spread only shrinks at a full charge that
+    # never comes. See balance_window_status().
+    "balance_every_days": 30,
     "balance_target_main_pct": 100,
+    "balance_spread_trigger_pp": 25,
+    "balance_max_window_days": 7,
 }
 
 # When solar drops below this for SUNSET_SUSTAIN_S seconds, treat it as
@@ -184,6 +205,17 @@ MAX_TELEMETRY_AGE_S = 90
 # unimpeded. Set at 50W (well above sensor noise / idle adapter draw,
 # well below any real grid-charging rate the unit produces).
 AC_INPUT_GRID_CHARGE_THRESHOLD_W = 50.0
+
+# A pack spread read within a day of a full charge is mid-balance, not
+# evidence: the BMS tops the packs one after another, so a charge caught
+# in flight reads wide (2026-08-11: 79/99/99/78/97 = 21pp) while the rig
+# reads level again the next day (2026-08-06, one day after the 08-05
+# full charge: 3pp). Muting the spread trigger for that day is what makes
+# "the window closes as soon as main reports the target" true for a
+# spread-triggered window too — otherwise the completed window would
+# reopen on the next tick off the same not-yet-settled reading. Hardcoded
+# (not user-configurable): the rationale is how the BMS works, not taste.
+SPREAD_TRIGGER_MIN_FULL_AGE_DAYS = 1.0
 
 _config_lock = threading.Lock()
 
@@ -222,8 +254,10 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     _int_in_range("inverter_protect_load_w", 500, 4500)
     _int_in_range("inverter_protect_cooldown_s", 60, 86400)
     _int_in_range("max_system_load_w", 100, 4500)
-    _int_in_range("balance_every_days", 0, 365)   # 0 = disabled
+    _int_in_range("balance_every_days", 0, 365)          # 0 = disabled
     _int_in_range("balance_target_main_pct", 80, 100)
+    _int_in_range("balance_spread_trigger_pp", 0, 100)   # 0 = disabled
+    _int_in_range("balance_max_window_days", 0, 365)     # 0 = unbounded
     # Defensive sanity: comfort_low must be < comfort_high or we'd
     # paint an unreachable state (plug can never be on).
     if out["comfort_low_pct"] >= out["comfort_high_pct"]:
@@ -260,10 +294,26 @@ def get_config(device_sn: str | None = None) -> dict[str, Any]:
 
 
 def set_config(cfg: dict[str, Any], device_sn: str | None = None) -> dict[str, Any]:
-    """Validate + persist + return the saved config for a device."""
-    validated = _validate_config(cfg)
+    """Validate + persist + return the saved config for a device.
+
+    A PARTIAL payload merges onto the device's stored config, not onto
+    DEFAULT_CONFIG. The Solar-charge form posts only the fields it
+    renders, so validating a partial payload against the defaults
+    silently reverted every key the form doesn't know about — which
+    would quietly re-arm a deliberately-disabled pack-balance trigger on
+    the next unrelated save."""
     with _config_lock:
         existing = _load_raw()
+        # Derive the prior config from the raw data we already hold —
+        # get_config() would re-acquire this same non-reentrant lock.
+        if _is_per_device_shape(existing):
+            prior_raw = ((existing.get("by_device") or {}).get(device_sn)
+                         if device_sn else None)
+        else:
+            prior_raw = existing or None
+        merged = _validate_config(prior_raw or {})
+        merged.update(cfg or {})
+        validated = _validate_config(merged)
         if device_sn:
             if not _is_per_device_shape(existing):
                 # First write: migrate.
@@ -399,6 +449,103 @@ class Plan:
         return asdict(self)
 
 
+# ---------- Pack balancing ----------
+def pack_soc_spread_pp(packs: Any) -> float | None:
+    """Max-min SOC across a device's expansion packs, in percentage points.
+
+    `packs` is the raw cloud-shaped list the server caches per device
+    (`state.battery_packs_by_sn[sn]`), whose per-pack SOC field is "rb".
+    Returns None when fewer than two packs report a usable SOC — a
+    spread needs two readings, and a rig without packs has nothing to
+    balance. Junk entries (missing/None/non-numeric "rb") are skipped
+    rather than poisoning the spread: the cloud drops fields during
+    warm-up and a half-populated snapshot must not read as 0%.
+    """
+    socs: list[float] = []
+    for p in packs or ():
+        if not isinstance(p, dict):
+            continue
+        rb = p.get("rb")
+        if rb is None:
+            continue
+        try:
+            socs.append(float(rb))
+        except (TypeError, ValueError):
+            continue
+    if len(socs) < 2:
+        return None
+    return max(socs) - min(socs)
+
+
+def spread_trigger_fired(config: dict[str, Any],
+                         pack_spread_pp: float | None,
+                         days_since_full: float | None = None) -> bool:
+    """True when the live pack spread has reached balance_spread_trigger_pp.
+
+    Shared by the server (which decides whether to open the balance
+    window) and compute_plan (which names the trigger in the decision
+    reason) so the two can never disagree about what fired.
+
+    `days_since_full` mutes the trigger for SPREAD_TRIGGER_MIN_FULL_AGE_DAYS
+    after a full charge; None (unknown / never full) does not mute.
+    """
+    try:
+        trigger = int(config.get("balance_spread_trigger_pp") or 0)
+    except (TypeError, ValueError):
+        return False
+    if trigger <= 0 or pack_spread_pp is None or pack_spread_pp < trigger:
+        return False
+    return (days_since_full is None
+            or days_since_full >= SPREAD_TRIGGER_MIN_FULL_AGE_DAYS)
+
+
+def balance_window_status(*, config: dict[str, Any],
+                          opened_ts: float | None,
+                          now_ts: float) -> tuple[float, float, bool]:
+    """Age one device's open balance window: (opened_ts, days_open, stalled).
+
+    A balance window blocks car diversion until the main unit reports
+    `balance_target_main_pct`. That is safe while the target is
+    reachable — but a dead pack or a shaded winter fortnight makes it
+    unreachable, and the spread trigger only clears at the full charge
+    that never arrives, so the car would be starved forever.
+
+    So each attempt gets `balance_max_window_days`. Past that the window
+    is STALLED: the caller stops blocking and says so loudly instead of
+    quietly holding the plug off. The window then stands down for one
+    full balance interval before the clock restarts and we try again —
+    a genuinely broken rig costs the car roughly
+    max_window/(max_window+interval) of its charging opportunity (7/37
+    on defaults) instead of all of it, and a rig that was merely clouded
+    over gets another honest attempt on its own.
+
+    `opened_ts` is the caller's stored stamp for this device (None on
+    the first tick of a new window); callers persist the returned one.
+    The stamp is in-memory by design — a restart grants a fresh attempt,
+    which errs toward trying to balance rather than toward declaring a
+    rig broken on evidence gathered by a process that is no longer
+    running.
+    """
+    opened = float(opened_ts) if opened_ts is not None else float(now_ts)
+    days_open = max(0.0, (float(now_ts) - opened) / 86400.0)
+    try:
+        max_window = int(config.get("balance_max_window_days") or 0)
+    except (TypeError, ValueError):
+        max_window = 0
+    if max_window <= 0:                       # bound disabled: never stall
+        return opened, days_open, False
+    try:
+        interval = int(config.get("balance_every_days") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    # Spread-only setups (calendar trigger off) still need a stand-down
+    # length; reuse the attempt length so the duty cycle stays 50%.
+    stand_down = interval if interval > 0 else max_window
+    if days_open >= max_window + stand_down:
+        return float(now_ts), 0.0, False      # stood down long enough — retry
+    return opened, days_open, days_open >= max_window
+
+
 def compute_plan(
     *,
     config: dict[str, Any],
@@ -417,6 +564,8 @@ def compute_plan(
     guard_horizon_h: float = 36.0,
     balance_due: bool = False,
     days_since_full: float | None = None,
+    pack_spread_pp: float | None = None,
+    balance_stalled_days: float | None = None,
     now_ts: float | None = None,
 ) -> Plan:
     """Pure decision function. All inputs explicit; no globals read.
@@ -459,6 +608,19 @@ def compute_plan(
         guard_horizon_h: hours the cloudy-tomorrow guard looks ahead;
             audit/reason strings quote it, so keep it in sync with the
             window the caller used to compute predicted_min_soc_pct.
+        balance_due: the pack-balance window is open — hold diversion OFF
+            so surplus drives the main unit to a full charge.
+        days_since_full, pack_spread_pp: the two pieces of evidence the
+            caller weighed to open that window (calendar age of the last
+            full charge; live max-min pack SOC spread). Both are quoted
+            in the decision reason so the dashboard says WHICH trigger
+            fired, not just that one did.
+        balance_stalled_days: set (to the window's age in days) when a
+            balance window overran `balance_max_window_days` without the
+            rig ever reaching the target. The caller passes balance_due
+            =False in that state — diversion is no longer blocked — and
+            this stamps the diagnosis onto every decision reason so the
+            give-up is visible in the log instead of silent.
         now_ts: clock injection for tests; defaults to time.time().
     """
     now = float(now_ts if now_ts is not None else time.time())
@@ -478,10 +640,20 @@ def compute_plan(
     # so compute_plan stays pure — pure decision in, dirty toggle gate out.
     safety_pp = float(config.get("safety_margin_pp") or 5)
     on_hysteresis_pp = float(config.get("on_hysteresis_pp") or 3)
+    bal_target = int(config.get("balance_target_main_pct")
+                     or DEFAULT_CONFIG["balance_target_main_pct"])
 
     # Build skeleton Plan and the caller fills in plug_state_before before
     # calling — we can't read it from runtime here without coupling.
     def _plan(action: str, reason: str) -> Plan:
+        # A stalled balance window rides along on whatever the controller
+        # decided instead: the rig has stopped being able to reach a full
+        # charge and the user needs to see that on the card they already
+        # read, not only in a container log they don't.
+        if balance_stalled_days is not None:
+            reason = (f"{reason} | pack-balance STALLED "
+                      f"{balance_stalled_days:.0f}d without reaching "
+                      f"{bal_target}% — check the packs")
         return Plan(
             action=action, reason=reason,
             mode=mode, decided_at=int(now),
@@ -522,8 +694,8 @@ def compute_plan(
         )
 
     # Pack-balance window: the BMS balances the expansion packs only at
-    # a genuine full charge, so once every balance_every_days the car
-    # gets nothing — every surplus watt goes to driving the main unit to
+    # a genuine full charge, so when the window is open the car gets
+    # nothing — every surplus watt goes to driving the main unit to
     # balance_target_main_pct. The server flips balance_due back off the
     # moment main reports the target, so diversion resumes automatically.
     # Placed above the forecast gates: a balance hold applies even when
@@ -531,14 +703,22 @@ def compute_plan(
     if balance_due:
         bal_days = int(config.get("balance_every_days")
                        or DEFAULT_CONFIG["balance_every_days"])
-        bal_target = int(config.get("balance_target_main_pct")
-                         or DEFAULT_CONFIG["balance_target_main_pct"])
         since_txt = (f"{days_since_full:.0f}d since last full charge"
                      if days_since_full is not None
                      else "no full charge on record")
+        # Name the trigger that actually fired. The spread reading is the
+        # more diagnostic of the two (it says how bad the imbalance got,
+        # not just that the calendar rolled over), so it wins when both
+        # are true — and it carries the calendar age along anyway.
+        if spread_trigger_fired(config, pack_spread_pp, days_since_full):
+            trigger_pp = int(config.get("balance_spread_trigger_pp") or 0)
+            why = (f"pack spread {pack_spread_pp:.0f}pp ≥ {trigger_pp}pp "
+                   f"trigger ({since_txt})")
+        else:
+            why = f"{since_txt} (interval {bal_days}d)"
         return _plan(
             "off",
-            f"pack-balance window: {since_txt} (interval {bal_days}d) — "
+            f"pack-balance window: {why} — "
             f"diversion held OFF so surplus drives main to {bal_target}% "
             f"and the BMS can balance the packs",
         )

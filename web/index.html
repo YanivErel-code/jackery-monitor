@@ -1038,6 +1038,24 @@
             </div>
           </div>
           <div class="settings-row">
+            <label class="settings-label" for="solar-balance-spread">
+              <span class="settings-label-text">Pack-balance trigger (pp spread)</span>
+              <span class="settings-hint">The BMS only balances the expansion packs at a genuine full charge, so when the packs drift apart by this many percentage points the controller stops diverting and lets surplus solar drive the main unit to 100%. Measured on this rig: a full charge resets the spread to ~3pp, and it climbs back past 30pp in about 3-4 weeks. <strong>Set to 0 to disable</strong> the spread trigger (the calendar interval below still applies).</span>
+            </label>
+            <div class="settings-control">
+              <input id="solar-balance-spread" type="number" min="0" max="100" step="1" value="25" /> <small>pp</small>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="solar-balance-days">
+              <span class="settings-label-text">Pack-balance interval (days)</span>
+              <span class="settings-hint">Fallback calendar trigger: force a balance charge if the main unit hasn't reached 100% for this many days. 0 disables it. The spread trigger above is usually what fires first — this rig reaches 100% often enough on its own that a long interval never triggers.</span>
+            </label>
+            <div class="settings-control">
+              <input id="solar-balance-days" type="number" min="0" max="365" step="1" value="30" /> <small>days</small>
+            </div>
+          </div>
+          <div class="settings-row">
             <label class="settings-label" for="solar-comfort-low">
               <span class="settings-label-text">Hard SOC floor</span>
               <span class="settings-hint">Always turn OFF if current SOC drops to this level, regardless of what the forecast says. Last-resort guard against forecast error — keep this comfortably above zero.</span>

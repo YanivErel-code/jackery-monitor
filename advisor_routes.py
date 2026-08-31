@@ -31,8 +31,17 @@ import forecaster
 import location as device_location
 import settings as user_settings
 import smart_charge
+from energy_db import BUCKET_S as _SAMPLE_BUCKET_S
 
 log = logging.getLogger("jackery-monitor")
+
+# Per-tool row cap on what we hand back to the model. Rows beyond it are
+# dropped, but `row_count` still reports the true match count so a
+# truncated answer can't be mistaken for a short one.
+_MAX_TOOL_ROWS = 500
+# Cap the samples lookback: history() filters only by hours-from-now,
+# so an old window would scan the entire table for a few rows.
+_MAX_LOOKBACK_HOURS = 24 * 45
 
 
 @dataclass
@@ -316,6 +325,74 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     when interpreting historical samples / predictions / decisions."""
     return [
         {
+            "ts_iso": "2026-08-31T18:00:00+00:00",
+            "subsystem": "advisor-tools",
+            "summary": (
+                "FALSE-ANOMALY FIX — 'sub-hour telemetry is incomplete' was an "
+                "artifact of THIS TOOL, not the data. The samples table is "
+                "complete at 60s resolution (20155/20160 buckets over 14 days, "
+                "uniform 60s spacing). Two defects fixed in query_samples: (a) "
+                "the integrated averages were hardcoded to null unless "
+                "bucket_s==3600, so every sub-hour query looked empty — they "
+                "are now computed as bucket_wh / (bucket_s/3600) at ANY "
+                "resolution; (b) the lookback was sized from the window's "
+                "DURATION while history() looks back from NOW, so any window "
+                "older than its own length was clipped to zero rows — that is "
+                "why overnight 5/15-minute queries 'returned no rows'. "
+                "Responses now carry bucket_s / returned_rows / "
+                "expected_buckets / lookback_clamped. Do not report missing "
+                "sub-hour telemetry again without first comparing "
+                "returned_rows to expected_buckets."
+            ),
+        },
+        {
+            "ts_iso": "2026-08-31T18:05:00+00:00",
+            "subsystem": "forecaster",
+            "summary": (
+                "DRAIN MODEL — the 2026-08-27 'short-horizon drain too "
+                "aggressive' WARN is CONFIRMED and root-caused; the fix is "
+                "deliberately NOT yet shipped. fit_drain_model returns only "
+                "n_windows=2 on 14d (min 5): its start-SOC>=85% gate rejects "
+                "96.7% of candidate pairs on this rig, and a sub-1.0 free-OLS "
+                "slope makes it discard even a good 30d fit, so it falls back "
+                "to priors (50W, 10%) with a hardcoded 5x60=300W pack baseline "
+                "stacked on top => a 350W constant. Measured over 30d of night "
+                "hours the physically-admissible model is 218-272W + 1.0*load "
+                "(overhead ~0%, NOT 10%), so it over-predicts quiet-night "
+                "drain by 200-400W and under-predicts busy nights by "
+                "700-1000W. The correction is HELD because alone it flips the "
+                "10h overnight bias from conservative to +6pp optimistic "
+                "(19/19 replayed nights rosier) and clears the "
+                "cloudy-tomorrow guard added after the 2026-07-12 incident: "
+                "the 350W constant was accidentally compensating for "
+                "fit_load_profile's trimmed-median under-prediction of busy "
+                "nights (536W predicted vs 1374-1489W actual). Both must land "
+                "together. Do NOT re-file this as a new anomaly and do NOT "
+                "recommend raising PER_PACK_BASELINE_W."
+            ),
+        },
+        {
+            "ts_iso": "2026-08-31T18:10:00+00:00",
+            "subsystem": "solar_charge",
+            "summary": (
+                "PACK IMBALANCE — the 2026-08-27 imbalance WARN is real and "
+                "now has a controller response. True instantaneous inter-pack "
+                "spread (max-min WITHIN one snapshot; do NOT compute it as a "
+                "daily MIN/MAX, which conflates intraday SOC swings with "
+                "imbalance) climbed monotonically from ~3pp just after the "
+                "08-05 full charge to 33pp by 08-31. Every historical full "
+                "charge reset it to 3-8pp, so this is a balance-charge deficit "
+                "rather than proven pack failure. The pack-balance window now "
+                "also triggers on live spread >= balance_spread_trigger_pp "
+                "(default 25) instead of only a calendar interval — the "
+                "calendar could never fire because the rig reaches 100% "
+                "naturally at least every 45 days. While the window is open "
+                "the controller refuses to divert to the car so surplus drives "
+                "the main unit to 100%. Pack error_code=2 in that report was "
+                "INTERMITTENT (all five read 0 in every 5-day snapshot)."
+            ),
+        },
+        {
             "ts_iso": "2026-06-12T01:00:00+00:00",
             "subsystem": "forecaster",
             "summary": (
@@ -402,9 +479,11 @@ def _recent_code_changes() -> list[dict[str, Any]]:
                 "Empirically on the user's rig: pre-fix predicted "
                 "sunrise SOC ~80% (cause of 5/22's 20%-actual blowout); "
                 "post-fix ~44-52% — much more conservative and matches "
-                "the observed drain. Remaining 110W residual gap "
-                "(empirical 410W vs new model 300W) may need bumping "
-                "PER_PACK_BASELINE_W to 70-80W after more days of data."
+                "the observed drain. SUPERSEDED 2026-08-31: do NOT "
+                "raise PER_PACK_BASELINE_W — a 30-day regression of "
+                "implied drain vs metered load measured the EFFECTIVE "
+                "constant at 220-250W, not the 350W this model assumes "
+                "(50 + 5x60). See the 2026-08-31 drain-model entry."
             ),
         },
         {
@@ -878,13 +957,40 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
         if name == "query_samples":
             start = _parse_iso(args.get("start_iso"))
             end = _parse_iso(args.get("end_iso"))
-            bucket_s = int(args.get("bucket_s") or 3600)
+            requested_bucket_s = int(args.get("bucket_s") or 3600)
             if not start or not end:
                 return {"error": "start_iso/end_iso required (ISO 8601)"}
-            hours = max(1, (end - start) // 3600 + 1)
+            if end <= start:
+                return {"error": "end_iso must be after start_iso"}
+            # history() mirrors the DB's own floor: buckets finer than the
+            # sampler's period don't exist, so the resolution we actually
+            # get back is the clamped value — divide Wh by THAT, and report
+            # it, or the caller silently reads watts scaled by the wrong
+            # bucket width.
+            bucket_s = max(_SAMPLE_BUCKET_S, requested_bucket_s)
+            # history() looks back N hours from NOW, so the lookback has to
+            # reach `start`, not merely span the window. Sizing it from
+            # (end - start) fetched only the last few hours and the clip
+            # below then dropped every row — the origin of the recurring
+            # false "sub-hour telemetry is incomplete" anomaly for any
+            # window that had already scrolled past (e.g. last night).
+            # Bounded: history() has no start/end filter, so a 1-hour
+            # question about a months-old window would otherwise
+            # materialize the whole samples table (plus the decision-log
+            # join) to return a handful of rows.
+            now = int(time.time())
+            hours = max(1, -(-(now - start) // 3600) + 1)
+            hours = min(hours, _MAX_LOOKBACK_HOURS)
             rows = state.energy.history(device_sn, hours=hours, bucket_s=bucket_s)
-            # Filter to the requested window (history() goes back N hours
-            # from now; we then clip).
+            # Wh accumulated in a bucket ÷ the bucket's width in hours is
+            # the bucket's true average power. At bucket_s=3600 the divisor
+            # is 1 and this reduces to the historical Wh-as-watts value.
+            bucket_h = bucket_s / 3600.0
+
+            def _avg_w(wh: float | None) -> int:
+                return int((wh or 0) / bucket_h)
+
+            # history() goes back N hours from now; clip to the window.
             out = []
             for r in rows:
                 if r["ts"] < start or r["ts"] >= end:
@@ -892,20 +998,32 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                 out.append({
                     "ts": _iso(r["ts"]),
                     "soc": r.get("battery_pct"),
-                    "in_w_avg": int(r.get("input_wh") or 0)
-                              if bucket_s == 3600 else None,
-                    "out_w_avg": int(r.get("output_wh") or 0)
-                               if bucket_s == 3600 else None,
-                    "solar_w_avg": int(r.get("solar_wh") or 0)
-                                 if bucket_s == 3600 else None,
-                    "ac_input_w_avg": int(r.get("ac_input_wh") or 0)
-                                    if bucket_s == 3600 else None,
+                    "in_w_avg": _avg_w(r.get("input_wh")),
+                    "out_w_avg": _avg_w(r.get("output_wh")),
+                    "solar_w_avg": _avg_w(r.get("solar_wh")),
+                    "ac_input_w_avg": _avg_w(r.get("ac_input_wh")),
                     "in_w_instant": r.get("input_w"),
                     "out_w_instant": r.get("output_w"),
                     "solar_w_instant": r.get("solar_w"),
                 })
-            return {"rows": out[:500], "row_count": len(out),
-                    "truncated": len(out) > 500}
+            # Report the resolution and the counts so the consumer can tell
+            # "the window is genuinely empty" from "I asked for something
+            # this tool couldn't serve at that resolution".
+            return {"rows": out[:_MAX_TOOL_ROWS], "row_count": len(out),
+                    "truncated": len(out) > _MAX_TOOL_ROWS,
+                    "returned_rows": min(len(out), _MAX_TOOL_ROWS),
+                    "bucket_s": bucket_s,
+                    "requested_bucket_s": requested_bucket_s,
+                    "window_start": _iso(start), "window_end": _iso(end),
+                    "lookback_hours": hours,
+                    # Align to the same grid history() groups on, or an
+                    # unaligned window reports expected±1 and the model
+                    # reads a correctly-served window as gapped — the very
+                    # false-anomaly class this tool fix exists to kill.
+                    "expected_buckets": max(
+                        0,
+                        ((end - 1) // bucket_s) - (start // bucket_s) + 1),
+                    "lookback_clamped": hours >= _MAX_LOOKBACK_HOURS}
 
         if name == "query_predictions":
             start = _parse_iso(args.get("start_iso"))
@@ -932,8 +1050,8 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                     "actual_soc": round(p.get("actual_soc", 0), 1),
                     "error_pp": round(p.get("error", 0), 1),
                 })
-            return {"rows": out[:500], "row_count": len(out),
-                    "truncated": len(out) > 500}
+            return {"rows": out[:_MAX_TOOL_ROWS], "row_count": len(out),
+                    "truncated": len(out) > _MAX_TOOL_ROWS}
 
         if name == "query_decisions":
             start = _parse_iso(args.get("start_iso"))
@@ -958,8 +1076,8 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                     "target_sunrise_soc_pct": d.get("target_sunrise_soc_pct"),
                     "reason": d.get("reason"),
                 })
-            return {"rows": out[:500], "row_count": len(out),
-                    "truncated": len(out) > 500}
+            return {"rows": out[:_MAX_TOOL_ROWS], "row_count": len(out),
+                    "truncated": len(out) > _MAX_TOOL_ROWS}
 
         if name == "query_weather":
             start = _parse_iso(args.get("start_iso")) or 0
@@ -974,8 +1092,8 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                     "ghi_w_m2": w.get("ghi_w_m2"),
                     "cloud_cover_pct": w.get("cloud_cover_pct"),
                 })
-            return {"rows": out[:500], "row_count": len(out),
-                    "truncated": len(out) > 500}
+            return {"rows": out[:_MAX_TOOL_ROWS], "row_count": len(out),
+                    "truncated": len(out) > _MAX_TOOL_ROWS}
 
         if name == "query_battery_packs":
             packs = state.energy.latest_battery_packs(device_sn)
