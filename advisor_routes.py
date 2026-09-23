@@ -31,6 +31,7 @@ import forecaster
 import location as device_location
 import settings as user_settings
 import smart_charge
+import solar_charge
 from energy_db import BUCKET_S as _SAMPLE_BUCKET_S
 
 log = logging.getLogger("jackery-monitor")
@@ -260,6 +261,8 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         "main_soc_pct": main_soc,
         "system_soc_pct": round(sys_soc, 1) if sys_soc is not None else None,
         "smart_charge_config": cfg,
+        "balance_spread_trigger_pp": solar_charge.get_config(device_sn).get(
+            "balance_spread_trigger_pp"),
         # Hybrid drain model: surface both terms so the advisor can
         # reason about parasitic baseline vs throughput-scaled overhead
         # separately. `fitted_idle_overhead_w` keeps its old name for
@@ -324,6 +327,22 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     """Return the rolling list of fixes the advisor needs to know about
     when interpreting historical samples / predictions / decisions."""
     return [
+        {
+            "ts_iso": "2026-09-23T17:30:00+00:00",
+            "subsystem": "forecaster/advisor",
+            "summary": (
+                "Open-Meteo hourly GHI is the mean of the PRECEDING hour. "
+                "Solar fitting and the diurnal shape now pair it with the "
+                "same telemetry interval; forecasts use the interval's "
+                "start for local-hour load/solar profiles and simulate only "
+                "the remaining fraction of the first hour. Sunrise is the "
+                "start of the first sunlit interval. Before this deploy, "
+                "hourly weather comparisons and top-of-hour forecast jumps "
+                "were misleading. A simultaneous pack SOC spread below the "
+                "configured balance trigger with zero errors and an "
+                "improving trend is monitoring context, not an anomaly."
+            ),
+        },
         {
             "ts_iso": "2026-08-31T18:00:00+00:00",
             "subsystem": "advisor-tools",

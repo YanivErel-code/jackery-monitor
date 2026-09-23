@@ -273,16 +273,19 @@ class Plan:
 
 
 def _find_next_sunrise(forecast_hours: list[dict[str, Any]]) -> int | None:
-    """Return the timestamp of the first hour with solar_w > 0 that comes
-    after at least one dark hour. None if no upcoming sunrise found in the
-    forecast window."""
+    """Return the start of the first sunlit interval after a dark one.
+
+    Current forecasts mark interval ends (and carry duration_h), so the
+    prior dark row ends precisely when the first sunlit hour begins.
+    Legacy caller-provided rows without duration_h remain start-stamped.
+    """
     if not forecast_hours:
         return None
     seen_dark = (forecast_hours[0].get("solar_w") or 0) <= 0
     for h in forecast_hours:
         sun = (h.get("solar_w") or 0) > 0
         if seen_dark and sun:
-            return int(h["ts"])
+            return int(h["ts"]) - (3600 if "duration_h" in h else 0)
         if not sun:
             seen_dark = True
     return None
@@ -294,7 +297,8 @@ def _predicted_sunrise_soc(forecast_hours: list[dict[str, Any]],
     trough we're trying to keep above target. Returns None if the
     forecast doesn't span far enough to find it."""
     for i, h in enumerate(forecast_hours):
-        if int(h.get("ts") or 0) == sunrise_ts and i > 0:
+        interval_start = int(h.get("ts") or 0) - (3600 if "duration_h" in h else 0)
+        if interval_start == sunrise_ts and i > 0:
             return float(forecast_hours[i - 1].get("predicted_soc") or 0)
     return None
 
@@ -614,5 +618,3 @@ def compute_plan(
         sunrise_ts=sunrise_ts, cheapest_rate=cheapest_rate,
         planned_hours=planned_hours,
     )
-
-

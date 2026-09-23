@@ -183,6 +183,9 @@ def _format_starter_bundle(bundle: dict) -> str:
     lines.append("## Current smart-charge config")
     for k, v in (bundle.get("smart_charge_config") or {}).items():
         lines.append(f"- {k}: {v}")
+    if bundle.get("balance_spread_trigger_pp") is not None:
+        lines.append(f"- balance_spread_trigger_pp: "
+                     f"{bundle['balance_spread_trigger_pp']}")
     lines.append("")
 
     parasitic_w = bundle.get("fitted_parasitic_w")
@@ -279,6 +282,16 @@ def _system_prompt() -> str:
         " - Reconcile SOC drain with reported power. SOC change x capacity "
         "should match the integrated power delta. Big mismatches = "
         "measurement gap (inverter overhead, SOC drift, unmeasured loads).\n"
+        " - Open-Meteo hourly GHI at timestamp T is the mean for (T-1h,T], "
+        "while query_samples buckets start at T. Compare GHI at T with "
+        "on-site solar in the PRECEDING hour. Cloud cover is an "
+        "instantaneous value at T; do not treat it as that hour's average.\n"
+        " - For expansion packs, compare the simultaneous max-minus-min "
+        "SOC spread to the configured balance_spread_trigger_pp. With zero "
+        "error codes, a below-trigger spread that is stable or improving "
+        "is normal monitoring context, not an anomaly. Flag a spread only "
+        "when it reaches the trigger, worsens substantially, or comes "
+        "with pack errors.\n"
         "\n"
         "Hard rules for output:\n"
         " - Only suggest changes to parameters in the submit tool's enum. "
@@ -362,8 +375,9 @@ QUERY_TOOLS: list[dict] = [
     {
         "name": "query_weather",
         "description": (
-            "Hourly weather observations (Open-Meteo). Each row: hour, "
-            "ghi_w_m2, cloud_cover_pct."
+            "Hourly weather observations (Open-Meteo). Each row: hour "
+            "(interval END), ghi_w_m2 (mean of preceding hour), "
+            "cloud_cover_pct (instantaneous at hour)."
         ),
         "input_schema": {
             "type": "object",
@@ -379,7 +393,8 @@ QUERY_TOOLS: list[dict] = [
         "description": (
             "Latest per-expansion-battery snapshot (5000 Plus + packs). "
             "Each row: pack_sn, soc_pct, input_w, output_w, "
-            "internal_temp_c."
+            "internal_temp_c, error_code. Compare simultaneous SOCs "
+            "against balance_spread_trigger_pp in the starter context."
         ),
         "input_schema": {
             "type": "object",

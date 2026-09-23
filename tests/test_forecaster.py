@@ -6,6 +6,11 @@ import time
 import forecaster
 
 
+def _weather_interval_ends(weather):
+    """Synthetic telemetry is start-stamped; Open-Meteo is end-stamped."""
+    return [{**w, "ts": w["ts"] + 3600} for w in weather]
+
+
 def test_battery_capacity_known_and_unknown():
     assert forecaster.battery_capacity_wh(13) == 5040
     assert forecaster.battery_capacity_wh(22) == 5040
@@ -25,7 +30,7 @@ def test_solar_fit_recovers_known_coefficient():
          "output_w": 100, "battery_pct": 80}
         for w in weather
     ]
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert n >= forecaster.MIN_FIT_SAMPLES
     assert abs(k - 0.5) < 0.05
 
@@ -39,7 +44,7 @@ def test_solar_fit_zero_when_device_has_no_panels():
                for i in range(20)]
     energy = [{"ts": w["ts"], "solar_w": 0, "output_w": 100, "battery_pct": 60}
               for w in weather]
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert k == 0.0
     assert n == 0
 
@@ -54,7 +59,7 @@ def test_solar_fit_zero_when_only_sensor_noise():
                for i in range(20)]
     energy = [{"ts": w["ts"], "solar_w": 8, "output_w": 100, "battery_pct": 60}
               for w in weather]  # 8W of noise, well below threshold
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert k == 0.0
     assert n == 0
 
@@ -67,7 +72,7 @@ def test_solar_fit_runs_with_real_small_panel():
                for i in range(20)]
     energy = [{"ts": w["ts"], "solar_w": 80, "output_w": 100, "battery_pct": 60}
               for w in weather]
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert k > 0
     assert n >= forecaster.MIN_FIT_SAMPLES
 
@@ -78,7 +83,7 @@ def test_solar_fit_falls_back_when_too_few_pairs():
     base = 1_700_000_000
     weather = [{"ts": base, "ghi_w_m2": 500, "cloud_cover_pct": 0}]
     energy = [{"ts": base, "solar_w": 300, "output_w": 100, "battery_pct": 50}]
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert k == forecaster.DEFAULT_SOLAR_COEFF
     assert n == 1
 
@@ -111,7 +116,7 @@ def test_solar_fit_prefers_clear_sky_pairs_when_available():
         energy.append({"ts": base + (10 + i) * 3600,
                        "solar_w": int(0.18 * ghi),
                        "output_w": 100, "battery_pct": 60})
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert n >= forecaster.MIN_FIT_SAMPLES
     assert abs(k - 0.5) < 0.05, f"got k={k}, expected ~0.5 (clear-sky truth)"
 
@@ -141,7 +146,7 @@ def test_solar_fit_prefers_low_soc_no_ac_pairs_over_high_soc_clear_sky():
         energy.append({"ts": base + (10 + i) * 3600,
                        "solar_w": int(4.0 * ghi),
                        "battery_pct": 60, "ac_input_w": 0})
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     # Headroom-filter pool exists (5 ≥ MIN_FIT_SAMPLES=2), so it wins.
     # k should recover ~4.0, not the LSQ blend ~3.25.
     assert n == 5
@@ -171,7 +176,7 @@ def test_solar_fit_excludes_hours_with_ac_charging():
         energy.append({"ts": base + (10 + i) * 3600,
                        "solar_w": int(4.0 * ghi),
                        "battery_pct": 60, "ac_input_w": 0})
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert n == 4
     assert abs(k - 4.0) < 0.10, f"got k={k}, expected ~4.0"
 
@@ -191,7 +196,7 @@ def test_solar_fit_falls_back_to_clear_sky_when_no_headroom_pairs():
         energy.append({"ts": base + i * 3600,
                        "solar_w": int(2.8 * ghi),  # tapered
                        "battery_pct": 95, "ac_input_w": 0})
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     assert n == 8  # clear-sky fallback fires
     # Returns the tapered fit since no headroom data exists. Verify it's
     # not the default coefficient.
@@ -210,7 +215,7 @@ def test_solar_fit_falls_back_to_broad_pool_when_no_clear_sky():
     energy = [{"ts": w["ts"], "solar_w": int(0.25 * w["ghi_w_m2"]),
                "output_w": 100, "battery_pct": 60}
               for w in weather]
-    k, n = forecaster.fit_solar_coefficient(energy, weather)
+    k, n = forecaster.fit_solar_coefficient(energy, _weather_interval_ends(weather))
     # No clear-sky pairs (all cloud=90), but 10 broad pairs available.
     assert n == 10
     assert abs(k - 0.25) < 0.05
@@ -708,7 +713,7 @@ def test_build_forecast_glues_pieces_together():
         # 8am-4pm peaks at 800 W/m², zero at night
         hour_of_day = (ts // 3600) % 24
         ghi = 800 if 8 <= hour_of_day <= 16 else 0
-        weather.append({"ts": ts, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
+        weather.append({"ts": ts + 3600, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
 
     def _synth_soc(ts: int) -> int:
         # 90% during the day, drops 5pp/hour overnight, recovers at dawn.
@@ -924,7 +929,8 @@ def _solar_day(base_ts, k, shape_by_hour, tz_off=0, days=10):
     simple midday bell. Returns (energy_history, weather_hourly).
 
     base_ts is snapped to UTC midnight so that ts for local hour `hod`
-    buckets to exactly that local hour inside fit_diurnal_shape."""
+    buckets to exactly that local hour inside fit_diurnal_shape.
+    Weather rows end one hour later, matching Open-Meteo."""
     base_ts = (base_ts // 86400) * 86400  # snap to UTC midnight
     energy, weather = [], []
     for d in range(days):
@@ -935,7 +941,7 @@ def _solar_day(base_ts, k, shape_by_hour, tz_off=0, days=10):
             sol = k * ghi * shape_by_hour.get(hod, 1.0)
             energy.append({"ts": ts, "solar_w": sol, "battery_pct": 50,
                            "output_wh": 100, "ac_input_wh": 0})
-            weather.append({"ts": ts, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
+            weather.append({"ts": ts + 3600, "ghi_w_m2": ghi, "cloud_cover_pct": 0})
     return energy, weather
 
 

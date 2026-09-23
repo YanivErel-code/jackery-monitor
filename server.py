@@ -98,14 +98,13 @@ BATTERY_PACK_DB_PERSIST_S = 300
 # The /api/forecast/accuracy endpoint exposes a "post-fix" summary using
 # this as a `made_at` floor so the dashboard headline reflects current
 # model behavior instead of being dragged down by stale rows that age
-# out over 14 days. Most recent bump: drain model is now hybrid
-# (parasitic_w baseline + percentage of throughput) instead of
-# pure-percentage, so the 200-500W constant draw on multi-pack rigs
-# the advisor flagged as "unaccounted gap" is captured directly.
+# out over 14 days. Most recent bump: align hourly weather intervals and
+# account for the partial first forecast hour. Set conservatively after
+# the expected deployment time so pre-deploy predictions stay excluded.
 # Override via env var when shipping new fixes if updating in code is
 # inconvenient.
 FORECASTER_BREAKING_CHANGE_TS = int(
-    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1778565000")
+    os.environ.get("JACKERY_FORECASTER_CUTOFF_TS", "1790184600")
 )
 
 # When cloud telemetry hasn't been refreshed by the bridge in this many
@@ -1133,7 +1132,7 @@ def _find_sun_phases(forecast_hours: list[dict]) -> tuple[int | None, int | None
             # transition night → day: previous hour was the last dark hour
             # (i.e., sunrise's predicted SOC)
             if i > 0 and sunrise_ts is None:
-                sunrise_ts = int(forecast_hours[i - 1]["ts"]) + 3600
+                sunrise_ts = int(forecast_hours[i - 1]["ts"])
                 sunrise_entry = forecast_hours[i - 1]
                 break
         in_day = sun
