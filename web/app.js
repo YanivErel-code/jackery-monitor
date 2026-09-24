@@ -456,7 +456,7 @@ function switchTab(name, opts = {}) {
     // User is now looking — clear the "new insights" dot.
     setAutomationDot(false);
   }
-  if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); }
+  if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); loadInverterWatchdogConfig(); }
 }
 
 // Boot path: pull the tab from the URL hash. Defer the actual switch
@@ -915,6 +915,59 @@ async function refreshAutomationDot() {
 // ============================================================
 // DEVICE TAB: capacity override + raw props viewer
 // ============================================================
+async function loadInverterWatchdogConfig() {
+  const input = $('inverter-watchdog-enabled');
+  const status = $('inverter-watchdog-config-status');
+  if (!input) return;
+  const sn = activeJackeryDevice()?.device_sn;
+  input.disabled = true;
+  input.dataset.deviceSn = '';
+  if (!sn) return;
+  try {
+    const r = await fetch(`/api/inverter_watchdog/config?device_sn=${encodeURIComponent(sn)}`);
+    const cfg = await r.json();
+    if (!r.ok) throw new Error(cfg.detail || `HTTP ${r.status}`);
+    if (activeJackeryDevice()?.device_sn !== sn) return;
+    input.checked = cfg.enabled;
+    input.dataset.deviceSn = sn;
+    input.disabled = false;
+    status.hidden = false;
+    status.textContent = cfg.source === 'user' ? 'Saved for this device' : 'Default for this model';
+  } catch (e) {
+    if (activeJackeryDevice()?.device_sn !== sn) return;
+    status.hidden = false;
+    status.textContent = `Could not load: ${e.message || e}`;
+  }
+}
+
+$('inverter-watchdog-enabled')?.addEventListener('change', async (event) => {
+  const input = event.currentTarget;
+  const status = $('inverter-watchdog-config-status');
+  const sn = input.dataset.deviceSn;
+  const enabled = input.checked;
+  input.disabled = true;
+  status.hidden = false;
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/inverter_watchdog/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_sn: sn, enabled }),
+    });
+    const cfg = await r.json();
+    if (!r.ok) throw new Error(cfg.detail || `HTTP ${r.status}`);
+    if (activeJackeryDevice()?.device_sn !== sn) return;
+    input.checked = cfg.enabled;
+    status.textContent = 'Saved for this device';
+  } catch (e) {
+    if (activeJackeryDevice()?.device_sn !== sn) return;
+    input.checked = !enabled;
+    status.textContent = `Could not save: ${e.message || e}`;
+  } finally {
+    if (activeJackeryDevice()?.device_sn === sn) input.disabled = false;
+  }
+});
+
 async function loadDeviceCapacity() {
   try {
     const r = await fetch('/api/devices/capacity');
@@ -3890,6 +3943,9 @@ function applyStatus(s) {
   // If the active Jackery device changed and we're on the Automation tab,
   // re-render the rules list so the "Showing rules for: X" filter follows.
   const newDeviceSn = activeJackeryDevice()?.device_sn;
+  if (activeTab === 'device' && prevDeviceSn !== newDeviceSn) {
+    loadInverterWatchdogConfig();
+  }
   if (activeTab === 'automation' && prevDeviceSn !== newDeviceSn) {
     if (_allRules.length) renderRulesWithFilter();
     // Smart-charge config + AI insights are per-device — reload both.

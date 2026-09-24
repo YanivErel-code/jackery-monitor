@@ -44,6 +44,10 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
+# The always-on AC invariant applies to the Explorer 5000 Plus. Jackery
+# reports this hardware as either model code depending on firmware/region.
+EXPLORER_5000_PLUS_MODEL_CODES = frozenset((13, 22))
+
 # Action returned by evaluate(); callers translate to MQTT toggles + UI.
 # "cycle" = hardware-trip recovery: the port CLAIMS on (oac=1) but output
 # collapsed, so a plain AC-on is a no-op — the caller must toggle

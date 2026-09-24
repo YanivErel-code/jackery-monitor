@@ -724,6 +724,20 @@
 
       <section class="card device-card">
         <div class="card-header">
+          <h2>AC auto recovery</h2>
+          <span id="inverter-watchdog-config-status" class="hint" hidden></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          When enabled, an unexpected AC-off state triggers an AC-on command. A detected inverter trip may briefly cycle AC off and back on. This setting applies only to the selected Jackery. It starts on for the Explorer 5000 Plus and off for other models.
+        </p>
+        <label class="settings-row" for="inverter-watchdog-enabled">
+          <span class="settings-label-text">Keep AC output on</span>
+          <span class="settings-control"><input id="inverter-watchdog-enabled" type="checkbox" disabled /></span>
+        </label>
+      </section>
+
+      <section class="card device-card">
+        <div class="card-header">
           <h2>Battery capacity</h2>
           <span id="capacity-status" class="hint" hidden></span>
         </div>

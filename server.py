@@ -453,13 +453,11 @@ async def poll_loop() -> None:
                     )
                 for sn, t, name, model_code, frame_ts in samples_to_write:
                     state.energy.upsert_device(sn, name, model_code, None)
-                    # Inverter recovery watchdog: AC port should stay ON
-                    # always; OFF means the inverter tripped on overload.
-                    # Drive the recovery state machine — on "retry" we
-                    # send the AC-on MQTT command. Best-effort; never let
-                    # this fail the poll-write path.
+                    # Default AC recovery to the Explorer 5000 Plus only;
+                    # the Device tab can override this per device.
                     try:
-                        await _inverter_watchdog_tick(sn, t, frame_ts)
+                        await _inverter_watchdog_tick(
+                            sn, t, model_code, frame_ts)
                     except Exception as e:
                         log.debug("inverter_watchdog tick failed for %s: %s",
                                    sn, e)
@@ -1083,12 +1081,12 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     if cloud_out is not None:
         cloud_out["selected_device_id"] = view_id
 
-    # Inverter recovery watchdog snapshot. Always present so the UI can
-    # clear stale decoration without an extra fetch when AC recovers.
+    # Enabled devices expose their watchdog state; disabled devices send
+    # null so the UI clears any stale AC-button decoration.
     watchdog_state = None
-    if view_id:
+    if view_sn and _inverter_watchdog_enabled(view_sn, model_code):
         watchdog_state = inverter_watchdog.state_to_dict(
-            inverter_watchdog.get_state(view_id))
+            inverter_watchdog.get_state(view_sn))
     return {
         "connection_status": state.connection_status,
         "connection_error": state.connection_error,
@@ -1885,12 +1883,39 @@ async def smart_charge_loop():
 
 
 # ---------- Inverter recovery watchdog (AC-port auto-restart) ----------
+# Stored in the existing per-device parameter table; an absent override
+# preserves the 5000 Plus behavior and leaves every other model alone.
+_INVERTER_WATCHDOG_ENABLED_KEY = "inverter_watchdog_enabled"
+
+
+def _inverter_watchdog_enabled(device_sn: str, model_code: int | None) -> bool:
+    override = state.energy.get_device_param(
+        device_sn, _INVERTER_WATCHDOG_ENABLED_KEY)
+    if override is not None and override.get("value") is not None:
+        return bool(override["value"])
+    return model_code in inverter_watchdog.EXPLORER_5000_PLUS_MODEL_CODES
+
+
+def _inverter_watchdog_device_context(device_sn: str | None) -> tuple[str, int | None]:
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device — pass device_sn explicitly")
+    if state.device and state.device.device_sn == device_sn:
+        return device_sn, state.device.model_code
+    for device in (state.last_cloud_meta or {}).get("devices") or []:
+        if str(device.get("device_sn")) == device_sn:
+            return device_sn, device.get("model_code")
+    raise HTTPException(404, "Jackery device not found")
+
+
 # Strong refs for in-flight AC off->on cycle tasks: asyncio holds tasks
 # only weakly, and losing one between the "off" and the "on" is the
 # exact outage this feature exists to prevent.
 _WATCHDOG_CYCLE_TASKS: set = set()
 
 async def _inverter_watchdog_tick(device_sn: str, telemetry: dict,
+                                  model_code: int | None,
                                   frame_ts: float | None = None) -> None:
     """Drive the inverter-recovery state machine for one device.
 
@@ -1899,7 +1924,7 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict,
     machine says "retry", fire an AC-on MQTT command via the cloud
     client. Best-effort: any failure logs at debug and bails — the
     inverter recovery layer must never break telemetry persistence."""
-    if not device_sn:
+    if not device_sn or not _inverter_watchdog_enabled(device_sn, model_code):
         return
     ac_on = bool(telemetry.get("ac_on"))
     out_w = telemetry.get("output_power_w")
@@ -5070,15 +5095,47 @@ async def api_set_output(body: dict):
     return {"ok": True, "port": port, "on": on, "device_sn": device_sn}
 
 
+@app.get("/api/inverter_watchdog/config")
+def api_inverter_watchdog_config(device_sn: str | None = None):
+    """Return this device's persisted AC recovery preference and default."""
+    device_sn, model_code = _inverter_watchdog_device_context(device_sn)
+    override = state.energy.get_device_param(
+        device_sn, _INVERTER_WATCHDOG_ENABLED_KEY)
+    return {
+        "device_sn": device_sn,
+        "model_code": model_code,
+        "enabled": _inverter_watchdog_enabled(device_sn, model_code),
+        "source": "user" if override and override.get("value") is not None
+                  else "default",
+    }
+
+
+@app.put("/api/inverter_watchdog/config")
+def api_set_inverter_watchdog_config(body: dict):
+    """Change AC auto-recovery for one device; takes effect on the next poll."""
+    device_sn, model_code = _inverter_watchdog_device_context(
+        body.get("device_sn"))
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(400, "enabled must be true or false")
+    state.energy.set_device_param(
+        device_sn, _INVERTER_WATCHDOG_ENABLED_KEY,
+        int(enabled), source="user")
+    if not enabled:
+        inverter_watchdog.reset_state(device_sn)
+    log.info("inverter_watchdog: %s for %s (model_code=%s)",
+             "enabled" if enabled else "disabled", device_sn, model_code)
+    return api_inverter_watchdog_config(device_sn)
+
+
 @app.get("/api/inverter_watchdog/status")
 def api_inverter_watchdog_status(device_sn: str | None = None):
     """Per-device watchdog snapshot for the UI. Returns attempts so far
     (0 = idle), error_message (set after max retries exhausted), and
     timestamps. UI uses error_message to decorate the AC button."""
-    if not device_sn:
-        device_sn = state.device.device_sn if state.device else None
-    if not device_sn:
-        return {"device_sn": None, "state": None}
+    device_sn, model_code = _inverter_watchdog_device_context(device_sn)
+    if not _inverter_watchdog_enabled(device_sn, model_code):
+        return {"device_sn": device_sn, "state": None}
     rs = inverter_watchdog.get_state(device_sn)
     return {"device_sn": device_sn,
             "state": inverter_watchdog.state_to_dict(rs)}
