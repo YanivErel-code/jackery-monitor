@@ -931,6 +931,12 @@ async def cloud_watchdog_loop() -> None:
                 state.cloud_task.cancel()
                 try:
                     await asyncio.wait_for(state.cloud_task, timeout=5.0)
+                except asyncio.CancelledError:
+                    # Awaiting a task we just cancelled raises CancelledError,
+                    # which is a BaseException. Let an actual shutdown of the
+                    # watchdog propagate, but continue recovery otherwise.
+                    if asyncio.current_task().cancelling():
+                        raise
                 except (Exception, TimeoutError):
                     pass
             if state.cloud_client:
