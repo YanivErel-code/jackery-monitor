@@ -799,17 +799,20 @@ async def cloud_loop() -> None:
         except SessionContestedError as e:
             # The phone app (or another client) just logged in and bumped us.
             # Don't fight back — cool down and let them keep the session.
-            # Exponential backoff on consecutive episodes: a persistent
-            # contender (e.g. phone app left running indefinitely) used to
-            # generate a one-per-minute warning forever; now the cooldown
-            # doubles each cycle up to a 1h cap so the log doesn't drown.
+            # Exponential backoff on generic contention signals avoids a
+            # token war. Jackery's explicit "logged in elsewhere" reply is
+            # recovered after a fixed minute, as requested by the operator.
             state.contested_consecutive += 1
             base_cooldown = user_settings.get("session_contested_cooldown_s")
             # 2^0=1× for the first, 2× for the second, 4× for the third...
             # capped at 1h so a stuck contender doesn't push the next retry
             # past usefulness.
             mult = min(2 ** (state.contested_consecutive - 1), 60)
-            cooldown = min(base_cooldown * mult, 3600)
+            # This explicit Jackery reply means our token was invalidated.
+            # Reclaim the session with a fresh login after a fixed minute;
+            # exponential backoff here would leave telemetry stale for hours.
+            cooldown = (60 if "logged in elsewhere" in str(e).lower()
+                        else min(base_cooldown * mult, 3600))
             state.contested_until = time.time() + cooldown
             state.cloud_state = "contested"
             state.cloud_error = str(e)
@@ -836,7 +839,7 @@ async def cloud_loop() -> None:
                     "or background-refresh), or a second instance of this "
                     "bridge is running. Telemetry will stay stale until "
                     "you sign the contender out. The bridge will keep "
-                    "retrying with backoff (up to 1h between attempts).",
+                    f"retrying after its {cooldown:.0f}s cooldown.",
                     consecutive=state.contested_consecutive,
                 )
             continue
