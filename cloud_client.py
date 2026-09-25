@@ -284,6 +284,8 @@ class JackeryCloudClient:
             identical in practice)
           - msg containing 'token' + ('expir'|'invalid'|'auth') —
             fuzzy fallback for protocol drift
+          - msg='Account logged in elsewhere' — another observed
+            invalidated-session response from /v1/device/property
         All map to the same caller action: cool down, let the contender
         keep the session, retry after `session_contested_cooldown_s`."""
         if not isinstance(data, dict):
@@ -291,6 +293,8 @@ class JackeryCloudClient:
         code = data.get("code")
         msg = (data.get("msg") or "").lower()
         if code in (10402, 401, 1001, 1002):
+            return True
+        if "logged in elsewhere" in msg:
             return True
         if "token" in msg and ("expir" in msg or "invalid" in msg or "auth" in msg):
             return True
