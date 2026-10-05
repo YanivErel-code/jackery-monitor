@@ -59,6 +59,7 @@ import solar_charge
 import weather_client
 from automation import AutomationEngine, AutomationError
 from cloud_client import PACK_CACHE_TTL_S
+from dashboard_cache import DashboardCache
 from device_client import (
     DeviceClient,
     DeviceClientError,
@@ -142,6 +143,7 @@ class AppState:
         self.client: DeviceClient = make_client()
         self.device: DeviceInfo | None = None
         self.energy = EnergyDB()
+        self.dashboard_cache = DashboardCache()
         self.last_status: dict[str, Any] | None = None
         self.last_update_ts: float | None = None
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
@@ -226,7 +228,7 @@ class AppState:
         # just safety, so we'd revisit then.
         # Per-device live-chart history cache for views other than the
         # bridge-active device. _VIEW_HISTORY_TTL_S TTL.
-        self.view_history_cache: dict[str, tuple[float, list[dict]]] = {}
+        self.view_history_cache: dict[tuple[int, str], tuple[float, list[dict]]] = {}
         # Auto-probe (model/capacity inference) per device_sn —
         # populated by the discovery flow and read by the GET endpoint
         # that exposes them. `auto_probe_in_flight` is the dedup set
@@ -249,6 +251,7 @@ class AppState:
         self.history.clear()
         self.last_history_ts = 0.0
         self.history_hydrated = False
+        self.view_history_cache.clear()
 
 
 state = AppState()
@@ -710,12 +713,12 @@ async def broadcast_status(message_type: str = "status") -> None:
         return
     rendered: dict[str | None, str] = {}
     dead: list[WebSocket] = []
-    for ws, info in state.ws_clients.items():
+    for ws, info in list(state.ws_clients.items()):
         view_id = info.get("view_id")
         if view_id not in rendered:
             rendered[view_id] = json.dumps({
                 "type": message_type,
-                "data": serialize_status(view_device_id=view_id),
+                "data": await asyncio.to_thread(serialize_status, view_device_id=view_id),
             })
         try:
             await ws.send_text(rendered[view_id])
@@ -898,25 +901,25 @@ def _in_progress_savings_row() -> dict | None:
     }
 
 
-def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
+def _decorate_totals_with_savings(totals: dict, device_sn: str, *, energy_store=None) -> dict:
     """Add today_savings + lifetime_savings + cost_plan to a totals dict.
 
-    Cheap enough to do per-poll (hourly buckets over 1y is ~8760 rows
-    iterated through Python). Idempotent — safe to call from any caller
-    that already produced the kWh totals."""
+    The yearly SQL scan is expensive. Dashboard callers share a short
+    cache and perform this work on a read-only worker connection."""
     try:
+        db = energy_store if energy_store is not None else state.energy
         plan = cost_module.get_plan()
         loc = device_location.get() or {}
         tz_offset = int(loc.get("utc_offset_seconds") or 0)
         from energy_db import _start_of_day
         today_since = _start_of_day(int(time.time()))
-        today_hist = [r for r in state.energy.history(device_sn, hours=24, bucket_s=3600)
+        today_hist = [r for r in db.history(device_sn, hours=24, bucket_s=3600)
                       if (r.get("ts") or 0) >= today_since]
-        life_hist = state.energy.history(device_sn, hours=24 * 365, bucket_s=3600)
+        life_hist = db.history(device_sn, hours=24 * 365, bucket_s=3600)
         # Tack on the in-progress sliver — covers grid/output activity
-        # since the last DB record() call so the dashboard reflects
-        # changes within ~2s instead of waiting for the next poll
-        # cycle to land.
+        # since the last DB record() call when this aggregate is built.
+        # Dashboard totals refresh at most every 30s; live SOC/power
+        # updates remain independent of this historical-cost cache.
         in_progress = _in_progress_savings_row()
         if in_progress:
             today_hist.append(in_progress)
@@ -928,6 +931,21 @@ def _decorate_totals_with_savings(totals: dict, device_sn: str) -> dict:
     except Exception as e:
         log.debug("cost decoration failed: %s", e)
     return totals
+
+
+def _cached_energy_totals(device_sn: str, *, wait=False,
+                          account_generation: int | None = None) -> dict | None:
+    # Generation keeps delayed reads from a previous cloud account out
+    # of the new account. Midnight cannot reuse yesterday's "today".
+    generation = state.account_generation if account_generation is None else account_generation
+    key = ("energy", generation, device_sn,
+           energy_db._start_of_day(int(time.time())))
+    reader = state.energy.readonly_reader()
+    decorate = _decorate_totals_with_savings
+    return state.dashboard_cache.get(
+        key, lambda: decorate(reader.totals(device_sn), device_sn, energy_store=reader),
+        wait=wait,
+    )
 
 
 def _record_packs_or_keep_cache(device_sn: str, packs: list, ts: float) -> None:
@@ -1124,16 +1142,20 @@ def _view_history(device_sn: str | None) -> list[dict]:
     doesn't requery on every tick."""
     if not device_sn:
         return []
+    generation = state.account_generation
+    key = (generation, device_sn)
     now = time.time()
-    cached = state.view_history_cache.get(device_sn)
+    cached = state.view_history_cache.get(key)
     if cached and now - cached[0] < _VIEW_HISTORY_TTL_S:
         return cached[1]
     try:
-        rows = state.energy.history(
+        rows = state.energy.readonly_reader().history(
             device_sn, hours=LIVE_CHART_HOURS, bucket_s=LIVE_CHART_INTERVAL_S,
         )
         out = [_energy_db_row_to_chart_point(p) for p in rows]
-        state.view_history_cache[device_sn] = (now, out)
+        if generation != state.account_generation:
+            return []
+        state.view_history_cache[key] = (now, out)
         return out
     except Exception as e:
         log.debug("view history hydrate for %s failed: %s", device_sn, e)
@@ -1156,6 +1178,7 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     chosen view so the frontend's `activeJackeryDevice()` reflects the
     per-browser selection without other code changes.
     """
+    generation = state.account_generation
     cloud_src = state.last_cloud_meta or {}
     bridge_active_id = cloud_src.get("selected_device_id")
     bridge_active_sn = state.device.device_sn if state.device else None
@@ -1228,9 +1251,7 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     energy = None
     try:
         if view_sn and not is_home:
-            energy = _decorate_totals_with_savings(
-                state.energy.totals(view_sn), view_sn,
-            )
+            energy = _cached_energy_totals(view_sn, account_generation=generation)
     except Exception as e:
         log.debug("energy totals lookup failed: %s", e)
 
@@ -1246,7 +1267,7 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     if view_sn and _inverter_watchdog_enabled(view_sn, model_code):
         watchdog_state = inverter_watchdog.state_to_dict(
             inverter_watchdog.get_state(view_sn))
-    return {
+    result = {
         "connection_status": state.connection_status,
         "connection_error": state.connection_error,
         "device": device_info,
@@ -1266,6 +1287,18 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
         "energy": energy,
         "inverter_watchdog": watchdog_state,
     }
+    # A worker may have waited on history while the cloud account changed.
+    # Never combine the previous account's readings with new Home metadata.
+    # The next live tick will populate the new account's complete snapshot.
+    if generation != state.account_generation:
+        result.update(
+            device=None, telemetry=None, history=[], energy=None,
+            battery_packs=[], battery_packs_meta=None, cloud=None,
+            inverter_watchdog=None, source=None, last_update_ts=None,
+            connection_status=state.connection_status,
+            connection_error=state.connection_error,
+        )
+    return result
 
 
 # ---------- FastAPI ----------
@@ -3419,7 +3452,7 @@ def api_energy_totals(device_sn: str | None = None):
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         return {"device_sn": None, "lifetime": {"input_wh": 0, "output_wh": 0}}
-    return _decorate_totals_with_savings(state.energy.totals(device_sn), device_sn)
+    return _cached_energy_totals(device_sn, wait=True)
 
 
 @app.get("/api/cost/plan")
@@ -3438,6 +3471,7 @@ async def api_cost_set(req: Request):
     saved = cost_module.set_plan(body if isinstance(body, dict) else {})
     if saved is None:
         raise HTTPException(status_code=400, detail="invalid plan shape")
+    state.dashboard_cache.clear()
     return {"plan": saved}
 
 
@@ -3463,7 +3497,10 @@ def api_energy_history(hours: int = 24, device_sn: str | None = None):
 @app.get("/api/energy/devices")
 def api_energy_devices():
     """All devices ever recorded, with their totals (for cross-device comparison)."""
-    return {"devices": state.energy.all_totals()}
+    reader = state.energy.readonly_reader()
+    return {"devices": state.dashboard_cache.get(
+        ("all_totals", state.account_generation), reader.all_totals, wait=True,
+    ) or []}
 
 
 @app.get("/api/energy/daily")
@@ -3481,8 +3518,11 @@ def api_energy_daily(device_sn: str | None = None, days: int = 90):
         "device_sn": device_sn,
         "days": days,
         "tz_offset_s": tz_offset_s,
-        "daily": state.energy.daily_rollup(device_sn, days=days,
-                                           tz_offset_s=tz_offset_s),
+        "daily": state.dashboard_cache.get(
+            ("daily", state.account_generation, device_sn, days, tz_offset_s),
+            lambda: state.energy.readonly_reader().daily_rollup(
+                device_sn, days=days, tz_offset_s=tz_offset_s), wait=True,
+        ) or [],
     }
 
 
@@ -3499,6 +3539,15 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     if _is_home_device(device_sn):
         return {"supported": False, "ready": False, "configured": False,
                 "error": "Jackery Home REST monitoring does not support portable energy forecasts"}
+    account_state = state
+    generation = account_state.account_generation
+
+    def current_account():
+        return (state is account_state and generation == state.account_generation
+                and not _is_home_device(device_sn))
+
+    account_changed = {"configured": True, "ready": False,
+                       "error": "Cloud account changed while loading; refresh the forecast"}
     loc = device_location.get()
     if not loc:
         return {"error": "location not set", "configured": False}
@@ -3536,11 +3585,17 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
     main_wh, pack_wh = _capacity_hints(device_sn)
 
-    energy_hist = state.energy.history(
+    reader = state.energy.readonly_reader()
+    energy_hist = await asyncio.to_thread(
+        reader.history,
         device_sn, hours=14 * 24, bucket_s=3600,
         main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
     )
+    if not current_account():
+        return account_changed
     weather = await weather_client.fetch_irradiance(loc["latitude"], loc["longitude"])
+    if not current_account():
+        return account_changed
     if weather.get("error"):
         # Surface a clear, user-facing reason instead of a blank forecast.
         # The raw exception (e.g. httpx ConnectTimeout) goes to the detail
@@ -3549,7 +3604,8 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
                 "error_detail": str(weather["error"]),
                 "configured": True}
 
-    result = forecaster.build_forecast(
+    result = await asyncio.to_thread(
+        forecaster.build_forecast,
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
@@ -3560,10 +3616,15 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         utc_offset_seconds=int(weather.get("utc_offset_seconds")
                                or device_location.get_tz_offset() or 0),
     )
+    if not current_account():
+        return account_changed
     # Only persist when the forecast is actually fit — recording an
     # empty placeholder would corrupt prediction-accuracy analytics.
     if result.get("ready"):
-        state.energy.record_forecast(device_sn, time.time(), result["forecast"])
+        await asyncio.to_thread(account_state.energy.record_forecast, device_sn,
+                                time.time(), result["forecast"], should_record=current_account)
+        if not current_account():
+            return account_changed
     # Today's actual solar so far — used by the day-strip "Today" tile
     # to show full-day total (actual past + forecast remaining) rather
     # than just the forward-looking remainder. Without this the user
@@ -3571,10 +3632,11 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     # 15+ kWh by mid-afternoon.
     today_actual_solar_wh = 0.0
     try:
-        totals = state.energy.totals(device_sn)
-        today_actual_solar_wh = float((totals.get("today") or {}).get("solar_wh") or 0)
+        today_actual_solar_wh = await asyncio.to_thread(reader.today_solar_wh, device_sn)
     except Exception as e:
         log.debug("today_actual_solar_wh fetch failed for %s: %s", device_sn, e)
+    if not current_account():
+        return account_changed
     return {
         "device_sn": device_sn,
         "low_battery_threshold": user_settings.get("low_battery_threshold"),
@@ -4684,6 +4746,7 @@ async def api_location_set(req: Request):
                             detail="latitude/longitude out of range")
     # Bust the weather cache so the next forecast pulls for the new coords.
     weather_client.clear_cache()
+    state.dashboard_cache.clear()
     return record
 
 
@@ -4739,6 +4802,7 @@ async def api_set_credentials(body: dict):
     state.device = None
     state.last_status = None
     state.account_generation += 1
+    state.dashboard_cache.clear()
     state.last_cloud_meta = {"api_family": api_family, "read_only": api_family == "home"}
     state.reset_live_history()
     # Kick a fresh connect so connection state updates fast
@@ -4762,6 +4826,7 @@ async def api_clear_credentials():
     state.device = None
     state.last_status = None
     state.account_generation += 1
+    state.dashboard_cache.clear()
     state.last_cloud_meta = None
     state.reset_live_history()
     state.last_update_ts = None
@@ -5593,7 +5658,7 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         await ws.send_text(json.dumps({
             "type": "snapshot",
-            "data": serialize_status(view_device_id=view_id),
+            "data": await asyncio.to_thread(serialize_status, view_device_id=view_id),
         }))
         while True:
             await ws.receive_text()

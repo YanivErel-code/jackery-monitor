@@ -15,13 +15,15 @@ energy_db.py easier to navigate without changing any caller's API.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 
 class ForecastTablesMixin:
     """Forecast-storage and accuracy-scoring methods for EnergyDB."""
 
     def record_forecast(self, device_sn: str, made_at: float,
-                        predictions: list[dict]) -> int:
+                        predictions: list[dict], *,
+                        should_record: Callable[[], bool] | None = None) -> int:
         """Persist a forecast snapshot. `predictions` is a list of
         {ts, predicted_soc} entries. INSERT OR REPLACE on the (device,
         made_at, target) primary key so multiple calls within the same
@@ -40,12 +42,19 @@ class ForecastTablesMixin:
         if not rows:
             return 0
         with self._conn() as c:
+            # A dashboard worker can wait for the writer lock while the
+            # cloud account changes. Recheck after obtaining the connection.
+            if should_record is not None and not should_record():
+                return 0
             c.executemany(
                 """INSERT OR REPLACE INTO forecast_predictions
                        (device_sn, made_at, target, predicted_soc)
                    VALUES (?, ?, ?, ?)""",
                 rows,
             )
+            if should_record is not None and not should_record():
+                c.rollback()
+                return 0
         return len(rows)
 
     def prediction_accuracy(self, device_sn: str,

@@ -183,13 +183,18 @@ def test_secondary_view_includes_packs_and_energy(server_state, monkeypatch):
     ]
 
     # Stub energy.totals so we don't need a populated DB.
-    def fake_totals(sn):
+    def fake_totals(self, sn):
         return {"today_solar_wh": 1000 if sn == "SN-B" else 5000}
-    monkeypatch.setattr(server_state.state.energy, "totals", fake_totals)
+    monkeypatch.setattr(type(server_state.state.energy), "totals", fake_totals)
     # Stub the savings decorator to passthrough so we can assert on the
     # raw totals dict.
     monkeypatch.setattr(server_state, "_decorate_totals_with_savings",
-                        lambda totals, sn: totals)
+                        lambda totals, sn, **kwargs: totals)
+
+    # Historical energy is populated asynchronously; cached totals must
+    # still follow the browser's view independently of bridge-active SN.
+    server_state._cached_energy_totals("SN-B", wait=True)
+    server_state._cached_energy_totals("SN-A", wait=True)
 
     out_b = server_state.serialize_status(view_device_id="id-B")
     assert out_b["battery_packs"] == [{"rb": 50, "alias": "pack-1"}]
@@ -206,14 +211,14 @@ def test_secondary_view_history_pulls_from_energy_db(server_state, monkeypatch):
     only holds the bridge-active device's samples)."""
     captured: dict = {}
 
-    def fake_history(device_sn, hours, bucket_s):
+    def fake_history(self, device_sn, hours, bucket_s):
         captured["sn"] = device_sn
         captured["hours"] = hours
         return [
             {"ts": 1700000000, "battery_pct": 41, "input_w": 0, "output_w": 70},
             {"ts": 1700000060, "battery_pct": 42, "input_w": 0, "output_w": 75},
         ]
-    monkeypatch.setattr(server_state.state.energy, "history", fake_history)
+    monkeypatch.setattr(type(server_state.state.energy), "history", fake_history)
 
     # Reset the TTL cache so we know the hydrate ran for THIS test.
     server_state.state.view_history_cache.clear()
@@ -335,11 +340,11 @@ def test_view_history_is_cached(server_state, monkeypatch):
     calls = {"live_chart_hydrates": 0}
     live_chart_hours = server_state.LIVE_CHART_HOURS
 
-    def fake_history(device_sn, hours, bucket_s):
+    def fake_history(self, device_sn, hours, bucket_s):
         if hours == live_chart_hours:
             calls["live_chart_hydrates"] += 1
         return []
-    monkeypatch.setattr(server_state.state.energy, "history", fake_history)
+    monkeypatch.setattr(type(server_state.state.energy), "history", fake_history)
 
     server_state.state.view_history_cache.clear()
     server_state.serialize_status(view_device_id="id-B")
