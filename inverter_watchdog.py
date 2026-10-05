@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 # The always-on AC invariant applies to the Explorer 5000 Plus. Jackery
@@ -71,6 +71,10 @@ class WatchdogState:
     # AC off via our UI. Suppresses the watchdog for `user_grace_s`
     # afterward so we don't fight an intentional user action.
     last_user_off_ts: float = 0.0
+    # Suppress recovery while an intentional OFF command is awaiting its
+    # acknowledgement. Each request owns a token so failed/cancelled
+    # requests cannot clear another request's intent or confirmed grace.
+    pending_user_off_intents: set[object] = field(default_factory=set, repr=False)
     # Set when we've exhausted max_attempts (port-off path) or the cycle
     # cap (hardware-trip path). UI shows this; clicking dismiss resets.
     error_message: str | None = None
@@ -191,8 +195,8 @@ def evaluate(
                           cycle cap until output genuinely recovers)
     """
     now = float(now_ts if now_ts is not None else time.time())
-    grace_active = bool(state.last_user_off_ts
-                        and (now - state.last_user_off_ts) < user_grace_s)
+    grace_active = bool(state.pending_user_off_intents or (
+        state.last_user_off_ts and (now - state.last_user_off_ts) < user_grace_s))
 
     if grace_active:
         # Don't accumulate collapse evidence off the user's own OFF.
@@ -302,7 +306,13 @@ def reset_state(device_sn: str | None = None) -> None:
     explicitly want a fresh slate (e.g. dismiss-error endpoint)."""
     with _runtime_lock:
         if device_sn:
-            _runtime.pop(device_sn, None)
+            previous = _runtime.pop(device_sn, None)
+            if previous and previous.pending_user_off_intents:
+                # An in-flight user command still owns its intent even
+                # when recovery is disabled/reset. Share the token set so
+                # its request's finally block also clears the new state.
+                _runtime[device_sn] = WatchdogState(
+                    pending_user_off_intents=previous.pending_user_off_intents)
         else:
             _runtime.clear()
 

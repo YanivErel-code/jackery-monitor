@@ -51,6 +51,11 @@ It connects through the **Jackery cloud account** (the same one the official app
 - **Device tab** — model, serial, cloud connection state, last update time.
   "Pause polling" with duration picker so you can hand the cloud session to
   the phone app without the bridge stealing it back.
+  **AC auto recovery → Keep AC output on** is saved per device: on by
+  default for the Explorer 5000 Plus (model codes 13/22), off for other
+  models. Turn it off to leave AC off indefinitely. With recovery enabled,
+  a manual AC-off command pauses recovery for 60 seconds; pending recovery
+  cycles also honor this pause and changes to the device's recovery setting.
 - **Forecast tab** — 5-day hourly SOC simulation. Solar regression fitted
   from your own observed solar-vs-GHI pairs (Open-Meteo); load model uses
   per-hour-of-day medians with a runaway-bucket cap so a single high-output

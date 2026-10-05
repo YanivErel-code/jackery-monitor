@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -1991,10 +1992,39 @@ def _inverter_watchdog_device_context(device_sn: str | None) -> tuple[str, int |
     raise HTTPException(404, "Jackery device not found")
 
 
-# Strong refs for in-flight AC off->on cycle tasks: asyncio holds tasks
-# only weakly, and losing one between the "off" and the "on" is the
-# exact outage this feature exists to prevent.
+# Strong refs for recovery command/cycle tasks. Separate tasks let user
+# actions retract queued ON commands without cancelling the poll loop.
 _WATCHDOG_CYCLE_TASKS: set = set()
+_WATCHDOG_CYCLE_DEVICES: dict[asyncio.Task, str] = {}
+_WATCHDOG_CYCLE_LOCK = threading.Lock()
+
+
+def _forget_watchdog_cycle(task: asyncio.Task) -> None:
+    with _WATCHDOG_CYCLE_LOCK:
+        _WATCHDOG_CYCLE_TASKS.discard(task)
+        _WATCHDOG_CYCLE_DEVICES.pop(task, None)
+
+
+def _cancel_watchdog_cycles(device_sn: str) -> None:
+    """Retract pending commands, including tasks awaiting the bridge lock.
+
+    Configuration/dismiss routes run in a worker thread. Dispatch their
+    cancellation to the owning loop; async output routes can cancel now.
+    A command already sent to the bridge cannot be retracted.
+    """
+    with _WATCHDOG_CYCLE_LOCK:
+        tasks = [task for task, sn in _WATCHDOG_CYCLE_DEVICES.items()
+                 if sn == device_sn]
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    for task in tasks:
+        loop = task.get_loop()
+        if loop is current_loop:
+            task.cancel()
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(task.cancel)
 
 async def _inverter_watchdog_tick(device_sn: str, telemetry: dict,
                                   model_code: int | None,
@@ -2038,25 +2068,67 @@ async def _inverter_watchdog_tick(device_sn: str, telemetry: dict,
                 device_sn, phase, rs.consecutive_attempts,
             )
             if setter:
-                async def _cycle(sn=device_sn, set_fn=setter):
+                async def _cycle(sn=device_sn, set_fn=setter,
+                                 client=state.client, recovery_state=rs,
+                                 recovery_model=model_code):
+                    def recovery_still_allowed():
+                        if (state.client is not client
+                                or inverter_watchdog.get_state(sn) is not recovery_state
+                                or not _inverter_watchdog_enabled(sn, recovery_model)
+                                or not recovery_state.hw_trip_active
+                                or recovery_state.pending_user_off_intents):
+                            return False
+                        last_off = recovery_state.last_user_off_ts
+                        return (not last_off or time.time() - last_off
+                                >= inverter_watchdog.DEFAULT_USER_GRACE_S)
+
                     try:
+                        if not recovery_still_allowed():
+                            return
                         await set_fn("ac", False, device_sn=sn)
                         await asyncio.sleep(2.0)
+                        if not recovery_still_allowed():
+                            return
                         await set_fn("ac", True, device_sn=sn)
                     except Exception as e:
                         log.warning("inverter_watchdog: AC cycle failed "
                                     "for %s: %s", sn, e)
                 _task = asyncio.create_task(_cycle())
-                _WATCHDOG_CYCLE_TASKS.add(_task)
-                _task.add_done_callback(_WATCHDOG_CYCLE_TASKS.discard)
+                with _WATCHDOG_CYCLE_LOCK:
+                    _WATCHDOG_CYCLE_TASKS.add(_task)
+                    _WATCHDOG_CYCLE_DEVICES[_task] = device_sn
+                _task.add_done_callback(_forget_watchdog_cycle)
         else:
             log.warning(
                 "inverter_watchdog: AC=OFF for %s — sending AC-on (%s attempt %d)",
                 device_sn, phase, rs.consecutive_attempts,
             )
             if setter:
+                async def _retry(sn=device_sn, set_fn=setter,
+                                 client=state.client, recovery_state=rs,
+                                 recovery_model=model_code):
+                    last_off = recovery_state.last_user_off_ts
+                    if (state.client is not client
+                            or inverter_watchdog.get_state(sn) is not recovery_state
+                            or not _inverter_watchdog_enabled(sn, recovery_model)
+                            or recovery_state.pending_user_off_intents
+                            or (last_off and time.time() - last_off
+                                < inverter_watchdog.DEFAULT_USER_GRACE_S)):
+                        return
+                    await set_fn("ac", True, device_sn=sn)
+
+                _task = asyncio.create_task(_retry())
+                with _WATCHDOG_CYCLE_LOCK:
+                    _WATCHDOG_CYCLE_TASKS.add(_task)
+                    _WATCHDOG_CYCLE_DEVICES[_task] = device_sn
+                _task.add_done_callback(_forget_watchdog_cycle)
                 try:
-                    await setter("ac", True, device_sn=device_sn)
+                    await _task
+                except asyncio.CancelledError:
+                    # An intentional user action cancels only this command.
+                    # Cancellation of the actual poller must still propagate.
+                    if asyncio.current_task().cancelling():
+                        raise
                 except Exception as e:
                     log.warning("inverter_watchdog: AC-on MQTT command failed "
                                 "for %s: %s", device_sn, e)
@@ -5137,19 +5209,31 @@ async def api_set_output(body: dict):
     setter = getattr(state.client, "set_output", None)
     if not setter:
         raise HTTPException(501, "Backend does not support output toggles")
+    off_state = None
+    off_token = None
+    target_sn = None
+    if port == "ac" and not on:
+        target_sn = device_sn or (state.device.device_sn if state.device else None)
+        if target_sn:
+            off_state = inverter_watchdog.get_state(target_sn)
+            off_token = object()
+            off_state.pending_user_off_intents.add(off_token)
+            _cancel_watchdog_cycles(target_sn)
     try:
         await setter(port, on, device_sn=device_sn)
     except DeviceClientError as e:
         raise HTTPException(400, str(e)) from e
-    # If the user just toggled AC OFF, mark the watchdog so it doesn't
-    # fight the action by re-clicking ON 10s later. The grace window
-    # (DEFAULT_USER_GRACE_S) covers an intentional brief OFF; after it
-    # expires the watchdog assumes the user forgot and re-engages.
-    if port == "ac" and not on:
-        target_sn = device_sn or (state.device.device_sn if state.device else None)
+    else:
         if target_sn:
+            # Start the usual grace after acknowledgement, even when the
+            # command was queued for more than a minute. Pending intent
+            # tokens protect the interval before acknowledgement.
+            current = inverter_watchdog.get_state(target_sn)
             inverter_watchdog.record_user_off(
-                inverter_watchdog.get_state(target_sn))
+                current, now_ts=max(time.time(), current.last_user_off_ts))
+    finally:
+        if off_state is not None:
+            off_state.pending_user_off_intents.discard(off_token)
     return {"ok": True, "port": port, "on": on, "device_sn": device_sn}
 
 
@@ -5180,6 +5264,7 @@ def api_set_inverter_watchdog_config(body: dict):
         device_sn, _INVERTER_WATCHDOG_ENABLED_KEY,
         int(enabled), source="user")
     if not enabled:
+        _cancel_watchdog_cycles(device_sn)
         inverter_watchdog.reset_state(device_sn)
     log.info("inverter_watchdog: %s for %s (model_code=%s)",
              "enabled" if enabled else "disabled", device_sn, model_code)
@@ -5208,6 +5293,7 @@ def api_inverter_watchdog_dismiss(device_sn: str | None = None):
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         raise HTTPException(400, "no active device — pass device_sn explicitly")
+    _cancel_watchdog_cycles(device_sn)
     inverter_watchdog.dismiss_error(inverter_watchdog.get_state(device_sn))
     return {"ok": True, "device_sn": device_sn}
 
