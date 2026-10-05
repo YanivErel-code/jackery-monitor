@@ -9,6 +9,9 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Pending inverter recovery cycles respect a manual AC-off command or
+  disabled recovery setting instead of turning AC back on after the
+  two-second cycle pause.
 - Expire expansion-pack telemetry caches after two minutes, refresh through
   HTTP with bounded retries, and prevent delayed HTTP responses from replacing
   newer MQTT readings.
