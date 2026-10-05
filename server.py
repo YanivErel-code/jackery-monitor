@@ -28,6 +28,7 @@ import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from math import isfinite
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -56,6 +57,7 @@ import smart_charge
 import solar_charge
 import weather_client
 from automation import AutomationEngine, AutomationError
+from cloud_client import PACK_CACHE_TTL_S
 from device_client import (
     DeviceClient,
     DeviceClientError,
@@ -84,9 +86,9 @@ HISTORY_LIMIT = (LIVE_CHART_HOURS * 3600) // LIVE_CHART_INTERVAL_S
 # server can poll the bridge every iteration cheaply — there's no cloud
 # HTTP cost. Setting this to 0 means "every poll iteration".
 BATTERY_PACK_REFRESH_S = 0
-# DB persistence cadence — writing every iteration would be 4 rows/min
-# for no analytical gain; daily-learning queries only need ~minute
-# resolution. Cache stays fresh; only the DB write is throttled.
+# DB persistence cadence: one five-minute observation per pack, only
+# when the bridge reports a new receipt timestamp. Receipt provenance
+# is stored separately from monitor observation time.
 BATTERY_PACK_DB_PERSIST_S = 300
 # Local hour-of-day for the daily Claude advisor review. Lives in
 # user_settings ("advisor_trigger_hour") so it's editable from the
@@ -180,6 +182,9 @@ class AppState:
         self.last_packs_ts_by_sn: dict[str, float] = {}
         # Last DB-persist timestamp, separate from in-memory cache refresh.
         self.last_packs_db_ts_by_sn: dict[str, float] = {}
+        self.last_packs_db_source_ts_by_sn: dict[str, float] = {}
+        self.battery_pack_meta_by_sn: dict[str, dict] = {}
+        self.packs_refresh_lock_by_sn: dict[str, asyncio.Lock] = {}
         # Last advisor-review timestamp per device, so the daily loop
         # doesn't re-fire on container restart within the same window.
         self.last_advisor_run_by_sn: dict[str, float] = {}
@@ -478,6 +483,9 @@ async def poll_loop() -> None:
                         solar_w=float(t.get("solar_input_w") or 0),
                         ac_input_w=float(t.get("ac_input_w") or 0),
                         solar_charge_diverted_w=diverted_w,
+                        source_ts=frame_ts,
+                        soc_source_ts=t.get("soc_source_ts"),
+                        soc_source=t.get("soc_source"),
                     )
 
                 # Hydrate the live chart from the energy DB on the first
@@ -912,28 +920,98 @@ def _record_packs_or_keep_cache(device_sn: str, packs: list, ts: float) -> None:
     state.last_packs_ts_by_sn[device_sn] = ts
 
 
-async def _refresh_packs_for(device_sn: str, ts: float) -> None:
+def _pack_metadata(device_sn: str, ts: float) -> dict:
+    """Receipt age is independent of the monitor's latest observation."""
+    meta = dict(state.battery_pack_meta_by_sn.get(device_sn, {}))
+    received = meta.get("fetched_at")
+    try:
+        received = float(received)
+        if not isfinite(received) or received <= 0:
+            received = None
+    except (TypeError, ValueError):
+        received = None
+    age = max(0.0, ts - received) if received is not None else None
+    meta.update(fetched_at=received, age_s=age,
+                stale=bool(meta.get("stale") or age is None or age >= PACK_CACHE_TTL_S))
+    return meta
+
+
+async def _refresh_packs_for(device_sn: str, ts: float, *,
+                             force_refresh: bool = False) -> None:
+    # Polling and manual API refreshes share one writer per device.
+    lock = state.packs_refresh_lock_by_sn.setdefault(device_sn, asyncio.Lock())
+    async with lock:
+        await _refresh_packs_unlocked(device_sn, ts, force_refresh=force_refresh)
+
+
+async def _refresh_packs_unlocked(device_sn: str, ts: float, *,
+                                 force_refresh: bool = False) -> None:
     """Pull the latest expansion-pack telemetry for `device_sn` and
     update the in-memory cache + (throttled) the energy DB. Throttled
     per-SN by BATTERY_PACK_REFRESH_S; on failure we deliberately do
     NOT advance the per-device timestamp so the next tick retries
     immediately rather than waiting a full refresh window."""
     last_ts = state.last_packs_ts_by_sn.get(device_sn, 0.0)
-    if ts - last_ts < BATTERY_PACK_REFRESH_S:
+    if not force_refresh and ts - last_ts < BATTERY_PACK_REFRESH_S:
         return
     rpc = getattr(state.client, "_rpc", None)
     if rpc is None:
         return
     try:
-        result = await rpc("get_battery_packs", device_sn=device_sn)
+        kwargs = {"device_sn": device_sn}
+        if force_refresh:
+            kwargs["force_refresh"] = True
+        result = await rpc("get_battery_packs", **kwargs)
+        ts = max(ts, time.time())  # observe after an HTTP refresh completes
     except Exception as e:
+        ts = max(ts, time.time())
+        meta = state.battery_pack_meta_by_sn.setdefault(device_sn, {})
+        meta.update(stale=True, error=str(e), observed_at=ts)
         log.warning("battery_packs refresh failed for %s: %s", device_sn, e)
         return
     err = (result or {}).get("error")
     packs = (result or {}).get("packs") or []
-    if err:
-        log.warning("battery_packs RPC error for %s: %s", device_sn, err)
+    source_ts = (result or {}).get("fetched_at")
+    previous_meta = state.battery_pack_meta_by_sn.get(device_sn, {})
+    if not packs and not state.battery_packs_by_sn.get(device_sn):
+        # Re-seeding from history must restore its provenance too.
+        rows = state.energy.latest_battery_packs(device_sn)
+        if rows:
+            state.battery_packs_by_sn[device_sn] = [
+                _db_pack_to_cloud_shape(r) for r in rows]
+            previous_meta = {"fetched_at": rows[0].get("source_ts"),
+                             "source": rows[0].get("source"),
+                             "stale": True}
+    if not packs and state.battery_packs_by_sn.get(device_sn):
+        # An empty cloud response is a known transient blip. It provides
+        # no new measurements for the packs we keep displaying.
+        state.battery_pack_meta_by_sn[device_sn] = {
+            **previous_meta, "stale": True, "observed_at": ts,
+            "error": err or "empty pack response; retaining last-known readings",
+        }
         return
+    state.battery_pack_meta_by_sn[device_sn] = {
+        "fetched_at": source_ts,
+        "source": (result or {}).get("source"),
+        "stale": bool((result or {}).get("stale")),
+        "observed_at": ts,
+        "error": err,
+    }
+    state.battery_pack_meta_by_sn[device_sn] = _pack_metadata(device_sn, ts)
+    source_ts = state.battery_pack_meta_by_sn[device_sn]["fetched_at"]
+    previous_source = previous_meta.get("fetched_at")
+    if source_ts and previous_source and source_ts < previous_source:
+        state.battery_pack_meta_by_sn[device_sn] = previous_meta
+        return  # a concurrent RPC already supplied a newer snapshot
+    if source_ts is None and previous_source:
+        state.battery_pack_meta_by_sn[device_sn].update(
+            fetched_at=previous_source, source=previous_meta.get("source"))
+    if err:
+        if err != previous_meta.get("error"):
+            log.warning("battery_packs RPC error for %s: %s", device_sn, err)
+        return
+    if state.battery_pack_meta_by_sn[device_sn]["stale"]:
+        return  # retain last-known UI state; do not manufacture a new reading
     if packs:
         # Strip BMS sensor garbage at ingestion so it doesn't flow into
         # the cache, the DB, or the advisor's analysis. Bad pack temps
@@ -943,13 +1021,16 @@ async def _refresh_packs_for(device_sn: str, ts: float) -> None:
         packs = _sanitize_pack_telemetry(packs)
     _record_packs_or_keep_cache(device_sn, packs, ts)
     if packs:
-        # DB persist throttled separately — the cache is fresh on every
-        # iteration but the daily-learning trace only needs minute
-        # resolution.
+        # A successful RPC can still be serving the same cache entry.
+        # Unknown source times stay unknown and are not recorded as fresh.
         last_db = state.last_packs_db_ts_by_sn.get(device_sn, 0.0)
-        if ts - last_db >= BATTERY_PACK_DB_PERSIST_S:
-            state.energy.record_battery_packs(device_sn, packs, int(ts))
+        last_source = state.last_packs_db_source_ts_by_sn.get(device_sn, 0.0)
+        if source_ts and source_ts > last_source and ts - last_db >= BATTERY_PACK_DB_PERSIST_S:
+            state.energy.record_battery_packs(
+                device_sn, packs, int(ts), source_ts=source_ts,
+                source=(result or {}).get("source"))
             state.last_packs_db_ts_by_sn[device_sn] = ts
+            state.last_packs_db_source_ts_by_sn[device_sn] = source_ts
 
 
 def _energy_db_row_to_chart_point(p: dict) -> dict:
@@ -1097,6 +1178,7 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
         # the same cadence as the SOC card. Empty list for devices without
         # packs (e.g. HomePower 3000) — UI hides the card on empty.
         "battery_packs": view_packs,
+        "battery_packs_meta": _pack_metadata(view_sn or "", time.time()),
         "history": history,
         "mock_mode": state.backend == "mock",
         "backend": state.backend,
@@ -2845,6 +2927,14 @@ def _hydrate_battery_packs_from_db() -> None:
                 state.battery_packs_by_sn[sn] = [
                     _db_pack_to_cloud_shape(r) for r in rows
                 ]
+                state.battery_pack_meta_by_sn[sn] = {
+                    "fetched_at": rows[0].get("source_ts"),
+                    "source": rows[0].get("source"),
+                    "stale": True,
+                    "observed_at": rows[0]["ts"],
+                }
+                if rows[0].get("source_ts"):
+                    state.last_packs_db_source_ts_by_sn[sn] = rows[0]["source_ts"]
                 log.info("Hydrated %d battery packs for %s from DB",
                          len(rows), sn)
     except Exception as e:
@@ -4319,53 +4409,21 @@ async def api_devices_battery_packs(device_sn: str | None = None,
     # Only return live main_soc_pct for the *active* device — that's the
     # one whose battery_percent is in state.last_status.
     main_pct = (state.last_status or {}).get("battery_percent") if device_sn == active_sn else None
-    if not fresh and cached_packs:
-        return {"device_sn": device_sn,
-                "packs": cached_packs,
-                "main_soc_pct": main_pct,
-                "fetched_at": last_ts,
-                "cached": True,
-                "_diag": diag}
-    # No cache for this device. If we've already learned (via a prior
-    # successful fetch with empty packs) that this device has no packs,
-    # short-circuit so the UI hides the card without another RPC.
-    if not fresh and device_sn in state.battery_packs_by_sn and not cached_packs:
-        return {"device_sn": device_sn,
-                "packs": [],
-                "main_soc_pct": main_pct,
-                "fetched_at": last_ts,
-                "cached": True,
-                "no_packs": True,
-                "_diag": diag}
-    rpc = getattr(state.client, "_rpc", None)
-    if rpc is None:
-        return {"error": "bridge not available (backend=" + state.backend + ")",
-                "packs": [], "_diag": diag}
-    try:
-        result = await rpc("get_battery_packs", device_sn=device_sn)
-    except Exception as e:
-        log.warning("battery_packs API RPC failed: %s", e)
-        return {"error": f"rpc failed: {e}", "packs": [], "_diag": diag}
-    packs = (result or {}).get("packs", [])
-    rpc_err = (result or {}).get("error")
-    if rpc_err:
-        log.warning("battery_packs API RPC returned error: %s", rpc_err)
-    # Cache the result. The helper distinguishes transient empty
-    # (cloud blip) from genuine empty (single-unit device) by
-    # consulting the DB — see _record_packs_or_keep_cache.
-    if not rpc_err:
-        _record_packs_or_keep_cache(device_sn, packs, time.time())
-        if packs:
-            try:
-                state.energy.record_battery_packs(device_sn, packs)
-            except Exception as e:
-                log.debug("record_battery_packs failed: %s", e)
+    cached = not fresh and device_sn in state.battery_packs_by_sn
+    meta = _pack_metadata(device_sn, time.time())
+    if fresh or not cached or meta["stale"]:
+        if getattr(state.client, "_rpc", None) is None:
+            return {"error": "bridge not available (backend=" + state.backend + ")",
+                    "packs": cached_packs, **meta, "_diag": diag}
+        await _refresh_packs_for(device_sn, time.time(), force_refresh=fresh)
+        meta = _pack_metadata(device_sn, time.time())
+    packs = state.battery_packs_by_sn.get(device_sn, [])
     return {"device_sn": device_sn,
             "packs": packs,
             "main_soc_pct": main_pct,
-            "fetched_at": time.time(),
-            "cached": False,
-            "error": rpc_err,
+            **meta,
+            "cached": cached,
+            "no_packs": not packs,
             "_diag": diag}
 
 

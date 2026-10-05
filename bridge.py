@@ -79,6 +79,9 @@ from device_client import (  # noqa: E402  shares the model_code -> "portable"/"
     device_type_for,
 )
 
+PACK_CACHE_TTL_S = 120
+PACK_REFRESH_RETRY_S = 30
+
 # ---- credential storage (multi-backend) ----
 #
 # Priority on read: env vars > creds file > macOS keychain.
@@ -506,15 +509,27 @@ class State:
         self.props_raw_by_sn: dict[str, dict] = {}
         self.telemetry_by_sn: dict[str, dict] = {}
         self.ts_by_sn: dict[str, float] = {}
+        # SOC gets its own receipt provenance: a fresh power-only push
+        # says nothing about how recently `rb` was received.
+        self.soc_source_ts_by_sn: dict[str, float] = {}
+        self.soc_source_by_sn: dict[str, str] = {}
+        self.soc_revision_by_sn: dict[str, int] = {}
+        self.cache_generation = 0
         # Per-expansion-battery state, keyed by parent (host) device SN.
         # Updated in real-time from MQTT SubDevicePropertyChange pushes.
         self.battery_packs_by_sn: dict[str, list[dict]] = {}
         self.packs_ts_by_sn: dict[str, float] = {}
+        self.packs_source_by_sn: dict[str, str] = {}
+        self.packs_revision_by_sn: dict[str, int] = {}
+        self.packs_refresh_error_by_sn: dict[str, str] = {}
+        self.packs_refresh_attempt_ts_by_sn: dict[str, float] = {}
+        self.packs_refresh_lock_by_sn: dict[str, asyncio.Lock] = {}
         # Per-pack firmware-update flags (needUpgrade), keyed by parent SN
         # -> {pack_sn: bool}. Sourced from the HTTP pack list only (MQTT
         # pushes omit needUpgrade), refreshed lazily on a slow TTL.
         self.pack_upgrade_by_sn: dict[str, dict[str, bool]] = {}
         self.pack_upgrade_ts: dict[str, float] = {}
+        self.pack_upgrade_attempt_ts: dict[str, float] = {}
         self.cloud_telemetry: dict | None = None
         self.cloud_props_raw: dict = {}
         self.cloud_ts: float | None = None
@@ -562,7 +577,11 @@ async def _annotate_pack_upgrades(device_sn: str, packs: list[dict]) -> list[dic
     if not packs or not state.cloud_client:
         return packs
     now = time.time()
-    if now - state.pack_upgrade_ts.get(device_sn, 0.0) > PACK_UPGRADE_TTL_S:
+    last_attempt = state.pack_upgrade_attempt_ts.get(device_sn)
+    if (now - state.pack_upgrade_ts.get(device_sn, 0.0) > PACK_UPGRADE_TTL_S
+            and (last_attempt is None or now - last_attempt >= PACK_REFRESH_RETRY_S)
+            and not _cloud_read_block_reason()):
+        state.pack_upgrade_attempt_ts[device_sn] = now
         try:
             state.pack_upgrade_by_sn[device_sn] = (
                 await state.cloud_client.fetch_pack_upgrade_flags(device_sn))
@@ -577,6 +596,176 @@ async def _annotate_pack_upgrades(device_sn: str, packs: list[dict]) -> list[dic
     return packs
 
 
+def _cloud_read_block_reason() -> str | None:
+    """All auxiliary HTTP reads honor the main poller's session cooldown."""
+    now = time.time()
+    if state.pause_until > now:
+        return "cloud polling paused"
+    if state.contested_until > now:
+        return "cloud session contested; waiting for cooldown"
+    return None
+
+
+async def _stop_cloud_poller() -> None:
+    """Await intentional child cancellation without swallowing shutdown."""
+    task = state.cloud_task
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # Cancelling the child normally raises here, but an external
+            # cancellation of this credential request must still propagate.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except Exception:
+            pass
+    if state.cloud_task is task:
+        state.cloud_task = None
+
+
+def _merge_cloud_properties(device_sn: str, props: dict, *, source: str,
+                            request_started_at: float | None = None,
+                            request_soc_revision: int | None = None) -> dict:
+    """Merge property receipts without confusing power freshness with SOC.
+
+    The cloud does not supply measurement timestamps. These metadata
+    describe when this bridge received `rb`, from HTTP or MQTT.
+    """
+    from cloud_client import cloud_props_to_telemetry
+
+    received_at = time.time()
+    incoming = dict(props)
+    if "rb" in incoming:
+        rb = incoming["rb"]
+        try:
+            usable_rb = not isinstance(rb, bool) and 0 <= float(rb) <= 100
+            int(rb)  # must be usable by the telemetry adapter too
+        except (TypeError, ValueError, OverflowError):
+            usable_rb = False
+        if not usable_rb:
+            incoming.pop("rb")
+    newer_soc = (request_soc_revision is not None
+                 and state.soc_revision_by_sn.get(device_sn, 0) != request_soc_revision)
+    newer_receipt = (request_started_at is not None
+                     and state.soc_source_ts_by_sn.get(device_sn, 0.0) > request_started_at)
+    if source == "http" and (newer_soc or newer_receipt):
+        incoming.pop("rb", None)
+    raw = state.props_raw_by_sn.setdefault(device_sn, {})
+    raw.update(incoming)
+    if "rb" in incoming:
+        state.soc_source_ts_by_sn[device_sn] = received_at
+        state.soc_source_by_sn[device_sn] = source
+        state.soc_revision_by_sn[device_sn] = state.soc_revision_by_sn.get(device_sn, 0) + 1
+    telemetry = cloud_props_to_telemetry(raw)
+    telemetry["soc_source_ts"] = state.soc_source_ts_by_sn.get(device_sn)
+    telemetry["soc_source"] = state.soc_source_by_sn.get(device_sn)
+    state.telemetry_by_sn[device_sn] = telemetry
+    state.ts_by_sn[device_sn] = received_at
+    return raw
+
+
+def _cache_pack_snapshot(device_sn: str, packs: list[dict], *, source: str,
+                         received_at: float) -> None:
+    state.battery_packs_by_sn[device_sn] = packs
+    state.packs_ts_by_sn[device_sn] = received_at
+    state.packs_source_by_sn[device_sn] = source
+    state.packs_revision_by_sn[device_sn] = state.packs_revision_by_sn.get(device_sn, 0) + 1
+    state.packs_refresh_error_by_sn.pop(device_sn, None)
+    if state.cloud_client:
+        state.cloud_client.pack_cache_by_sn[device_sn] = packs
+        state.cloud_client.pack_cache_ts_by_sn[device_sn] = received_at
+        state.cloud_client.pack_cache_source_by_sn[device_sn] = source
+        revisions = state.cloud_client.pack_cache_revision_by_sn
+        revisions[device_sn] = revisions.get(device_sn, 0) + 1
+
+
+def _clear_device_caches(device_sn: str | None = None) -> None:
+    """Forget telemetry and provenance together on account/device reset."""
+    state.cache_generation += 1
+    maps = [state.props_raw_by_sn, state.telemetry_by_sn, state.ts_by_sn,
+            state.soc_source_ts_by_sn, state.soc_source_by_sn, state.soc_revision_by_sn,
+            state.battery_packs_by_sn, state.packs_ts_by_sn, state.packs_source_by_sn,
+            state.packs_revision_by_sn,
+            state.packs_refresh_error_by_sn, state.packs_refresh_attempt_ts_by_sn,
+            state.packs_refresh_lock_by_sn, state.pack_upgrade_by_sn, state.pack_upgrade_ts,
+            state.pack_upgrade_attempt_ts]
+    if state.cloud_client:
+        maps.extend([state.cloud_client.pack_cache_by_sn,
+                     state.cloud_client.pack_cache_ts_by_sn,
+                     state.cloud_client.pack_cache_source_by_sn,
+                     state.cloud_client.pack_cache_revision_by_sn])
+    for cache in maps:
+        if device_sn is None:
+            cache.clear()
+        else:
+            cache.pop(device_sn, None)
+
+
+def _packs_stale(device_sn: str) -> bool:
+    fetched_at = state.packs_ts_by_sn.get(device_sn, 0.0)
+    return (device_sn not in state.battery_packs_by_sn or not fetched_at
+            or time.time() - fetched_at >= PACK_CACHE_TTL_S)
+
+
+async def _get_battery_packs(device_sn: str, *, force_refresh: bool = False) -> dict:
+    """Refresh expired packs once, retaining the receipt time on failure."""
+    lock = state.packs_refresh_lock_by_sn.setdefault(device_sn, asyncio.Lock())
+    async with lock:
+        now = time.time()
+        last_attempt = state.packs_refresh_attempt_ts_by_sn.get(device_sn)
+        may_retry = last_attempt is None or now - last_attempt >= PACK_REFRESH_RETRY_S
+        blocked = _cloud_read_block_reason()
+        if blocked:
+            if _packs_stale(device_sn):
+                state.packs_refresh_error_by_sn[device_sn] = blocked
+        elif force_refresh or (_packs_stale(device_sn) and may_retry):
+            state.packs_refresh_attempt_ts_by_sn[device_sn] = now
+            if state.cloud_client is None:
+                state.packs_refresh_error_by_sn[device_sn] = "cloud client not initialised"
+            else:
+                try:
+                    generation = state.cache_generation
+                    revision = state.packs_revision_by_sn.get(device_sn, 0)
+                    packs = await state.cloud_client.fetch_battery_packs(
+                        device_sn, force_refresh=True)
+                except Exception as e:
+                    # A fresh MQTT receipt during the failed request is
+                    # already sufficient; otherwise preserve stale data.
+                    if _packs_stale(device_sn):
+                        # Upstream exception text can contain response
+                        # bodies. Surface the class without leaking it.
+                        state.packs_refresh_error_by_sn[device_sn] = (
+                            f"pack refresh failed ({type(e).__name__})")
+                else:
+                    if generation != state.cache_generation:
+                        return {"ok": False, "device_sn": device_sn, "packs": [],
+                                "fetched_at": 0.0, "source": None, "stale": True,
+                                "error": "pack cache reset during refresh"}
+                    if state.packs_revision_by_sn.get(device_sn, 0) == revision:
+                        _cache_pack_snapshot(device_sn, packs, source="http",
+                                             received_at=time.time())
+        packs = state.battery_packs_by_sn.get(device_sn, [])
+        if not _packs_stale(device_sn):
+            await _annotate_pack_upgrades(device_sn, packs)
+        # Annotation can await HTTP too: report the latest snapshot if a
+        # pack push arrived in the meantime.
+        result = {
+            "ok": not _packs_stale(device_sn), "device_sn": device_sn,
+            "packs": state.battery_packs_by_sn.get(device_sn, []),
+            "fetched_at": state.packs_ts_by_sn.get(device_sn, 0.0),
+            "source": state.packs_source_by_sn.get(device_sn),
+            "stale": _packs_stale(device_sn),
+        }
+        if result["stale"]:
+            result["error"] = state.packs_refresh_error_by_sn.get(
+                device_sn, "pack telemetry is stale")
+        return result
+
+
 # ---- Cloud poller ----
 async def cloud_loop() -> None:
     if not state.cloud_creds:
@@ -586,7 +775,6 @@ async def cloud_loop() -> None:
         from cloud_client import (
             JackeryCloudClient,
             SessionContestedError,
-            cloud_props_to_telemetry,
         )
     except Exception as e:
         log.warning("Cloud client unavailable: %s", e)
@@ -615,6 +803,8 @@ async def cloud_loop() -> None:
     _seen_push_keys: set[str] = set()
 
     async def _on_property_push(body: dict, device_sn: str | None = None):
+        if state.cloud_client is not c:
+            return  # queued callback from a retired account/client
         if not isinstance(body, dict) or not body:
             return
         if not device_sn:
@@ -632,10 +822,7 @@ async def cloud_loop() -> None:
                   new_keys=new_keys, total_seen=len(_seen_push_keys))
         # Update the per-device dicts. Active-device convenience mirrors get
         # written by the cloud_loop step that runs after this returns.
-        raw = state.props_raw_by_sn.setdefault(device_sn, {})
-        raw.update(props)
-        state.telemetry_by_sn[device_sn] = cloud_props_to_telemetry(raw)
-        state.ts_by_sn[device_sn] = time.time()
+        raw = _merge_cloud_properties(device_sn, props, source="mqtt")
         # Inverter overload protection: as soon as a fresh output_power_w
         # comes through MQTT, check whether it crossed the per-device
         # threshold. If so, fire the diversion plug OFF immediately and
@@ -648,6 +835,8 @@ async def cloud_loop() -> None:
                 device_sn, telemetry.get("output_power_w"))
         except Exception as e:
             log.warning("inverter_protect check raised (ignored): %s", e)
+        if state.cloud_client is not c:
+            return  # client may have retired during the inverter await
         # Mirror onto the active-device fields if this push is for the
         # device the dashboard is viewing.
         active_sn = (state.cloud_device or {}).get("device_sn")
@@ -667,15 +856,14 @@ async def cloud_loop() -> None:
         both the bridge's per-device cache and the cloud_client's
         push cache so any subsequent fetch_battery_packs short-circuits
         to the realtime value."""
+        if state.cloud_client is not c:
+            return  # queued callback from a retired account/client
         if not parent_sn or not isinstance(packs, list):
             return
         cleaned = [p for p in packs
                    if isinstance(p, dict) and not p.get("isDelete")]
         cleaned.sort(key=lambda p: p.get("deviceOrder") or 0)
-        state.battery_packs_by_sn[parent_sn] = cleaned
-        state.packs_ts_by_sn[parent_sn] = time.time()
-        if state.cloud_client:
-            state.cloud_client.pack_cache_by_sn[parent_sn] = cleaned
+        _cache_pack_snapshot(parent_sn, cleaned, source="mqtt", received_at=time.time())
         event("info", "mqtt",
               f"Realtime pack update ({len(cleaned)} packs) [{parent_sn[-6:]}]",
               pack_count=len(cleaned), parent_sn=parent_sn)
@@ -739,7 +927,6 @@ async def cloud_loop() -> None:
             # Poll EVERY device on the account. Active device first (the one
             # the dashboard is currently viewing) so it gets fresh data with
             # minimum latency; the others follow in the same iteration.
-            now_ts = time.time()
             active_sn = (state.cloud_device or {}).get("device_sn")
             ordered_devs = sorted(
                 state.cloud_devices,
@@ -752,6 +939,9 @@ async def cloud_loop() -> None:
                 if not dev_id or not dev_sn:
                     continue
                 try:
+                    request_started_at = time.time()
+                    request_soc_revision = state.soc_revision_by_sn.get(dev_sn, 0)
+                    cache_generation = state.cache_generation
                     props = await c.fetch_properties(dev_id)
                 except SessionContestedError:
                     raise  # let outer handler apply the cooldown
@@ -760,10 +950,11 @@ async def cloud_loop() -> None:
                     continue
                 if not props:
                     continue
-                raw = state.props_raw_by_sn.setdefault(dev_sn, {})
-                raw.update(props)
-                state.telemetry_by_sn[dev_sn] = cloud_props_to_telemetry(raw)
-                state.ts_by_sn[dev_sn] = now_ts
+                if cache_generation != state.cache_generation:
+                    continue
+                _merge_cloud_properties(dev_sn, props, source="http",
+                                         request_started_at=request_started_at,
+                                         request_soc_revision=request_soc_revision)
                 any_polled = True
             # Mirror the active device onto the legacy single-device fields
             # so existing merged_poll consumers see no change in shape.
@@ -979,6 +1170,8 @@ def merged_poll() -> dict:
         sn: {
             "telemetry": state.telemetry_by_sn.get(sn),
             "ts": state.ts_by_sn.get(sn),
+            "soc_source_ts": state.soc_source_ts_by_sn.get(sn),
+            "soc_source": state.soc_source_by_sn.get(sn),
         }
         for sn in state.telemetry_by_sn
     }
@@ -1081,7 +1274,16 @@ async def handle(method: str, params: dict) -> dict:
             return {"ok": False, "error": f"failed to persist credentials: {where}"}
         log.info("persisted cloud credentials to %s", where)
 
-        # 3) (re)start cloud_loop with fresh credentials
+        # 3) Stop the old account before resetting shared state. Awaited
+        # shutdown can deliver a final old-account receipt or device list.
+        await _stop_cloud_poller()
+        if state.cloud_client:
+            old_client = state.cloud_client
+            state.cloud_client = None
+            try:
+                await old_client.aclose()
+            except Exception:
+                pass
         state.cloud_creds = {"email": email, "password": password, "region": region}
         state.cloud_state = "logging-in"
         state.cloud_error = None
@@ -1091,18 +1293,7 @@ async def handle(method: str, params: dict) -> dict:
         state.cloud_telemetry = None
         state.cloud_props_raw = {}
         state.cloud_ts = None
-        if state.cloud_client:
-            try:
-                await state.cloud_client.aclose()
-            except Exception:
-                pass
-            state.cloud_client = None
-        if state.cloud_task and not state.cloud_task.done():
-            state.cloud_task.cancel()
-            try:
-                await state.cloud_task
-            except Exception:
-                pass
+        _clear_device_caches()
         state.cloud_task = asyncio.create_task(cloud_loop(), name="cloud_loop")
         return {"ok": True, "email": email, "region": region}
 
@@ -1128,6 +1319,7 @@ async def handle(method: str, params: dict) -> dict:
             state.cloud_telemetry = None
             state.cloud_props_raw = {}
             state.cloud_ts = None
+            _clear_device_caches(match["device_sn"])
             log.info("force_repoll set by: select_device RPC")
             state.cloud_force_repoll.set()
         return {"ok": True, "device_id": device_id, "name": match["name"]}
@@ -1144,13 +1336,7 @@ async def handle(method: str, params: dict) -> dict:
             except Exception:
                 pass
             state.cloud_client = None
-        if state.cloud_task and not state.cloud_task.done():
-            state.cloud_task.cancel()
-            try:
-                await state.cloud_task
-            except Exception:
-                pass
-            state.cloud_task = None
+        await _stop_cloud_poller()
         state.cloud_creds = None
         state.cloud_state = "needs-credentials"
         state.cloud_error = None
@@ -1160,6 +1346,7 @@ async def handle(method: str, params: dict) -> dict:
         state.cloud_telemetry = None
         state.cloud_props_raw = {}
         state.cloud_ts = None
+        _clear_device_caches()
         return {"ok": True, "cleared": where}
 
     if method == "pause_polling":
@@ -1250,24 +1437,8 @@ async def handle(method: str, params: dict) -> dict:
             device_sn = (state.cloud_device or {}).get("device_sn", "")
         if not device_sn:
             return {"ok": False, "error": "no device_sn", "packs": []}
-        cached = state.battery_packs_by_sn.get(device_sn)
-        if cached is not None:
-            packs = await _annotate_pack_upgrades(device_sn, cached)
-            return {"ok": True, "device_sn": device_sn, "packs": packs,
-                    "fetched_at": state.packs_ts_by_sn.get(device_sn, 0.0),
-                    "source": "mqtt"}
-        if not state.cloud_client:
-            return {"ok": False, "error": "cloud client not initialised", "packs": []}
-        try:
-            packs = await state.cloud_client.fetch_battery_packs(device_sn)
-            packs = await _annotate_pack_upgrades(device_sn, packs)
-        except Exception as e:
-            return {"ok": False, "error": str(e), "packs": []}
-        state.battery_packs_by_sn[device_sn] = packs
-        state.packs_ts_by_sn[device_sn] = time.time()
-        return {"ok": True, "device_sn": device_sn, "packs": packs,
-                "fetched_at": state.packs_ts_by_sn[device_sn],
-                "source": "http"}
+        return await _get_battery_packs(
+            device_sn, force_refresh=params.get("force_refresh") is True)
 
     if method == "set_output":
         # Output toggles go over MQTT (emqx.jackeryapp.com). The cloud_client

@@ -8,6 +8,14 @@ Pre-1.0 means breaking changes can land in any minor.
 
 ## [Unreleased]
 
+### Fixed
+- Expire expansion-pack telemetry caches after two minutes, refresh through
+  HTTP with bounded retries, and prevent delayed HTTP responses from replacing
+  newer MQTT readings.
+- Preserve main SOC and pack receipt timestamps and HTTP/MQTT sources in
+  SQLite and diagnostic APIs. Cached pack values no longer become new history
+  snapshots; historical provenance remains unknown.
+
 ### Added
 - App-level username/password login (`auth.py`) — first-visit setup, PBKDF2
   password hash, HMAC-signed session cookies, sign-out button.
