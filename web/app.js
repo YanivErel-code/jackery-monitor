@@ -50,6 +50,31 @@ function setDeviceSwitching(on) {
 }   // last /api/energy/daily payload (365d, per device)
 let forecastCache = null;     // last /api/forecast response
 let activeTab = 'live';
+let _forecastGeneration = 0;
+
+async function dashboardJson(url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+const _dashboardReads = DashboardRequests.createKeyedLoader({ load: dashboardJson });
+const _forecastReads = DashboardRequests.createKeyedLoader({
+  load: sn => dashboardJson(`/api/forecast?device_sn=${encodeURIComponent(sn)}`),
+  ttlMs: 30_000,
+  cacheable: result => !result.error,
+});
+const _statusFallback = DashboardRequests.createStatusFallback({
+  load: () => dashboardJson('/api/status'),
+  onStatus: applyStatus,
+  staleMs: 6000,
+});
+function invalidateForecastRequests() {
+  _forecastGeneration++;
+  _forecastReads.clear();
+}
+function isTabVisible(name) {
+  return activeTab === name && document.visibilityState !== 'hidden';
+}
 
 // ---------- chart palette ----------
 // Single source of truth so the chart drawing code, hover tooltips, and
@@ -469,7 +494,7 @@ function switchTab(name, opts = {}) {
   }
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.toggleAttribute('hidden', p.id !== `tab-${name}`));
-  if (name === 'live')     { drawLiveChart(lastStatus); }
+  if (name === 'live')     { drawLiveChart(lastStatus); renderBatteryPacks(); fetchEodForecast(); fetchBatteryPacks(); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); fetchEnergyDaily(); }
   if (name === 'forecast') { fetchForecast(); }
   if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadAIProvider(); loadOpenAIKeyStatus(); loadOpenAIModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
@@ -994,14 +1019,14 @@ $('inverter-watchdog-enabled')?.addEventListener('change', async (event) => {
 });
 
 async function loadDeviceCapacity() {
-  if (isHomeMonitoring()) return;
+  const sn = activeJackeryDevice()?.device_sn;
+  if (!isCurrentDeviceRequest(sn)) return;
   try {
     const r = await fetch('/api/devices/capacity');
     if (!r.ok) return;
     const j = await r.json();
-    const active = activeJackeryDevice();
-    const sn = active?.device_sn;
-    const dev = (j.devices || []).find(d => d.device_sn === sn) || (j.devices || [])[0];
+    if (!isCurrentDeviceRequest(sn)) return;
+    const dev = (j.devices || []).find(d => d.device_sn === sn);
     if (!dev) return;
     const inp = $('capacity-input');
     const def = $('capacity-default');
@@ -1054,8 +1079,10 @@ async function loadDeviceParams() {
     const r = await fetch(`/api/devices/params?device_sn=${encodeURIComponent(dev.device_sn)}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
+    if (!isCurrentDeviceRequest(dev.device_sn)) return;
     renderDeviceParams(j.params || [], dev.device_sn);
   } catch (e) {
+    if (!isCurrentDeviceRequest(dev.device_sn)) return;
     list.innerHTML = `<div class="hint">Failed to load: ${escapeHtml(e.message || e)}</div>`;
   }
 }
@@ -1133,6 +1160,7 @@ async function refitParam(btn, deviceSn) {
       status.textContent = `Refit: ${j.value} (source=${j.source}${j.n_samples ? `, n=${j.n_samples}` : ''})`;
       setTimeout(() => { status.hidden = true; }, 4000);
     }
+    invalidateForecastRequests();
     loadDeviceParams();
   } catch (e) {
     if (status) status.textContent = `Refit failed: ${e.message || e}`;
@@ -1237,6 +1265,7 @@ async function saveDeviceParam(deviceSn, key, value) {
       status.textContent = 'Saved.';
       setTimeout(() => { status.hidden = true; }, 2000);
     }
+    invalidateForecastRequests();
     loadDeviceParams();  // re-render so "Reset" button appears/disappears
   } catch (e) {
     if (status) status.textContent = `Failed: ${e.message || e}`;
@@ -1345,6 +1374,7 @@ async function useProbeCandidate(deviceSn, candidate) {
       status.textContent = `Saved ${wh} Wh from cloud probe.`;
       setTimeout(() => { status.hidden = true; }, 3000);
     }
+    invalidateForecastRequests();
     loadDeviceCapacity();
   } catch (e) {
     alert(`Failed to apply capacity: ${e.message || e}`);
@@ -1433,6 +1463,7 @@ document.getElementById('capacity-form')?.addEventListener('submit', async (e) =
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || ('HTTP ' + r.status));
     }
+    invalidateForecastRequests();
     status.textContent = 'Saved.';
     setTimeout(() => { status.hidden = true; }, 2500);
   } catch (err) {
@@ -1831,6 +1862,12 @@ function activeJackeryDevice() {
   if (!lastStatus || !lastStatus.cloud) return null;
   const sel = lastStatus.cloud.selected_device_id;
   return (lastStatus.cloud.devices || []).find((d) => d.device_id === sel) || null;
+}
+
+function isCurrentDeviceRequest(sn) {
+  if (!sn || isHomeMonitoring() || activeJackeryDevice()?.device_sn !== sn) return false;
+  return !_pendingViewSwitch || Date.now() > _pendingViewSwitch.until
+    || String(lastStatus?.cloud?.selected_device_id) === _pendingViewSwitch.id;
 }
 
 function isHomeMonitoring(status = lastStatus) {
@@ -2732,6 +2769,7 @@ document.getElementById('settings-form')?.addEventListener('submit', async (e) =
       throw new Error(j.detail || j.error || ('HTTP ' + r.status));
     }
     const j = await r.json();
+    invalidateForecastRequests();
     status.textContent = 'Saved.';
     // Re-render with the values the server actually accepted (clamped).
     if (j.settings) {
@@ -3887,6 +3925,12 @@ $('device-select')?.addEventListener('change', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device_id }),
     });
+    // If the immediate view-switch push is lost, recover without waiting
+    // for the previous view's otherwise-healthy WS freshness window.
+    if (String(lastStatus?.cloud?.selected_device_id) !== String(device_id)) {
+      _statusFallback.markViewChanged();
+      _statusFallback.tick();
+    }
   } catch (err) {
     _pendingViewSwitch = null;  // switch didn't happen — stop dropping frames
     setDeviceSwitching(false);
@@ -3962,7 +4006,7 @@ function connectWs() {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === 'snapshot' || msg.type === 'telemetry' || msg.type === 'status') {
-      applyStatus(msg.data);
+      if (applyStatus(msg.data)) _statusFallback.markWsStatus();
     } else if (msg.type === 'alert') {
       const b = $('alert-banner');
       b.textContent = msg.data?.message || 'Alert';
@@ -3985,7 +4029,7 @@ function connectWs() {
       _onAutomationFiredPush(msg.data);
     }
   };
-  ws.onclose = () => setTimeout(connectWs, 2000);
+  ws.onclose = () => { _statusFallback.markDisconnected(); setTimeout(connectWs, 2000); };
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
@@ -4042,7 +4086,7 @@ function _onAutomationFiredPush(data) {
 // APPLY STATUS
 // ============================================================
 function applyStatus(s) {
-  if (!s) return;
+  if (!s) return false;
   // During a user-initiated device switch, ignore frames that were
   // rendered for a different device (stale in-flight REST polls, WS
   // frames from before the server-side view bump). The latch holds for
@@ -4060,7 +4104,7 @@ function applyStatus(s) {
       const frameId = s.cloud?.selected_device_id != null
         ? String(s.cloud.selected_device_id) : null;
       if (frameId && frameId !== String(_pendingViewSwitch.id)) {
-        return;                        // stale frame from the previous view
+        return false;                  // stale frame from the previous view
       }
       if (frameId === String(_pendingViewSwitch.id)) {
         // First frame of the NEW device is about to render — loading done.
@@ -4094,16 +4138,24 @@ function applyStatus(s) {
   // capacity, solar regression, load profile all differ), so re-fetch on
   // device switch. The EOD badge on the battery card is also per-device.
   if (prevDeviceSn !== newDeviceSn && newDeviceSn) {
+    clearEnergyKpis();
+    forecastCache = null;
+    energyHistoryCache = null;
+    _eodAnchorSOC = null;
+    _eodLastFetchAt = 0;
+    show($('eod-forecast'), false);
     if (activeTab === 'forecast') {
-      forecastCache = null;
+      show($('forecast-content'), false);
+      show($('forecast-stats'), false);
       fetchForecast();
     }
     // Daily table/records are per-device — drop the old cache so a CSV
     // export can't carry the previous device's data, and refresh in
     // place if the Energy tab is what the user is looking at.
     energyDailyCache = null;
-    if (activeTab === 'energy') fetchEnergyDaily();
-    if (!homeMonitoring) fetchEodForecast();
+    if (isTabVisible('energy')) { fetchEnergyHistory(); fetchEnergyAllDevices(); fetchEnergyDaily(); }
+    if (isTabVisible('live') && !homeMonitoring) { fetchEodForecast(); fetchBatteryPacks(); }
+    if (activeTab === 'device' && !homeMonitoring) { loadDeviceCapacity(); loadDeviceParams(); }
     // Pack list is per-device — drop the previous device's cache so we
     // don't briefly show the old packs while the new fetch is in flight.
     // The next WS tick will populate cachedPacks from s.battery_packs.
@@ -4163,7 +4215,7 @@ function applyStatus(s) {
   const t = s.telemetry || {};
   if (homeMonitoring) {
     renderDeviceInfo(s, t);
-    return;
+    return true;
   }
   if (t.battery_percent != null) {
     // Prefer the server-computed system SOC when packs are attached,
@@ -4345,6 +4397,7 @@ function applyStatus(s) {
 
   // Live chart
   if (activeTab === 'live') drawLiveChart(s);
+  return true;
 }
 
 function renderDeviceInfo(s, t) {
@@ -4687,6 +4740,23 @@ function describeSrc(meta) {
 // ============================================================
 // ENERGY KPIs
 // ============================================================
+function clearEnergyKpis() {
+  // Aggregates arrive asynchronously. A new device must never inherit
+  // the previous unit's totals while its cache is being populated.
+  for (const id of ['today-out-kwh', 'today-in-kwh', 'today-diverted-kwh',
+    'e-today-out', 'e-today-in', 'e-7d-out', 'e-7d-in', 'e-30d-out', 'e-30d-in',
+    'e-life-out', 'e-life-in', 'today-solar-savings', 'today-grid-cost',
+    'today-net-savings', 'life-solar-savings', 'life-grid-cost', 'life-net-savings',
+    'today-charged-split-solar', 'today-charged-split-ac',
+    'e-today-charged-split-solar', 'e-today-charged-split-ac']) {
+    if ($(id)) $(id).textContent = '—';
+  }
+  for (const id of ['today-diverted-row', 'today-charged-split',
+    'e-today-charged-split', 'today-savings-row', 'lifetime-savings-row']) {
+    show($(id), false);
+  }
+}
+
 function renderEnergyKpis(e) {
   const set = (id, wh) => { const el = $(id); if (el) el.textContent = fmtKwh(wh); };
   set('e-today-out', e.today?.output_wh);
@@ -4743,24 +4813,23 @@ document.querySelectorAll('.range-btn').forEach((btn) => {
 });
 
 async function fetchEnergyHistory() {
+  if (!isTabVisible('energy') || isHomeMonitoring()) return;
+  const histSn = activeJackeryDevice()?.device_sn;
+  if (!isCurrentDeviceRequest(histSn)) return;
+  const hours = energyRangeHours;
   try {
-    const histSn = activeJackeryDevice()?.device_sn;
-    const r = await fetch(`/api/energy/history?hours=${energyRangeHours}`
-      + (histSn ? `&device_sn=${encodeURIComponent(histSn)}` : ''));
-    if (histSn && activeJackeryDevice()?.device_sn
-        && histSn !== activeJackeryDevice().device_sn) return;
-    if (!r.ok) return;
-    const j = await r.json();
+    const j = await _dashboardReads.get(`/api/energy/history?hours=${hours}&device_sn=${encodeURIComponent(histSn)}`);
+    if (!isCurrentDeviceRequest(histSn) || hours !== energyRangeHours || !isTabVisible('energy')) return;
     energyHistoryCache = j;
     drawEnergyChart(j);
   } catch (e) { console.warn('energy history fetch failed', e); }
 }
 
 async function fetchEnergyAllDevices() {
+  if (!isTabVisible('energy') || !isCurrentDeviceRequest(activeJackeryDevice()?.device_sn)) return;
   try {
-    const r = await fetch('/api/energy/devices');
-    if (!r.ok) return;
-    const j = await r.json();
+    const j = await _dashboardReads.get('/api/energy/devices');
+    if (!isTabVisible('energy') || isHomeMonitoring()) return;
     const devs = j.devices || [];
     const tbody = $('energy-devices-body');
     if (!tbody) return;
@@ -4790,7 +4859,6 @@ async function fetchEnergyAllDevices() {
 let energyDailyDays = 90;                            // table range (client-side slice)
 let energyDailySort = { key: 'date', dir: 'desc' };  // default: newest first
 let energyDailySearch = '';
-let _energyDailyRetries = 0;
 
 const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -4810,17 +4878,9 @@ function energyDailyToday() {
 }
 
 async function fetchEnergyDaily() {
+  if (!isTabVisible('energy')) return;
   const deviceSn = activeJackeryDevice()?.device_sn;
-  if (!deviceSn) {
-    // The tab can open before the first WS status delivers the device
-    // list — retry briefly while the Energy tab is still in front.
-    if (activeTab === 'energy' && _energyDailyRetries < 5) {
-      _energyDailyRetries++;
-      setTimeout(fetchEnergyDaily, 1200);
-    }
-    return;
-  }
-  _energyDailyRetries = 0;
+  if (!isCurrentDeviceRequest(deviceSn)) return; // First status replays the visible tab.
   // Serve from cache only while it's fresh — the daily rollup changes as
   // the day accrues, so a long-lived dashboard refetches on tab open
   // rather than freezing the Records card at first render.
@@ -4833,11 +4893,9 @@ async function fetchEnergyDaily() {
     return;
   }
   try {
-    const r = await fetch(`/api/energy/daily?device_sn=${encodeURIComponent(deviceSn)}&days=365`);
-    if (!r.ok) return;
-    const j = await r.json();
+    const j = await _dashboardReads.get(`/api/energy/daily?device_sn=${encodeURIComponent(deviceSn)}&days=365`);
     if (!Array.isArray(j.daily)) return;
-    if (deviceSn !== (activeJackeryDevice()?.device_sn || deviceSn)) {
+    if (!isCurrentDeviceRequest(deviceSn) || !isTabVisible('energy')) {
       return;  // switched devices while in flight — discard
     }
     j._fetched_at = Date.now();
@@ -5374,7 +5432,9 @@ window.addEventListener('resize', () => {
 // FORECAST TAB
 // ============================================================
 async function fetchForecast() {
-  if (isHomeMonitoring()) return;
+  const sn = activeJackeryDevice()?.device_sn;
+  if (!isCurrentDeviceRequest(sn) || !isTabVisible('forecast')) return;
+  const generation = _forecastGeneration;
   const needsConfig = $('forecast-needs-config');
   const content     = $('forecast-content');
   const stats       = $('forecast-stats');
@@ -5390,12 +5450,8 @@ async function fetchForecast() {
   try {
     // Forecast is per-device — pass the currently-viewed Jackery's SN so
     // the Forecast tab follows the per-browser picker.
-    const sn = activeJackeryDevice()?.device_sn;
-    const url = sn ? `/api/forecast?device_sn=${encodeURIComponent(sn)}` : '/api/forecast';
-    const r = await fetch(url);
-    if (!r.ok) { showNeedsConfig(); return; }
-    const j = await r.json();
-    if (isHomeMonitoring() || sn !== activeJackeryDevice()?.device_sn) return;
+    const j = await _forecastReads.get(sn);
+    if (!isCurrentDeviceRequest(sn) || generation !== _forecastGeneration || !isTabVisible('forecast')) return;
     if (!j.configured) {
       showNeedsConfig('Allow location to enable forecasts',
         'The forecaster needs your approximate location to know which weather to fetch. Click below to share it.');
@@ -5475,7 +5531,11 @@ async function fetchForecast() {
     // block the rest of the Forecast tab.
     renderDailyAccuracy().catch((err) =>
       console.warn('daily accuracy render failed', err));
-  } catch (e) { console.warn('forecast fetch failed', e); }
+  } catch (e) {
+    if (!isCurrentDeviceRequest(sn) || generation !== _forecastGeneration || !isTabVisible('forecast')) return;
+    showNeedsConfig('Forecast unavailable', 'Could not load the forecast. Open this tab again to retry.');
+    console.warn('forecast fetch failed', e);
+  }
 }
 
 // ============================================================
@@ -5985,6 +6045,7 @@ async function requestAndSaveGeolocation() {
       setMessage('Could not save location', `${r.status} ${r.statusText}`);
       return { ok: false, denied: false };
     }
+    invalidateForecastRequests();
     return { ok: true, denied: false };
   } catch (e) {
     setMessage('Could not save location', e.message || String(e));
@@ -6212,6 +6273,7 @@ async function _saveManualLocation(lat, lon, label, opts) {
     // Hide the manual card and refresh dependent UI — the server has
     // already busted the weather cache, so the next forecast call will
     // pull fresh GHI for the new coords.
+    invalidateForecastRequests();
     setTimeout(() => _showManualLoc(false), 800);
     fetchForecast();
     fetchEodForecast();
@@ -6241,6 +6303,9 @@ async function fetchEodForecast() {
   const el = $('eod-forecast');
   if (!el) return;
   if (isHomeMonitoring()) { el.hidden = true; return; }
+  const sn = activeJackeryDevice()?.device_sn;
+  if (!isCurrentDeviceRequest(sn) || !isTabVisible('live')) return;
+  const generation = _forecastGeneration;
   _eodLastFetchAt = Date.now();
 
   // Helper: surface the "still calibrating" state with progress hints
@@ -6272,12 +6337,8 @@ async function fetchEodForecast() {
     // Forecast is per-device — pass the currently-viewed Jackery's SN so
     // the hero card's prediction follows the picker (each browser may be
     // viewing a different device).
-    const sn = activeJackeryDevice()?.device_sn;
-    const url = sn ? `/api/forecast?device_sn=${encodeURIComponent(sn)}` : '/api/forecast';
-    const r = await fetch(url);
-    if (!r.ok) { el.hidden = true; return; }
-    const j = await r.json();
-    if (isHomeMonitoring() || sn !== activeJackeryDevice()?.device_sn) { el.hidden = true; return; }
+    const j = await _forecastReads.get(sn);
+    if (!isCurrentDeviceRequest(sn) || generation !== _forecastGeneration || !isTabVisible('live')) return;
     if (!j.configured || j.error) { el.hidden = true; return; }
     // Readiness gate failed — show progress instead of hiding.
     if (j.ready === false) { showCalibrating(j.readiness); return; }
@@ -6399,6 +6460,8 @@ async function fetchEodForecast() {
     el.classList.toggle('low', best.predicted_soc < threshold);
     el.hidden = false;
   } catch (e) {
+    if (!isCurrentDeviceRequest(sn) || generation !== _forecastGeneration || !isTabVisible('live')) return;
+    el.hidden = true;
     console.warn('EOD forecast fetch failed:', e);
   }
 }
@@ -6456,15 +6519,16 @@ async function fetchBatteryPacks() {
   const card = $('battery-packs-card');
   if (!card) return;
   if (isHomeMonitoring()) { card.hidden = true; return; }
+  const viewSn = activeJackeryDevice()?.device_sn;
+  if (!isCurrentDeviceRequest(viewSn) || !isTabVisible('live')) return;
+  // Current servers include this same pack cache in every status push.
+  // Retain HTTP fallback for older servers which omit that field.
+  if (Array.isArray(lastStatus?.battery_packs)) return;
   try {
-    const viewSn = activeJackeryDevice()?.device_sn;
-    const r = await fetch('/api/devices/battery_packs'
-      + (viewSn ? `?device_sn=${encodeURIComponent(viewSn)}` : ''));
-    const j = r.ok ? await r.json() : { error: `HTTP ${r.status}` };
+    const j = await _dashboardReads.get(`/api/devices/battery_packs?device_sn=${encodeURIComponent(viewSn)}`);
     // A switch may have happened while this was in flight — discard
     // rather than repaint the previous unit's packs.
-    const nowSn = activeJackeryDevice()?.device_sn;
-    if (viewSn && nowSn && viewSn !== nowSn) return;
+    if (!isCurrentDeviceRequest(viewSn) || !isTabVisible('live')) return;
     console.debug('battery_packs response', j);
     window._cachedPacks = Array.isArray(j.packs) ? j.packs : [];
     window._cachedPackDeviceSn = j.device_sn || null;
@@ -6473,6 +6537,7 @@ async function fetchBatteryPacks() {
     window._cachedNoPacks = j.no_packs === true;
     renderBatteryPacks();
   } catch (e) {
+    if (!isCurrentDeviceRequest(viewSn) || !isTabVisible('live')) return;
     console.warn('battery packs fetch failed:', e);
     window._cachedPacksError = String(e);
     renderBatteryPacks();
@@ -6834,6 +6899,12 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && isKeepAwakeOn()) {
     requestWakeLock();
   }
+  if (document.visibilityState === 'visible') {
+    _statusFallback.tick();
+    if (activeTab === 'energy') { fetchEnergyHistory(); fetchEnergyAllDevices(); fetchEnergyDaily(); }
+    if (activeTab === 'live') { fetchEodForecast(); fetchBatteryPacks(); }
+    if (activeTab === 'forecast') fetchForecast();
+  }
 });
 
 function setKeepAwakeStatus(text) {
@@ -7184,6 +7255,7 @@ async function applyAlgSuggestion(id) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
     status.textContent = 'Applied.';
+    invalidateForecastRequests();
     setTimeout(() => { status.hidden = true; }, 2500);
     loadAlgorithmAdvisor();
     // If the change touched smart_charge config, refresh that panel too.
@@ -7879,40 +7951,25 @@ function initHeroSortable() {
     requestWakeLock();
   }
 
-  const ok = await checkAuth();
-  // Always start the WS — server returns whatever it has, even if cloud is logging in
+  // The app session is checked independently by /ws. Cloud credential
+  // status can wait on the bridge; it must not hold up first telemetry.
   connectWs();
+  checkAuth().then(ok => { if (ok) maybePromptLocationOnBoot(); });
   initHeroSortable();
 
-  // Pre-load history so the Live chart and Energy tab have data immediately
-  // (otherwise the user has to switch tabs once before history populates).
-  fetchEnergyHistory();
-  fetchEnergyAllDevices();
-
-  // Once-per-app-load geolocation prompt for the forecast feature. Skipped
-  // if location is already saved or the user previously denied.
-  if (ok) maybePromptLocationOnBoot();
-
-  // EOD forecast badge on the battery card: populate once on boot, then
-  // refit hourly (weather forecast itself only updates ~hourly).
-  if (ok) fetchEodForecast();
+  // The first discovered device populates the visible Live badge. Refit
+  // every 30 minutes while visible (weather itself updates ~hourly).
   setInterval(fetchEodForecast, 30 * 60_000);
 
   // Per-expansion-battery list. Server caches packs (refreshed every 5min
   // by the poll loop), so a 30s UI refresh just keeps the rendered values
   // in sync with the cache without hammering the cloud.
-  if (ok) fetchBatteryPacks();
   setInterval(fetchBatteryPacks, 30_000);
 
-  // Poll /api/status every 2s as a safety net in case the WebSocket lags
-  // or drops a frame. The WS still pushes telemetry as it arrives — this
-  // just guarantees the UI is never more than 2 seconds stale.
-  setInterval(async () => {
-    try {
-      const r = await fetch('/api/status', { cache: 'no-store' });
-      if (r.ok) applyStatus(await r.json());
-    } catch {}
-  }, 2000);
+  // Poll only if accepted WS snapshots stop arriving for six seconds.
+  // While paused or disconnected the fallback continues, with at most
+  // one request in flight even when the server responds slowly.
+  setInterval(() => _statusFallback.tick(), 2000);
 
   // Refresh energy history at a slower cadence — it's a heavier query and
   // doesn't change every tick. Picks up new samples for the chart.
@@ -7921,7 +7978,7 @@ function initHeroSortable() {
   // Forecast: weather updates hourly, fit + simulation are cheap, refresh
   // every 5 min while the tab is visible. fetchForecast is a no-op if the
   // result hasn't changed visibly.
-  setInterval(() => { if (activeTab === 'forecast') fetchForecast(); }, 5 * 60_000);
+  setInterval(() => { if (isTabVisible('forecast')) fetchForecast(); }, 5 * 60_000);
 
   // AI advisor pending-items badge on the Automation tab. Check on load
   // + every 3 min so the daily 8am review (or a manual run that
