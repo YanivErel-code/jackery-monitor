@@ -81,6 +81,17 @@ def client(app):
 
 # ---------- auth flow + middleware ----------
 
+@pytest.mark.parametrize("path", ["/", "/sw.js", "/static/app.js"])
+def test_dashboard_shell_revalidates_after_deployment(client, path):
+    """HTML and scripts must not age independently across a deployment."""
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "no-cache"
+    assert response.headers.get("etag")
+    if path == "/sw.js":
+        assert response.headers.get("service-worker-allowed") == "/"
+
+
 def test_unauth_root_redirects_to_setup_when_no_user(unauth_client):
     """Fresh install (no user yet) → / redirects to /setup."""
     r = unauth_client.get("/", follow_redirects=False)
