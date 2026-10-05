@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS samples (
     last_solar_w   INTEGER,
     last_ac_input_w INTEGER,
     last_battery_pct INTEGER,
+    last_source_ts REAL,           -- bridge receipt time, not monitor poll time
+    last_soc_source_ts REAL,       -- receipt time of the rb field specifically
+    last_soc_source TEXT,          -- http | mqtt; NULL for legacy/unknown
     sample_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_sn, bucket)
 );
@@ -226,6 +229,8 @@ CREATE TABLE IF NOT EXISTS battery_packs (
     output_w        REAL,                 -- op
     internal_temp_c REAL,                 -- it
     error_code      INTEGER,              -- ec
+    source_ts       REAL,                 -- bridge receipt time; NULL for legacy
+    source          TEXT,                 -- http | mqtt
     PRIMARY KEY (ts, parent_sn, pack_sn)
 );
 
@@ -414,6 +419,17 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             if "solar_charge_diverted_wh" not in existing:
                 c.execute("ALTER TABLE samples ADD COLUMN "
                           "solar_charge_diverted_wh REAL NOT NULL DEFAULT 0")
+            # Do not invent receipt timestamps for historical observations.
+            for column, sql_type in (("last_source_ts", "REAL"),
+                                     ("last_soc_source_ts", "REAL"),
+                                     ("last_soc_source", "TEXT")):
+                if column not in existing:
+                    c.execute(f"ALTER TABLE samples ADD COLUMN {column} {sql_type}")
+            existing_packs = {row[1] for row in c.execute(
+                "PRAGMA table_info(battery_packs)").fetchall()}
+            for column, sql_type in (("source_ts", "REAL"), ("source", "TEXT")):
+                if column not in existing_packs:
+                    c.execute(f"ALTER TABLE battery_packs ADD COLUMN {column} {sql_type}")
             # devices table: capacity override (added in v0.2.0+ for users with
             # extension batteries stacked on the 5000 Plus / etc.).
             existing_dev = {row[1] for row in c.execute(
@@ -480,7 +496,10 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                battery_pct: int | None = None,
                solar_w: float = 0.0,
                ac_input_w: float = 0.0,
-               solar_charge_diverted_w: float = 0.0) -> None:
+               solar_charge_diverted_w: float = 0.0,
+               source_ts: float | None = None,
+               soc_source_ts: float | None = None,
+               soc_source: str | None = None) -> None:
         """Integrate (input_w, output_w, solar_w, ac_input_w, diverted_w)
         since last reading for this device.
 
@@ -542,8 +561,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                        (device_sn, bucket, input_wh, output_wh, solar_wh, ac_input_wh,
                         solar_charge_diverted_wh,
                         last_input_w, last_output_w, last_solar_w, last_ac_input_w,
-                        last_battery_pct, sample_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        last_battery_pct, last_source_ts, last_soc_source_ts,
+                        last_soc_source, sample_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                    ON CONFLICT(device_sn, bucket) DO UPDATE SET
                      input_wh = input_wh + excluded.input_wh,
                      output_wh = output_wh + excluded.output_wh,
@@ -557,11 +577,14 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                      last_ac_input_w = excluded.last_ac_input_w,
                      last_battery_pct = COALESCE(excluded.last_battery_pct,
                                                  last_battery_pct),
+                     last_source_ts = excluded.last_source_ts,
+                     last_soc_source_ts = excluded.last_soc_source_ts,
+                     last_soc_source = excluded.last_soc_source,
                      sample_count = sample_count + 1
                 """,
                 (device_sn, bucket, in_wh, out_wh, solar_wh, ac_wh, div_wh,
                  int(input_w), int(output_w), int(solar_w), int(ac_input_w),
-                 battery_pct),
+                 battery_pct, source_ts, soc_source_ts, soc_source),
             )
 
     # ---------- queries ----------
@@ -827,7 +850,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
 
     # ---------- per-expansion-battery state ----------
     def record_battery_packs(self, parent_sn: str, packs: list[dict],
-                             ts: int | None = None) -> int:
+                             ts: int | None = None, *,
+                             source_ts: float | None = None,
+                             source: str | None = None) -> int:
         """Persist a snapshot of every expansion battery for the daily
         learning job. Each pack dict comes from cloud_client.fetch_battery_packs
         (raw cloud field names: rb=SOC, ip=input W, op=output W, it=temp,
@@ -848,6 +873,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 _nullable_float(p.get("op")),
                 _nullable_float(p.get("it")),
                 int(p.get("ec") or 0),
+                source_ts, source,
             ))
         if not prepared:
             return 0
@@ -855,8 +881,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             c.executemany(
                 """INSERT OR REPLACE INTO battery_packs
                        (ts, parent_sn, pack_sn, device_order,
-                        soc_pct, input_w, output_w, internal_temp_c, error_code)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        soc_pct, input_w, output_w, internal_temp_c, error_code,
+                        source_ts, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 prepared,
             )
         return len(prepared)
@@ -904,7 +931,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 return []
             rows = c.execute(
                 """SELECT ts, pack_sn, device_order, soc_pct, input_w,
-                          output_w, internal_temp_c, error_code
+                          output_w, internal_temp_c, error_code, source_ts, source
                      FROM battery_packs
                     WHERE parent_sn = ? AND ts = ?
                     ORDER BY device_order""",
@@ -913,7 +940,8 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         return [
             {"ts": r[0], "pack_sn": r[1], "device_order": r[2],
              "soc_pct": r[3], "input_w": r[4], "output_w": r[5],
-             "internal_temp_c": r[6], "error_code": r[7]}
+             "internal_temp_c": r[6], "error_code": r[7],
+             "source_ts": r[8], "source": r[9]}
             for r in rows
         ]
 
@@ -1395,7 +1423,10 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                            AVG(last_output_w) AS out_w,
                            AVG(last_solar_w) AS sol_w,
                            AVG(last_ac_input_w) AS ac_w,
-                           AVG(last_battery_pct) AS bat
+                           AVG(last_battery_pct) AS bat,
+                           MIN(last_soc_source_ts) AS soc_source_min,
+                           MAX(last_soc_source_ts) AS soc_source_max,
+                           COUNT(last_soc_source_ts) AS soc_source_known
                     FROM samples
                     WHERE device_sn = ? AND bucket >= ?
                     GROUP BY b
@@ -1457,7 +1488,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                    "solar_charge_diverted_wh": r[5] or 0,
                    "input_w": int(r[6] or 0), "output_w": int(r[7] or 0),
                    "solar_w": int(r[8] or 0), "ac_input_w": int(r[9] or 0),
-                   "battery_pct": int(r[10]) if r[10] is not None else None}
+                   "battery_pct": int(r[10]) if r[10] is not None else None,
+                   "soc_source_ts_min": r[11], "soc_source_ts_max": r[12],
+                   "soc_source_known_buckets": r[13]}
             if ts_sorted and row["battery_pct"] is not None:
                 row["system_soc"] = _capacity_weighted_soc(
                     float(row["battery_pct"]), int(row["ts"]),

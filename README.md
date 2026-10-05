@@ -495,6 +495,23 @@ To add a new model:
 
 ## Limitations
 
+SOC diagnostics preserve **receipt time** separately from monitor observation
+time. These are times the bridge received Jackery's MQTT push or HTTP response;
+the cloud does not provide a verified hardware measurement timestamp. Fresh
+power messages do not advance the main SOC's receipt time. Expansion-pack
+caches expire after two minutes and fall back to HTTP; automatic failed refreshes
+retry at most every 30 seconds and retain their original timestamp with `stale=true`.
+Repeated cached packets are not persisted as new pack snapshots.
+
+For investigations, `samples.last_source_ts`, `last_soc_source_ts`, and
+`last_soc_source` preserve main telemetry/SOC provenance. Pack snapshots retain
+`source_ts` and `source` alongside the existing observation `ts`. The packs API
+and WebSocket expose receipt time, age, source, and stale status. Historical
+rows have NULL provenance because their source times cannot be reconstructed.
+Advisor sample queries expose SOC receipt-time ranges for each aggregate bucket.
+These fields diagnose delivery delays; they cannot prove battery calibration
+or physical energy loss without device-side measurements.
+
 - **Per-input solar (HPV vs LPV) isn't in the Jackery cloud API.** Only the
   total solar input (`ip - acip - cip`) is exposed. Confirmed empirically
   on a real device and across multiple independent reverse-engineering

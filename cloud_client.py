@@ -41,12 +41,10 @@ Token lifetime — empirical findings 2026-05-13:
 The properties dict shape matches BLE (rb, bt, ip, op, acip, acov, acohz, oac, odc, odcu, odcc, ec, ot, it, ...),
 so we reuse the same _portable_status_to_dict adapter from device_client.
 
-MQTT vs HTTP coverage — only HTTP `/v1/device/property` returns the full
-~34-field property dict. MQTT pushes only 5 dynamic fields (ip, op,
-acpsp, acov1, it). Critical fields like `rb` (battery %), `acip`/`cip`
-(AC + car input, needed to compute solar = ip-acip-cip), and port
-on/off states (`oac`, `odc*`) come ONLY via HTTP. So HTTP polling can't
-be eliminated even with healthy MQTT.
+MQTT vs HTTP coverage — HTTP `/v1/device/property` returns the full
+~34-field property dict. MQTT usually pushes dynamic power fields and
+can also include `rb` (battery %), depending on the device/firmware.
+Coverage varies, so HTTP polling still fills fields absent from pushes.
 """
 
 from __future__ import annotations
@@ -91,6 +89,7 @@ DEFAULT_HEADERS = {
 }
 
 CLOUD_POLL_INTERVAL_S = 60
+PACK_CACHE_TTL_S = 120
 
 
 @dataclass
@@ -154,6 +153,9 @@ class JackeryCloudClient:
         # Per-device pack cache populated from MQTT SubDevicePropertyChange
         # pushes. Fresher than any HTTP call — short-circuits fetch_battery_packs.
         self.pack_cache_by_sn: dict[str, list[dict[str, Any]]] = {}
+        self.pack_cache_ts_by_sn: dict[str, float] = {}
+        self.pack_cache_source_by_sn: dict[str, str] = {}
+        self.pack_cache_revision_by_sn: dict[str, int] = {}
 
     # ---- internals ----
     def _generate_mac_id(self) -> str:
@@ -393,7 +395,8 @@ class JackeryCloudClient:
                      {k: props[k] for k in sorted(props.keys()) if not k.startswith("_dev_")})
         return props
 
-    async def fetch_battery_packs(self, device_sn: str) -> list[dict[str, Any]]:
+    async def fetch_battery_packs(self, device_sn: str, *,
+                                  force_refresh: bool = False) -> list[dict[str, Any]]:
         """Per-expansion-battery state. Reverse-engineered from the iOS app
         (HTTP Toolkit capture). Response shape:
             {code:0, data:[{deviceSn, parentDeviceSn, rb, ip, op, it, ot,
@@ -406,14 +409,17 @@ class JackeryCloudClient:
         Returns the list sorted by deviceOrder so packs render in the same
         order the iOS app shows them.
 
-        Short-circuits to the MQTT push cache when available — MQTT
-        SubDevicePropertyChange messages carry the same shape in real
-        time, so once the broker has delivered at least one update,
-        the HTTP endpoint is redundant.
+        Uses a recent cache only. After 120 seconds without a receipt,
+        refresh via HTTP; callers can force HTTP to bypass either cache
+        layer. Timestamps are local receipt times, not device sample times.
         """
         cached = self.pack_cache_by_sn.get(device_sn)
-        if cached:
+        cached_ts = self.pack_cache_ts_by_sn.get(device_sn, 0.0)
+        if (not force_refresh and cached is not None and cached_ts
+                and time.time() - cached_ts < PACK_CACHE_TTL_S):
             return cached
+        request_started_at = time.time()
+        cache_revision = self.pack_cache_revision_by_sn.get(device_sn, 0)
         data = await self._authed_get("/v1/device/battery/pack/list",
                                       {"deviceSn": device_sn})
         if data.get("code") != 0:
@@ -422,7 +428,7 @@ class JackeryCloudClient:
             )
         raw = data.get("data") or []
         if not isinstance(raw, list):
-            return []
+            raise CloudAuthError("battery pack list returned invalid data")
         packs: list[dict[str, Any]] = []
         for d in raw:
             if not isinstance(d, dict):
@@ -431,6 +437,15 @@ class JackeryCloudClient:
                 continue
             packs.append(d)
         packs.sort(key=lambda p: p.get("deviceOrder") or 0)
+        # The bridge's MQTT callback can update this cache while HTTP is
+        # in flight. A delayed response must not replace that newer push.
+        if (self.pack_cache_ts_by_sn.get(device_sn, 0.0) > request_started_at
+                or self.pack_cache_revision_by_sn.get(device_sn, 0) != cache_revision):
+            return self.pack_cache_by_sn.get(device_sn, packs)
+        self.pack_cache_by_sn[device_sn] = packs
+        self.pack_cache_ts_by_sn[device_sn] = time.time()
+        self.pack_cache_source_by_sn[device_sn] = "http"
+        self.pack_cache_revision_by_sn[device_sn] = cache_revision + 1
         return packs
 
     async def fetch_pack_upgrade_flags(self, device_sn: str) -> dict[str, bool]:

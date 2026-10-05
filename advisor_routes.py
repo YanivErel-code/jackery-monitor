@@ -1017,6 +1017,9 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                 out.append({
                     "ts": _iso(r["ts"]),
                     "soc": r.get("battery_pct"),
+                    "soc_source_ts_min": _iso(r.get("soc_source_ts_min")),
+                    "soc_source_ts_max": _iso(r.get("soc_source_ts_max")),
+                    "soc_source_known_buckets": r.get("soc_source_known_buckets", 0),
                     "in_w_avg": _avg_w(r.get("input_wh")),
                     "out_w_avg": _avg_w(r.get("output_wh")),
                     "solar_w_avg": _avg_w(r.get("solar_wh")),
