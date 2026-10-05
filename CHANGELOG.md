@@ -20,6 +20,11 @@ Pre-1.0 means breaking changes can land in any minor.
   snapshots; historical provenance remains unknown.
 
 ### Added
+- Explicit Jackery Home EU sign-in and read-only system discovery for
+  HomePower 2000 Ultra accounts (issue #2). Show aggregate SOC, reported total
+  capacity and distinct Home power fields; keep missing readings unknown.
+  Portable output commands, energy integration, charging automation and
+  recovery are disabled for Home systems. Hardware validation is pending.
 - App-level username/password login (`auth.py`) — first-visit setup, PBKDF2
   password hash, HMAC-signed session cookies, sign-out button.
 - `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, issue + PR templates,

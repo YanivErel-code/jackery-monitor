@@ -45,6 +45,10 @@ _MAX_TOOL_ROWS = 500
 _MAX_LOOKBACK_HOURS = 24 * 45
 
 
+def _default_read_only(device_sn: str | None) -> bool:
+    return False
+
+
 @dataclass
 class AdvisorHelpers:
     """Server-side capacity helpers the advisor reuses. Injected at
@@ -52,6 +56,12 @@ class AdvisorHelpers:
     total_capacity_wh: Callable[[str | None, int | None], int]
     capacity_hints: Callable[[str | None], tuple[int | None, int | None]]
     system_soc_pct: Callable[[float, str | None, int | None], float]
+    is_read_only: Callable[[str | None], bool] = _default_read_only
+
+
+def _require_advisor_support(helpers: AdvisorHelpers, device_sn: str | None) -> None:
+    if helpers.is_read_only(device_sn):
+        raise HTTPException(501, "This device supports monitoring only; the portable algorithm advisor is unavailable")
 
 
 # ---------- bundle builders ----------
@@ -61,6 +71,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
     """Gather the data Claude needs to review yesterday's algorithm
     performance for one device. Plain JSON-serialisable dict — see
     claude_advisor._format_starter_bundle for the rendering."""
+    _require_advisor_support(helpers, device_sn)
     from datetime import datetime, timezone
     def _iso(ts: int | float | None) -> str:
         if ts is None:
@@ -963,6 +974,7 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
     DB. Each tool returns a JSON-serialisable dict; on bad inputs we
     return an `error` field rather than raising — Claude can then
     re-issue the call with corrected args."""
+    _require_advisor_support(helpers, device_sn)
     from datetime import datetime, timezone
 
     main_wh, pack_wh = helpers.capacity_hints(device_sn)
@@ -973,6 +985,8 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
         return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
 
     async def query(name: str, args: dict) -> dict:
+        if helpers.is_read_only(device_sn):
+            return {"error": "Device supports monitoring only; portable advisor tools are unavailable"}
         if name == "query_samples":
             start = _parse_iso(args.get("start_iso"))
             end = _parse_iso(args.get("end_iso"))
@@ -1136,12 +1150,15 @@ async def _run_advisor_review(state, helpers: AdvisorHelpers,
     """Build the starter bundle, run Claude through the agentic
     multi-turn loop with DB-query tools, persist whatever suggestions
     and anomalies come back."""
+    _require_advisor_support(helpers, device_sn)
     import claude_advisor
     if not claude_advisor.has_usable_key():
         return {"ok": False, "reason": "no_api_key"}
     bundle = await _build_advisor_bundle(state, helpers, device_sn)
+    _require_advisor_support(helpers, device_sn)
     query_fn = _make_advisor_query_fn(state, helpers, device_sn)
     result = await claude_advisor.review(bundle, query_fn=query_fn)
+    _require_advisor_support(helpers, device_sn)
     if result.get("skipped_reason") and result["skipped_reason"] not in ("no_tool_call", "turn_cap_reached"):
         return {"ok": False, "reason": result["skipped_reason"]}
 
@@ -1255,7 +1272,7 @@ async def advisor_loop(state, helpers: AdvisorHelpers) -> None:
             if local_hour == user_settings.get("advisor_trigger_hour"):
                 for d in state.energy.list_devices():
                     sn = d.get("device_sn")
-                    if not sn:
+                    if not sn or helpers.is_read_only(sn):
                         continue
                     last = state.last_advisor_run_by_sn.get(sn, 0.0)
                     if now - last < 23 * 3600:
@@ -1264,7 +1281,8 @@ async def advisor_loop(state, helpers: AdvisorHelpers) -> None:
                         await _run_advisor_review(state, helpers, sn)
                     except Exception as e:
                         log.warning("advisor loop: %s failed: %s", sn, e)
-                    state.last_advisor_run_by_sn[sn] = now
+                    if not helpers.is_read_only(sn):
+                        state.last_advisor_run_by_sn[sn] = now
             bo.reset()
         except Exception as e:
             bo.record_failure()
@@ -1307,6 +1325,7 @@ def install(app: FastAPI, state, helpers: AdvisorHelpers) -> None:
             device_sn = state.device.device_sn if state.device else None
         if not device_sn:
             raise HTTPException(400, "no active device")
+        _require_advisor_support(helpers, device_sn)
         existing = state.advisor_jobs.get(device_sn)
         if existing and existing.get("status") == "running":
             return {"status": "running", "device_sn": device_sn,
@@ -1341,6 +1360,7 @@ def install(app: FastAPI, state, helpers: AdvisorHelpers) -> None:
         s = state.energy.get_suggestion(suggestion_id)
         if not s:
             raise HTTPException(404, "suggestion not found")
+        _require_advisor_support(helpers, s.get("device_sn"))
         if s["status"] != "pending":
             raise HTTPException(400, f"suggestion is {s['status']}, not pending")
         if s["kind"] != "config":
@@ -1404,6 +1424,7 @@ def install(app: FastAPI, state, helpers: AdvisorHelpers) -> None:
             device_sn = state.device.device_sn if state.device else None
         if not device_sn:
             raise HTTPException(400, "no active device")
+        _require_advisor_support(helpers, device_sn)
         bundle = await _build_advisor_bundle(state, helpers, device_sn)
         # Resolve model + provider at call time — same precedence the actual
         # review uses. _get_model() is provider-aware (follows the active

@@ -34,6 +34,8 @@ class DeviceInfo:
     model_code: int | None
     device_sn: str | None
     device_type: str
+    api_family: str = "portable"
+    read_only: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +45,8 @@ class DeviceInfo:
             "model_code": self.model_code,
             "device_sn": self.device_sn,
             "device_type": self.device_type,
+            "api_family": self.api_family,
+            "read_only": self.read_only,
         }
 
 
@@ -204,6 +208,7 @@ class BridgeDeviceClient(DeviceClient):
             r = await self._rpc("status")
         except DeviceClientError as e:
             return False, None, str(e)
+        self._last_status = r
         d = r.get("device") or {}
         if not d:
             ble_state = (r.get("ble") or {}).get("state", "?")
@@ -224,6 +229,8 @@ class BridgeDeviceClient(DeviceClient):
             model_code=d.get("model_code"),
             device_sn=d.get("device_sn"),
             device_type=d.get("device_type", "portable"),
+            api_family=d.get("api_family", "portable"),
+            read_only=bool(d.get("read_only", False)),
         )
         self._device = info
         self._connected = True
@@ -247,6 +254,8 @@ class BridgeDeviceClient(DeviceClient):
                 model_code=d.get("model_code"),
                 device_sn=d.get("device_sn"),
                 device_type=d.get("device_type", "portable"),
+                api_family=d.get("api_family", "portable"),
+                read_only=bool(d.get("read_only", False)),
             )
         t = r.get("telemetry")
         if t is not None:
@@ -285,13 +294,16 @@ class BridgeDeviceClient(DeviceClient):
         """Whether the bridge has cloud credentials, and current cloud state."""
         return await self._rpc("auth_status")
 
-    async def set_credentials(self, email: str, password: str, region: str = "US") -> dict:
+    async def set_credentials(self, email: str, password: str, region: str = "US",
+                              api_family: str = "portable") -> dict:
         """Validate + persist Jackery cloud creds in the host keychain, restart cloud poller."""
-        r = await self._rpc("set_credentials", email=email, password=password, region=region)
+        r = await self._rpc("set_credentials", email=email, password=password,
+                            region=region, api_family=api_family)
         if not r.get("ok"):
             raise DeviceClientError(r.get("error", "set_credentials failed"))
         # Reset our cached DeviceInfo so the next poll picks up the new device
         self._device = None
+        self._last_status = None
         return r
 
     async def clear_credentials(self) -> dict:
@@ -300,6 +312,7 @@ class BridgeDeviceClient(DeviceClient):
         if not r.get("ok"):
             raise DeviceClientError(r.get("error", "clear_credentials failed"))
         self._device = None
+        self._last_status = None
         return r
 
     async def pause_polling(self, seconds: int = 600) -> dict:

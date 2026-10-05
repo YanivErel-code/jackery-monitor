@@ -23,6 +23,12 @@ each other.
 
 It connects through the **Jackery cloud account** (the same one the official app uses). On first launch the dashboard prompts you to sign in; credentials are encrypted on disk (AES-256-GCM on Linux/Synology, macOS Keychain on Mac) and never leave your host.
 
+**Jackery Home / HomePower 2000 Ultra (EU):** choose **Jackery Home** in
+sign-in for system discovery and read-only monitoring. System SOC/capacity and
+named Home power fields are supported; portable controls, energy calculations
+and charging automation are unavailable. This path has fixture coverage and
+still needs reporter hardware validation. See [Home monitoring](docs/jackery-home.md).
+
 ![Dashboard — Live tab with state of charge, today's energy with savings breakdown, animated Tesla-style power flow diagram, output toggles, collapsible battery packs, and 6-hour history chart](docs/screenshots/dashboard-live.png)
 
 *Live tab: state of charge with sunset SOC prediction, today's kWh + solar/grid dollar breakdown, animated power flow diagram (Solar → Battery → Loads with traveling-dot animation, speed proportional to wattage), output toggles + AC-charge plug control, collapsible per-pack SOC card, and the 6-hour battery + power chart.*

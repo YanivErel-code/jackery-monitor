@@ -33,6 +33,14 @@
       <p class="login-sub">Sign in with your Jackery account to pull device data from the cloud. Credentials are encrypted (AES-256-GCM) and stored locally in this container's data volume — never sent anywhere except Jackery.</p>
 
       <label class="field">
+        <span class="field-label">App</span>
+        <select id="login-api-family" name="api_family" aria-describedby="login-api-family-hint">
+          <option value="portable" selected>Jackery App</option>
+          <option value="home">Jackery Home — EU monitoring only</option>
+        </select>
+      </label>
+      <p id="login-api-family-hint" class="hint" hidden>For HomePower 2000 Ultra accounts in Jackery Home. Only the EU cloud is supported; device controls and forecasts are unavailable.</p>
+      <label class="field">
         <span class="field-label">Email</span>
         <input id="login-email" type="email" name="email" autocomplete="username" required placeholder="you@example.com" />
       </label>
@@ -94,19 +102,43 @@
     <!-- Tab nav -->
     <nav class="tabs">
       <button class="tab on" data-tab="live">Live</button>
-      <button class="tab" data-tab="energy">Energy</button>
-      <button class="tab" data-tab="forecast">Forecast</button>
+      <button class="tab" data-tab="energy" data-portable>Energy</button>
+      <button class="tab" data-tab="forecast" data-portable>Forecast</button>
       <button class="tab" data-tab="device">Device</button>
-      <button class="tab" data-tab="automation">Automation<span id="tab-automation-dot" class="tab-dot" hidden title="New AI insights pending"></span></button>
+      <button class="tab" data-tab="automation" data-portable>Automation<span id="tab-automation-dot" class="tab-dot" hidden title="New AI insights pending"></span></button>
       <button class="tab" data-tab="logs">Logs</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
 
     <!-- ============== LIVE TAB ============== -->
     <section id="tab-live" class="tab-panel">
+      <section id="home-monitor-card" class="card" hidden>
+        <div class="card-header">
+          <h2>Jackery Home</h2>
+          <span class="pill pill-source">Monitoring only · EU</span>
+        </div>
+        <p class="hint">System readings from Jackery Home. Unknown readings appear as —.</p>
+        <div class="grid home-monitor-grid">
+          <div><div class="card-eyebrow">System state of charge</div><div class="kpi-value"><span id="home-soc">—</span><small>%</small></div></div>
+          <div><div class="card-eyebrow">Installed capacity</div><div class="kpi-value"><span id="home-capacity">—</span><small>kWh</small></div></div>
+          <div><div class="card-eyebrow">Energy remaining</div><div class="kpi-value"><span id="home-energy-remaining">—</span><small>kWh</small></div></div>
+        </div>
+        <dl class="home-monitor-values">
+          <dt>Solar power</dt><dd><span id="home-solar">—</span> W</dd>
+          <dt>Grid power</dt><dd><span id="home-grid">—</span> W</dd>
+          <dt>AC socket power</dt><dd><span id="home-ac-socket">—</span> W</dd>
+          <dt>Home supply power</dt><dd><span id="home-household">—</span> W</dd>
+          <dt>AC main power</dt><dd><span id="home-ac-main">—</span> W</dd>
+          <dt>Battery modules reported</dt><dd id="home-battery-count">—</dd>
+          <dt>Last cloud response</dt><dd id="home-received">—</dd>
+        </dl>
+        <p class="hint">Grid: + import, − export. AC socket: + consumption, − external input. These flows describe different connections; they are not battery charge or discharge power.</p>
+        <div id="home-expansion-list" class="hint"></div>
+        <p class="hint">Individual battery readings, controls, energy totals, automation, and forecasts are unavailable in this monitoring mode.</p>
+      </section>
       <!-- Hero: battery + key KPIs. Cards are drag-reorderable on
            desktop; the order persists per-browser via localStorage. -->
-      <div id="hero-grid" class="grid hero-grid">
+      <div id="hero-grid" class="grid hero-grid" data-portable>
         <section id="battery-card" class="card battery-card has-accent" data-card="battery">
           <span class="grab-handle" aria-label="Drag to reorder" title="Drag to reorder"></span>
           <div class="card-eyebrow">
@@ -278,7 +310,7 @@
            is configured for this device's smart-charge). Section is
            "Power" because the AC-charge button is an *input* (grid
            → battery), not an output, so "Outputs" was misleading. -->
-      <section class="card">
+      <section class="card" data-portable>
         <div class="card-header">
           <h2>Power</h2>
           <span class="hint">Click to toggle</span>
@@ -306,7 +338,7 @@
            the Power card so the most-actionable controls (output
            toggles, AC-charge plug) sit closer to the live KPIs at
            the top of the tab; per-pack drill-down is rare. -->
-      <section id="battery-packs-card" class="card collapsible collapsed" hidden>
+      <section id="battery-packs-card" class="card collapsible collapsed" data-portable hidden>
         <div class="card-header collapsible-header" id="battery-packs-toggle"
              role="button" tabindex="0" aria-expanded="false"
              aria-controls="battery-packs-list">
@@ -318,7 +350,7 @@
       </section>
 
       <!-- Live chart -->
-      <section class="card">
+      <section class="card" data-portable>
         <div class="card-header">
           <h2>Power last 6 hours</h2>
           <div class="legend" data-chart="live">
@@ -332,7 +364,7 @@
     </section>
 
     <!-- ============== ENERGY TAB ============== -->
-    <section id="tab-energy" class="tab-panel" hidden>
+    <section id="tab-energy" class="tab-panel" data-portable hidden>
       <div class="grid energy-grid">
         <section class="card">
           <div class="card-eyebrow"><span>Today</span></div>
@@ -457,7 +489,7 @@
     </section>
 
     <!-- ============== FORECAST TAB ============== -->
-    <section id="tab-forecast" class="tab-panel" hidden>
+    <section id="tab-forecast" class="tab-panel" data-portable hidden>
       <section id="forecast-needs-config" class="card" hidden>
         <h2>Allow location to enable forecasts</h2>
         <p class="hint">The forecaster pulls solar irradiance + cloud cover from Open-Meteo (free, no API key) and combines it with your historical solar production to predict the next ~5 days of battery state of charge. It needs your approximate location to know which weather to fetch.</p>
@@ -690,7 +722,7 @@
            auto-probe the cloud for capacity hints; if any are found
            they show up below as one-click "use this value" buttons.
            Falls back to a manual override + PR-snippet path. -->
-      <section id="unknown-model-banner" class="card device-card unknown-model-banner" hidden>
+      <section id="unknown-model-banner" class="card device-card unknown-model-banner" data-portable hidden>
         <h2 style="margin:0 0 8px">🔍 New Jackery model detected</h2>
         <p class="hint" style="margin:0 0 10px">
           We don't recognize <strong id="umb-name">this device</strong> (model_code <code id="umb-code">?</code>) yet, so the forecaster is using a <strong id="umb-fallback">3024 Wh</strong> fallback capacity.
@@ -722,7 +754,7 @@
         </dl>
       </section>
 
-      <section class="card device-card">
+      <section class="card device-card" data-portable>
         <div class="card-header">
           <h2>AC auto recovery</h2>
           <span id="inverter-watchdog-config-status" class="hint" hidden></span>
@@ -736,7 +768,7 @@
         </label>
       </section>
 
-      <section class="card device-card">
+      <section class="card device-card" data-portable>
         <div class="card-header">
           <h2>Battery capacity</h2>
           <span id="capacity-status" class="hint" hidden></span>
@@ -754,7 +786,7 @@
         </form>
       </section>
 
-      <section class="card device-card">
+      <section class="card device-card" data-portable>
         <div class="card-header">
           <h2>Learned parameters</h2>
           <span id="device-params-status" class="hint" hidden></span>
@@ -778,7 +810,7 @@
         <pre id="raw-props-dump" class="raw-props" hidden>—</pre>
       </section>
 
-      <section class="card device-card">
+      <section class="card device-card" data-portable>
         <div class="card-header">
           <h2>Cloud endpoint probe (debug)</h2>
           <button id="cloud-probe-btn" class="btn btn-ghost" type="button">Probe now</button>
@@ -822,7 +854,7 @@
     </section>
 
     <!-- ============== AUTOMATION TAB ============== -->
-    <section id="tab-automation" class="tab-panel" hidden data-active-group="controllers">
+    <section id="tab-automation" class="tab-panel" data-portable hidden data-active-group="controllers">
 
       <!-- Automation sub-tabs: group related cards so the tab isn't a
            giant 9-card scroll. Each card carries a data-automation-group

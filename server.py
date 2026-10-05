@@ -171,6 +171,7 @@ class AppState:
         self.ws_clients: dict[WebSocket, dict[str, str | None]] = {}
         self.last_source: str | None = None
         self.last_cloud_meta: dict | None = None
+        self.account_generation = 0
         # Per-expansion-battery cache. Refreshed every BATTERY_PACK_REFRESH_S
         # by the poll loop so the UI gets near-realtime per-pack SOC without
         # hammering the cloud. Populated only when the active device has
@@ -275,6 +276,7 @@ async def connect_device() -> bool:
         await broadcast_status("status")
         return False
 
+    _sync_cloud_metadata()
     state.device = info
     state.connection_status = "connected"
     state.connection_error = None
@@ -321,6 +323,7 @@ async def poll_loop() -> None:
                     continue
 
             status_dict = await state.client.poll()
+            _sync_cloud_metadata()  # Capabilities remain meaningful with no telemetry.
 
             # Always pull the latest DeviceInfo from the client even if telemetry
             # is briefly None (e.g. just after select_device clears the cache).
@@ -459,6 +462,10 @@ async def poll_loop() -> None:
                     )
                 for sn, t, name, model_code, frame_ts in samples_to_write:
                     state.energy.upsert_device(sn, name, model_code, None)
+                    # Home REST powers describe grid/load boundaries, not battery
+                    # input/output. Never integrate unknowns as portable zero W.
+                    if _is_home_device(sn):
+                        continue
                     # Default AC recovery to the Explorer 5000 Plus only;
                     # the Device tab can override this per device.
                     try:
@@ -492,7 +499,7 @@ async def poll_loop() -> None:
                 # Hydrate the live chart from the energy DB on the first
                 # successful poll after startup, so the chart shows the
                 # last LIVE_CHART_HOURS even immediately after a restart.
-                if dev_sn and not state.history_hydrated:
+                if dev_sn and not _is_home_device(dev_sn) and not state.history_hydrated:
                     try:
                         past = state.energy.history(
                             dev_sn,
@@ -522,7 +529,7 @@ async def poll_loop() -> None:
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
                 # is independent and faster).
-                if ts - state.last_history_ts >= LIVE_CHART_INTERVAL_S:
+                if not _is_home_device(dev_sn) and ts - state.last_history_ts >= LIVE_CHART_INTERVAL_S:
                     state.history.append({
                         "ts": ts,
                         "battery_percent": status_dict["battery_percent"],
@@ -543,15 +550,15 @@ async def poll_loop() -> None:
                 # unchanged on single-unit devices.
                 active_sn = state.device.device_sn if state.device else None
                 active_model_code = getattr(state.device, "model_code", None) if state.device else None
-                bp_system = _system_soc_pct(float(bp), active_sn, active_model_code)
-                if bp_system <= threshold and not state.low_battery_alerted:
+                bp_system = _system_soc_pct(float(bp), active_sn, active_model_code) if bp is not None else None
+                if bp_system is not None and bp_system <= threshold and not state.low_battery_alerted:
                     state.low_battery_alerted = True
                     await broadcast({
                         "type": "alert",
                         "data": {"level": "warning",
                                  "message": f"Battery low: {bp_system:.0f}%"},
                     })
-                elif bp_system > threshold + 5:
+                elif bp_system is not None and bp_system > threshold + 5:
                     state.low_battery_alerted = False
 
                 # Run automation rules. The bridge polls every Jackery device
@@ -580,7 +587,7 @@ async def poll_loop() -> None:
                 for sn, entry in devs_telemetry.items():
                     t = (entry or {}).get("telemetry") or {}
                     bp_dev = t.get("battery_percent")
-                    if bp_dev is not None:
+                    if bp_dev is not None and not _is_home_device(sn):
                         soc_by_sn[sn] = _system_soc_pct(
                             float(bp_dev), sn, model_code_by_sn.get(str(sn)),
                         )
@@ -588,7 +595,7 @@ async def poll_loop() -> None:
                 # without an explicit jackery_device_sn). active_sn /
                 # active_model_code already computed in the low-battery
                 # alert block above; reuse.
-                if active_sn and bp is not None and active_sn not in soc_by_sn:
+                if active_sn and bp is not None and active_sn not in soc_by_sn and not _is_home_device(active_sn):
                     soc_by_sn[active_sn] = _system_soc_pct(
                         float(bp), active_sn, active_model_code,
                     )
@@ -625,6 +632,8 @@ async def poll_loop() -> None:
                 # death, which is exactly the silence signal we need.
                 rescue_now = time.time()
                 for r_sn, r_entry in devs_telemetry.items():
+                    if _is_home_device(r_sn):
+                        continue
                     r_t = (r_entry or {}).get("telemetry") or {}
                     r_st = state.rescue_by_sn.setdefault(
                         r_sn, rescue.RescueState())
@@ -716,13 +725,60 @@ async def broadcast_status(message_type: str = "status") -> None:
         state.ws_clients.pop(ws, None)
 
 
+def _sync_cloud_metadata() -> None:
+    snapshot = getattr(state.client, "last_status", None) or {}
+    cloud = snapshot.get("cloud")
+    if isinstance(cloud, dict):
+        state.last_cloud_meta = cloud
+
+
+def _portable_control_ready(device_sn: str | None) -> bool:
+    """Background physical actions require a known portable capability."""
+    _sync_cloud_metadata()
+    if _is_home_device(device_sn):
+        return False
+    if state.backend == "mock":
+        return True
+    if state.device and state.device.device_sn == device_sn:
+        return getattr(state.device, "api_family", "portable") == "portable"
+    return any(str(d.get("device_sn")) == str(device_sn) and d.get("api_family", "portable") == "portable"
+               for d in (state.last_cloud_meta or {}).get("devices") or [])
+
+
+def _is_home_device(device_sn: str | None = None) -> bool:
+    """Explicit API capability metadata, independent of portable model codes."""
+    if device_sn is None:
+        device_sn = state.device.device_sn if state.device else None
+    cloud = state.last_cloud_meta or {}
+    for d in cloud.get("devices") or []:
+        if str(d.get("device_sn")) == str(device_sn):
+            return d.get("api_family") == "home" or bool(d.get("read_only"))
+    if state.device and state.device.device_sn == device_sn:
+        if state.device.device_type == "home" or getattr(state.device, "read_only", False):
+            return True
+    # Covers the startup interval before system discovery has completed.
+    return cloud.get("api_family") == "home"
+
+
+def _home_telemetry(device_sn: str | None) -> dict:
+    if state.device and state.device.device_sn == device_sn:
+        return state.last_status or {}
+    entry = ((state.last_cloud_meta or {}).get("devices_telemetry") or {}).get(device_sn) or {}
+    return entry.get("telemetry") or {}
+
+
+def _require_portable_device(device_sn: str | None = None) -> None:
+    if _is_home_device(device_sn):
+        raise HTTPException(501, "Jackery Home supports monitoring only; portable controls and forecasts are unavailable")
+
+
 def _capacity_hints(device_sn: str | None) -> tuple[int | None, int | None]:
     """Look up (main_wh, pack_wh) from the device's model_code so
     `prediction_accuracy()` and `smart_charge_analytics()` can capacity-
     weight the actual SOC to match the (system-weighted) predicted.
     Returns (None, None) for unknown devices — callers fall back to
     main-only behavior."""
-    if not device_sn:
+    if not device_sn or _is_home_device(device_sn):
         return (None, None)
     dev_meta = next(
         (d for d in state.energy.list_devices()
@@ -743,6 +799,8 @@ def _system_soc_pct(main_pct: float, device_sn: str | None,
     return main_pct unchanged so single-unit setups (e.g. HomePower 3000)
     behave exactly as before.
     """
+    if _is_home_device(device_sn):
+        return main_pct
     packs = state.battery_packs_by_sn.get(device_sn or "", []) if device_sn else []
     if not packs:
         return main_pct
@@ -760,7 +818,7 @@ def _system_soc_pct(main_pct: float, device_sn: str | None,
 
 
 def _total_capacity_wh(device_sn: str | None,
-                       model_code: int | None = None) -> int:
+                       model_code: int | None = None) -> int | None:
     """Total system capacity for a device, including expansion packs.
 
     Resolution order:
@@ -771,6 +829,9 @@ def _total_capacity_wh(device_sn: str | None,
          override explicitly.
       3. Spec capacity for the model (no expansion packs assumed).
     """
+    if _is_home_device(device_sn):
+        value = _home_telemetry(device_sn).get("capacity_wh")
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) and value > 0 else None
     if device_sn:
         override = state.energy.get_capacity_override(device_sn)
         if override:
@@ -973,6 +1034,14 @@ async def _refresh_packs_unlocked(device_sn: str, ts: float, *,
     err = (result or {}).get("error")
     packs = (result or {}).get("packs") or []
     source_ts = (result or {}).get("fetched_at")
+    if _is_home_device(device_sn):
+        state.battery_pack_meta_by_sn[device_sn] = {
+            "fetched_at": source_ts, "source": (result or {}).get("source"),
+            "stale": bool((result or {}).get("stale")), "error": err, "observed_at": ts}
+        if not err and not (result or {}).get("stale"):
+            state.battery_packs_by_sn[device_sn] = packs
+            state.last_packs_ts_by_sn[device_sn] = ts
+        return
     previous_meta = state.battery_pack_meta_by_sn.get(device_sn, {})
     if not packs and not state.battery_packs_by_sn.get(device_sn):
         # Re-seeding from history must restore its provenance too.
@@ -1118,7 +1187,9 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
             "rssi": 0,
             "model_code": view_meta.get("model_code"),
             "device_sn": view_sn,
-            "device_type": device_type_for(view_meta.get("model_code")),
+            "device_type": view_meta.get("device_type") or device_type_for(view_meta.get("model_code")),
+            "api_family": view_meta.get("api_family", "portable"),
+            "read_only": bool(view_meta.get("read_only", False)),
         }
         devs_t = (cloud_src.get("devices_telemetry") or {})
         entry = devs_t.get(view_sn) or {}
@@ -1127,11 +1198,17 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
         history = _view_history(view_sn)
         model_code = view_meta.get("model_code")
 
+    is_home = _is_home_device(view_sn)
+    if device_info and is_home:
+        device_info = {**device_info, "api_family": "home", "read_only": True, "device_type": "home"}
     # Augment telemetry with the precomputed system SOC so the SOC card
     # renders the right number on the very first paint (no main→system
     # flash). Falls back to the raw telemetry untouched when the device
     # has no expansion packs (e.g. HomePower 3000).
-    if telemetry and view_packs:
+    if telemetry and is_home:
+        telemetry = {**telemetry, "soc_scope": "system", "capacity_wh": _total_capacity_wh(view_sn)}
+        history = []
+    elif telemetry and view_packs:
         main_pct = telemetry.get("battery_percent")
         if main_pct is not None:
             sys_pct = _system_soc_pct(float(main_pct), view_sn, model_code)
@@ -1150,7 +1227,7 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
 
     energy = None
     try:
-        if view_sn:
+        if view_sn and not is_home:
             energy = _decorate_totals_with_savings(
                 state.energy.totals(view_sn), view_sn,
             )
@@ -1429,6 +1506,8 @@ def _flag_unknown_models(cloud_meta: dict | None) -> None:
     for d in cloud_meta.get("devices") or []:
         if not isinstance(d, dict):
             continue
+        if d.get("api_family") == "home" or d.get("read_only"):
+            continue
         mc = d.get("model_code")
         if mc is None:
             continue
@@ -1546,6 +1625,11 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
     """
     if not device_sn or not key:
         return {"value": None, "source": "unknown"}
+
+    if _is_home_device(device_sn):
+        value = _total_capacity_wh(device_sn) if key == "battery_capacity_wh" else None
+        return {"value": value, "source": "home-cloud" if value is not None else "unavailable",
+                "note": "Home system total; portable model fitting unavailable"}
 
     # Step 1: anything stored in DB wins (user overrides + cached fits).
     stored = state.energy.get_device_param(device_sn, key)
@@ -1774,8 +1858,9 @@ async def _smart_charge_evaluate(record: bool = True,
     record=False skips history + side effects."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
-    if not device_sn:
+    if not device_sn or not _portable_control_ready(device_sn):
         return None
+    generation = state.account_generation
     cfg = smart_charge.get_config(device_sn)
     if cfg["mode"] == "off":
         return None
@@ -1812,6 +1897,8 @@ async def _smart_charge_evaluate(record: bool = True,
         )
     lat, lon = loc["latitude"], loc["longitude"]
     weather = await weather_client.fetch_irradiance(lat, lon)
+    if generation != state.account_generation or not _portable_control_ready(device_sn):
+        return None
     if weather.get("error"):
         return None
     # If packs are attached, the forecaster needs the system-wide SOC to
@@ -1890,6 +1977,8 @@ async def _smart_charge_evaluate(record: bool = True,
         except Exception as e:
             log.debug("daily summary update failed: %s", e)
 
+    if generation != state.account_generation or not _portable_control_ready(device_sn):
+        return None
     executed = False
     if record and cfg["mode"] == "active" and plan.action in ("on", "off"):
         host = cfg.get("kasa_device_host")
@@ -1900,6 +1989,8 @@ async def _smart_charge_evaluate(record: bool = True,
             except Exception as e:
                 log.warning("smart_charge Kasa toggle failed: %s", e)
 
+    if generation != state.account_generation or not _portable_control_ready(device_sn):
+        return None
     if record:
         narration = ""
         # Belt-and-suspenders: even if the toggle is on, skip narration
@@ -1972,6 +2063,8 @@ _INVERTER_WATCHDOG_ENABLED_KEY = "inverter_watchdog_enabled"
 
 
 def _inverter_watchdog_enabled(device_sn: str, model_code: int | None) -> bool:
+    if _is_home_device(device_sn):
+        return False
     override = state.energy.get_device_param(
         device_sn, _INVERTER_WATCHDOG_ENABLED_KEY)
     if override is not None and override.get("value") is not None:
@@ -2346,8 +2439,9 @@ async def _solar_charge_evaluate(record: bool = True,
     instead of import grid power."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
-    if not device_sn:
+    if not device_sn or not _portable_control_ready(device_sn):
         return None
+    generation = state.account_generation
     cfg = solar_charge.get_config(device_sn)
     if cfg["mode"] == "off":
         return None
@@ -2412,6 +2506,8 @@ async def _solar_charge_evaluate(record: bool = True,
         try:
             weather = await weather_client.fetch_irradiance(
                 loc["latitude"], loc["longitude"])
+            if generation != state.account_generation or not _portable_control_ready(device_sn):
+                return None
             if not weather.get("error"):
                 starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
                 main_wh, pack_wh = _capacity_hints(device_sn)
@@ -2563,6 +2659,8 @@ async def _solar_charge_evaluate(record: bool = True,
         if host:
             try:
                 info = await kasa_client.status(host)
+                if generation != state.account_generation or not _portable_control_ready(device_sn):
+                    return None
                 pw = info.get("power_w")
                 solar_charge._update_runtime(
                     device_sn,
@@ -2715,6 +2813,8 @@ async def _solar_charge_evaluate(record: bool = True,
                 learned_load_w=max(0.0, delta),
             )
 
+    if generation != state.account_generation or not _portable_control_ready(device_sn):
+        return None
     executed = False
     if record and cfg["mode"] == "active" and plan.action in ("on", "off"):
         host = cfg.get("kasa_device_host")
@@ -2771,6 +2871,8 @@ async def _solar_charge_evaluate(record: bool = True,
             except Exception as e:
                 log.warning("solar_charge Kasa toggle failed: %s", e)
 
+    if generation != state.account_generation or not _portable_control_ready(device_sn):
+        return None
     if record:
         try:
             state.energy.record_solar_charge_decision(
@@ -2820,6 +2922,8 @@ async def _solar_charge_hydrate_runtime():
     except Exception as e:
         log.debug("solar_charge hydrate: clear_overload_state failed: %s", e)
     for sn, cfg in configs.items():
+        if not _portable_control_ready(sn):
+            continue
         host = cfg.get("kasa_device_host")
         if not host or cfg.get("mode") == "off":
             continue
@@ -2852,6 +2956,13 @@ async def solar_charge_loop():
     battery."""
     # Sync our runtime cache to the actual Kasa state before the first
     # eval. See _solar_charge_hydrate_runtime for why.
+    # Wait for discovery so startup cannot reset a Home account's Kasa plugs
+    # before the first monitor response. This loop does not block other tasks.
+    while state.backend != "mock":
+        _sync_cloud_metadata()
+        if (state.last_cloud_meta or {}).get("devices"):
+            break
+        await asyncio.sleep(1)
     await _solar_charge_hydrate_runtime()
     bo = _backoff.LoopBackoff(max_s=10 * 60)
     while True:
@@ -3092,6 +3203,7 @@ _advisor_helpers = advisor_routes.AdvisorHelpers(
     total_capacity_wh=_total_capacity_wh,
     capacity_hints=_capacity_hints,
     system_soc_pct=_system_soc_pct,
+    is_read_only=lambda sn: not _portable_control_ready(sn),
 )
 advisor_routes.install(app, state, _advisor_helpers)
 
@@ -3384,6 +3496,9 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     Returns the full response dict the API surfaces, including
     {error, configured} sentinels so the API can pass it through and
     the background loop can log a single line."""
+    if _is_home_device(device_sn):
+        return {"supported": False, "ready": False, "configured": False,
+                "error": "Jackery Home REST monitoring does not support portable energy forecasts"}
     loc = device_location.get()
     if not loc:
         return {"error": "location not set", "configured": False}
@@ -3488,6 +3603,7 @@ async def api_forecast(device_sn: str | None = None, _diag: int = 0):
     device is stuck in `calibrating` and you want to know which usage
     pattern is the blocker (e.g. AC always plugged in vs solar always
     connected vs loads too light)."""
+    _require_portable_device(device_sn)
     result = await _build_and_record_forecast(device_sn)
     if _diag and device_sn:
         try:
@@ -3972,6 +4088,8 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
     if not device_sn:
         raise HTTPException(status_code=400,
                             detail="no active device — pass device_sn explicitly")
+    if isinstance(body, dict) and body.get("mode") not in (None, "off"):
+        _require_portable_device(device_sn)
     saved = smart_charge.set_config(body if isinstance(body, dict) else {},
                                     device_sn=device_sn)
     return {
@@ -4004,6 +4122,8 @@ async def api_solar_charge_set(req: Request, device_sn: str | None = None):
     if not device_sn:
         raise HTTPException(status_code=400,
                             detail="no active device — pass device_sn explicitly")
+    if isinstance(body, dict) and body.get("mode") not in (None, "off"):
+        _require_portable_device(device_sn)
     saved = solar_charge.set_config(body if isinstance(body, dict) else {},
                                     device_sn=device_sn)
     return {"device_sn": device_sn, "config": saved}
@@ -4381,6 +4501,14 @@ def api_devices_capacity():
     user override). Used by the Device tab to render the capacity editor."""
     out = []
     for d in state.energy.list_devices():
+        if _is_home_device(d["device_sn"]):
+            out.append({"device_sn": d["device_sn"], "name": d.get("name"), "model_code": None,
+                        "default_capacity_wh": None, "capacity_wh_override": None,
+                        "auto_capacity_wh": _total_capacity_wh(d["device_sn"]),
+                        "pack_count": len(state.battery_packs_by_sn.get(d["device_sn"], [])),
+                        "effective_capacity_wh": _total_capacity_wh(d["device_sn"]),
+                        "read_only": True, "api_family": "home"})
+            continue
         default_wh = forecaster.battery_capacity_wh(d.get("model_code"))
         override = d.get("capacity_wh_override")
         # Auto-derived from this device's own pack cache.
@@ -4416,6 +4544,7 @@ async def api_devices_capacity_set(req: Request):
     device_sn = (body or {}).get("device_sn")
     if not device_sn:
         raise HTTPException(status_code=400, detail="device_sn required")
+    _require_portable_device(device_sn)
     raw = (body or {}).get("capacity_wh")
     capacity_wh = None if raw in (None, "", 0) else raw
     if not state.energy.set_capacity_override(device_sn, capacity_wh):
@@ -4593,15 +4722,25 @@ async def api_set_credentials(body: dict):
     email = (body or {}).get("email", "").strip()
     password = (body or {}).get("password", "")
     region = ((body or {}).get("region") or "US").strip().upper() or "US"
+    api_family = ((body or {}).get("api_family") or "portable").strip().lower()
+    if api_family not in {"portable", "home"}:
+        raise HTTPException(400, "api_family must be portable or home")
+    if api_family == "home" and region != "EU":
+        raise HTTPException(400, "Jackery Home currently supports the EU region only")
     if not email or not password:
         raise HTTPException(400, "email and password are required")
     setter = getattr(state.client, "set_credentials", None)
     if not setter:
         raise HTTPException(501, "This backend does not support setting credentials")
     try:
-        result = await setter(email, password, region)
+        result = await setter(email, password, region, api_family=api_family) if api_family == "home" else await setter(email, password, region)
     except DeviceClientError as e:
         raise HTTPException(400, str(e)) from e
+    state.device = None
+    state.last_status = None
+    state.account_generation += 1
+    state.last_cloud_meta = {"api_family": api_family, "read_only": api_family == "home"}
+    state.reset_live_history()
     # Kick a fresh connect so connection state updates fast
     asyncio.create_task(connect_device())
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
@@ -4622,6 +4761,9 @@ async def api_clear_credentials():
     # Clear cached telemetry so the UI immediately reflects logged-out state
     state.device = None
     state.last_status = None
+    state.account_generation += 1
+    state.last_cloud_meta = None
+    state.reset_live_history()
     state.last_update_ts = None
     await broadcast_status("status")
     return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
@@ -5206,6 +5348,7 @@ async def api_set_output(body: dict):
     device_sn = (body or {}).get("device_sn") or None
     if port not in ("ac", "dc", "usb", "car"):
         raise HTTPException(400, "port must be one of: ac, dc, usb, car")
+    _require_portable_device(device_sn)
     setter = getattr(state.client, "set_output", None)
     if not setter:
         raise HTTPException(501, "Backend does not support output toggles")
@@ -5260,6 +5403,8 @@ def api_set_inverter_watchdog_config(body: dict):
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(400, "enabled must be true or false")
+    if enabled:
+        _require_portable_device(device_sn)
     state.energy.set_device_param(
         device_sn, _INVERTER_WATCHDOG_ENABLED_KEY,
         int(enabled), source="user")

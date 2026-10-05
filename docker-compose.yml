@@ -35,6 +35,7 @@ services:
       JACKERY_EMAIL: "${JACKERY_EMAIL:-}"
       JACKERY_PASSWORD: "${JACKERY_PASSWORD:-}"
       JACKERY_REGION: "${JACKERY_REGION:-US}"
+      JACKERY_API_FAMILY: "${JACKERY_API_FAMILY:-portable}"
       JACKERY_CREDS_FILE: /data/jackery-creds.json
     # Bind 8766 only to the host loopback so the host-networked
     # jackery-monitor container can reach it at 127.0.0.1:8766. Not

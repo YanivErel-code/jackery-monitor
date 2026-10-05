@@ -77,6 +77,7 @@ services:
       JACKERY_EMAIL: "${JACKERY_EMAIL:-}"
       JACKERY_PASSWORD: "${JACKERY_PASSWORD:-}"
       JACKERY_REGION: "${JACKERY_REGION:-US}"
+      JACKERY_API_FAMILY: "${JACKERY_API_FAMILY:-portable}"
       JACKERY_CREDS_FILE: /data/jackery-creds.json
     expose:
       - "8766"   # internal only — not published to the LAN
