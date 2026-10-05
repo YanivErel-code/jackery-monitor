@@ -5963,7 +5963,9 @@ async def api_backup_setup_restore_run(body: dict):
 # Static UI
 @app.get("/")
 def index():
-    return FileResponse(WEB_DIR / "index.html")
+    # A cached shell may otherwise outlive its scripts across deployment.
+    # Revalidation still allows storage and the SW's offline fallback.
+    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 # PWA manifest + service worker MUST live at the site root for the browser
@@ -5979,7 +5981,7 @@ def manifest():
 def service_worker():
     return FileResponse(WEB_DIR / "sw.js",
                         media_type="application/javascript",
-                        headers={"Service-Worker-Allowed": "/"})
+                        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
 
 # Wrap StaticFiles to send `Cache-Control: no-cache` so caching CDNs (e.g.

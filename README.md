@@ -156,7 +156,7 @@ Forecast requests share a result briefly per device and run historical reads
 outside the HTTP event loop. Hidden Energy views do not poll for history.
 
 Run the dashboard request regressions with
-`node --test tests/dashboard_requests.test.js`; Python regressions run with
+`node --test tests/dashboard*.test.js`; Python regressions run with
 `pytest`. Both are included in CI.
 
 ---
