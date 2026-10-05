@@ -146,6 +146,19 @@ Both server and bridge run as the same image (`ghcr.io/yaniverel-code/jackery-mo
 just different `command:`s in compose. The shared `/data` volume holds energy
 history, credentials (encrypted), automation rules, and settings.
 
+Live SOC, power and pack readings arrive over WebSocket. HTTP status polling
+only takes over when pushes have been stale for six seconds, with one recovery
+request at a time. Historical energy/savings aggregates refresh on read-only
+background connections and are cached for 30 seconds; a cold Live snapshot
+shows telemetry immediately and fills energy totals on a subsequent update.
+This cache is only for dashboard displays, not charging or recovery decisions.
+Forecast requests share a result briefly per device and run historical reads
+outside the HTTP event loop. Hidden Energy views do not poll for history.
+
+Run the dashboard request regressions with
+`node --test tests/dashboard_requests.test.js`; Python regressions run with
+`pytest`. Both are included in CI.
+
 ---
 
 ## Quick start — Synology / Linux

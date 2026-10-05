@@ -44,6 +44,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Dashboard request regressions
+        run: node --test tests/dashboard_requests.test.js
+
       # Format check intentionally omitted — the existing code style is
       # consistent but doesn't match ruff format exactly, and reformatting
       # everything would create a large diff unrelated to behavior. New code

@@ -9,6 +9,14 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Speed up Live, Energy and Forecast by refreshing dashboard-only historical
+  aggregates on read-only background connections, with a 30-second cache.
+  SOC and power remain live; cold snapshots no longer wait for yearly scans.
+  Forecasts query today's solar directly instead of scanning lifetime totals.
+- Avoid duplicate status polling while WebSocket updates are fresh, share
+  simultaneous per-device forecast requests, and defer hidden/undiscovered
+  device loads. Keep stale-WebSocket recovery nonoverlapping and discard
+  delayed readings/forecast work after an account or device switch.
 - Pending inverter recovery cycles respect a manual AC-off command or
   disabled recovery setting instead of turning AC back on after the
   two-second cycle pause.

@@ -378,19 +378,44 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
     @contextmanager
     def _conn(self):
         with self._lock:
-            con = sqlite3.connect(self.path, timeout=5.0)
+            readonly = getattr(self, "_read_only", False)
+            db_path = Path(self.path).resolve().as_uri() + "?mode=ro" if readonly else self.path
+            con = sqlite3.connect(db_path, timeout=5.0, uri=readonly)
             # sqlite3.Row supports BOTH index access (r[0]) and dict-style
             # access (r["device_sn"]), so flipping this on is backwards-
             # compatible with all existing index-based callers and lets
             # new code write `dict(r)` to materialize a row in one step.
             con.row_factory = sqlite3.Row
             try:
-                con.execute("PRAGMA journal_mode=WAL")
-                con.execute("PRAGMA synchronous=NORMAL")
+                if not readonly:
+                    con.execute("PRAGMA journal_mode=WAL")
+                    con.execute("PRAGMA synchronous=NORMAL")
                 yield con
                 con.commit()
             finally:
                 con.close()
+
+    def readonly_reader(self) -> EnergyDB:
+        """Read existing WAL data without taking the telemetry writer's lock.
+
+        Do not initialize/migrate the schema. SQLite mode=ro also prevents
+        accidental writes from this dashboard worker connection.
+        """
+        reader = object.__new__(type(self))
+        reader.path = self.path
+        reader._lock = threading.Lock()
+        reader._read_only = True
+        return reader
+
+    def today_solar_wh(self, device_sn: str) -> float:
+        """Today's solar total, without scanning lifetime/rolling totals."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COALESCE(SUM(solar_wh),0) FROM samples "
+                "WHERE device_sn = ? AND bucket >= ?",
+                (device_sn, _start_of_day(int(time.time()))),
+            ).fetchone()
+        return float(row[0])
 
     def _init(self) -> None:
         with self._conn() as c:
