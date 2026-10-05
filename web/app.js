@@ -26,6 +26,7 @@ function escapeHtml(s) {
 
 // ---------- state ----------
 let lastStatus = null;
+let _authApiFamily = null;
 let lastDevices = [];
 let energyRangeHours = 6;     // current Energy tab range selection
 let energyHistoryCache = null; // last fetched series for the energy tab
@@ -178,6 +179,8 @@ async function checkAuth() {
     const r = await fetch('/api/auth/status');
     if (!r.ok) return false;
     const j = await r.json();
+    _authApiFamily = j.has_credentials === false ? null : (j.api_family || 'portable');
+    if (_authApiFamily === 'home' && !lastStatus) renderHomeMonitoring({ cloud: { api_family: 'home' } });
     if (j.has_credentials === false) {
       showLogin();
       return false;
@@ -190,14 +193,32 @@ async function checkAuth() {
     return true;
   }
 }
-function showLogin() { show($('login-overlay'), true); setTimeout(() => $('login-email')?.focus(), 50); }
+function showLogin() { updateLoginApiFamily(); show($('login-overlay'), true); setTimeout(() => $('login-email')?.focus(), 50); }
 function hideLogin() { show($('login-overlay'), false); }
+
+let _portableLoginRegion = 'US';
+function updateLoginApiFamily() {
+  const home = $('login-api-family')?.value === 'home';
+  const region = $('login-region');
+  if (!region) return;
+  if (home) {
+    if (!region.disabled) _portableLoginRegion = region.value;
+    region.value = 'EU';
+  } else if (region.disabled) {
+    region.value = _portableLoginRegion;
+  }
+  region.disabled = home;
+  show($('login-api-family-hint'), home);
+}
+$('login-api-family')?.addEventListener('change', updateLoginApiFamily);
+queueMicrotask(updateLoginApiFamily);
 
 $('login-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const email = $('login-email').value.trim();
   const password = $('login-password').value;
-  const region = $('login-region').value;
+  const apiFamily = $('login-api-family')?.value || 'portable';
+  const region = apiFamily === 'home' ? 'EU' : $('login-region').value;
   const errEl = $('login-error');
   const btn = $('login-submit');
   errEl.hidden = true;
@@ -207,7 +228,8 @@ $('login-form')?.addEventListener('submit', async (e) => {
     const r = await fetch('/api/auth/credentials', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, region }),
+      body: JSON.stringify({ email, password, region,
+        ...(apiFamily === 'home' ? { api_family: 'home' } : {}) }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.ok === false) {
@@ -315,6 +337,7 @@ const _pendingToggle = {};   // port -> { expected: bool, until: ms }
 
 document.querySelectorAll('.switch').forEach((btn) => {
   btn.addEventListener('click', async () => {
+    if (isHomeMonitoring() || btn.disabled) return;
     const port = btn.dataset.port;
     if (!port) return;
     // If the AC button is in watchdog-error state, route the click to
@@ -373,7 +396,7 @@ document.querySelectorAll('.switch').forEach((btn) => {
       lbl.textContent = original;
       alert(`Failed to toggle ${port.toUpperCase()}: ${e.message || e}`);
     } finally {
-      btn.disabled = false;
+      btn.disabled = isHomeMonitoring();
       // Note: we keep .pending until telemetry confirms the change
     }
   });
@@ -426,6 +449,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
 
 function switchTab(name, opts = {}) {
   if (!VALID_TABS.has(name)) return;
+  if (isHomeMonitoring() && ['energy', 'forecast', 'automation'].includes(name)) name = 'live';
   activeTab = name;
   // Reflect the tab in the URL hash. Live is the default — keep the
   // URL clean (no hash) on that one. fromHash skips the rewrite when
@@ -456,7 +480,7 @@ function switchTab(name, opts = {}) {
     // User is now looking — clear the "new insights" dot.
     setAutomationDot(false);
   }
-  if (name === 'device')   { loadDeviceCapacity(); loadDeviceParams(); loadInverterWatchdogConfig(); }
+  if (name === 'device' && !isHomeMonitoring()) { loadDeviceCapacity(); loadDeviceParams(); loadInverterWatchdogConfig(); }
 }
 
 // Boot path: pull the tab from the URL hash. Defer the actual switch
@@ -922,12 +946,12 @@ async function loadInverterWatchdogConfig() {
   const sn = activeJackeryDevice()?.device_sn;
   input.disabled = true;
   input.dataset.deviceSn = '';
-  if (!sn) return;
+  if (!sn || isHomeMonitoring()) return;
   try {
     const r = await fetch(`/api/inverter_watchdog/config?device_sn=${encodeURIComponent(sn)}`);
     const cfg = await r.json();
     if (!r.ok) throw new Error(cfg.detail || `HTTP ${r.status}`);
-    if (activeJackeryDevice()?.device_sn !== sn) return;
+    if (activeJackeryDevice()?.device_sn !== sn || isHomeMonitoring()) return;
     input.checked = cfg.enabled;
     input.dataset.deviceSn = sn;
     input.disabled = false;
@@ -941,6 +965,7 @@ async function loadInverterWatchdogConfig() {
 }
 
 $('inverter-watchdog-enabled')?.addEventListener('change', async (event) => {
+  if (isHomeMonitoring()) return;
   const input = event.currentTarget;
   const status = $('inverter-watchdog-config-status');
   const sn = input.dataset.deviceSn;
@@ -964,11 +989,12 @@ $('inverter-watchdog-enabled')?.addEventListener('change', async (event) => {
     input.checked = !enabled;
     status.textContent = `Could not save: ${e.message || e}`;
   } finally {
-    if (activeJackeryDevice()?.device_sn === sn) input.disabled = false;
+    if (activeJackeryDevice()?.device_sn === sn && !isHomeMonitoring()) input.disabled = false;
   }
 });
 
 async function loadDeviceCapacity() {
+  if (isHomeMonitoring()) return;
   try {
     const r = await fetch('/api/devices/capacity');
     if (!r.ok) return;
@@ -1015,6 +1041,7 @@ const UNKNOWN_MODEL_DISMISS_KEY = 'jackery-umb-dismissed';
 // AI advisor so the parameter story is uniform across the app.
 
 async function loadDeviceParams() {
+  if (isHomeMonitoring()) return;
   const list = $('device-params-list');
   if (!list) return;
   const dev = activeJackeryDevice();
@@ -1804,6 +1831,114 @@ function activeJackeryDevice() {
   if (!lastStatus || !lastStatus.cloud) return null;
   const sel = lastStatus.cloud.selected_device_id;
   return (lastStatus.cloud.devices || []).find((d) => d.device_id === sel) || null;
+}
+
+function isHomeMonitoring(status = lastStatus) {
+  return status?.device?.api_family === 'home'
+    || status?.device?.read_only === true
+    || status?.cloud?.api_family === 'home'
+    || status?.cloud?.read_only === true
+    || (!status?.device && !status?.cloud && _authApiFamily === 'home');
+}
+
+function homeReading(value, digits = 0) {
+  if (value == null || !['number', 'string'].includes(typeof value)
+    || (typeof value === 'string' && !value.trim())) return '—';
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : '—';
+}
+
+function renderHomeMonitoring(status) {
+  const home = isHomeMonitoring(status);
+  const wasHome = document.body.classList.contains('home-monitoring');
+  document.body.classList.toggle('home-monitoring', home);
+  show($('home-monitor-card'), home);
+  for (const port of ['ac', 'dc', 'usb', 'car']) {
+    const button = document.querySelector(`.switch[data-port="${port}"]`);
+    if (button && (home || wasHome)) button.disabled = home;
+  }
+  if (!home) {
+    if (wasHome) {
+      for (const id of ['ac-charge-toggle', 'solar-charge-toggle']) {
+        if ($(id)) $(id).disabled = false;
+      }
+    }
+    return false;
+  }
+
+  // Drop previous portable readings and outstanding number animations.
+  // Home API values have different measurement boundaries and cannot feed
+  // portable ETA, pack weighting, or energy-total calculations.
+  for (const id of ['battery-pct', 'battery-time', 'battery-temp', 'today-out-kwh',
+    'today-in-kwh', 'flow-solar-w', 'flow-grid-w', 'flow-load-w', 'flow-soc-pct',
+    'flow-timer', 'flow-ac-meta', 'ac-charge-state', 'solar-charge-state']) {
+    const element = $(id);
+    if (!element) continue;
+    const animation = _animState.get(element);
+    if (animation?.raf) cancelAnimationFrame(animation.raf);
+    _animState.delete(element);
+    element.textContent = '—';
+  }
+  if ($('battery-bar-fill')) $('battery-bar-fill').style.width = '0%';
+  $('battery-card')?.classList.remove('charging', 'discharging', 'low');
+  show($('eod-forecast'), false);
+  show($('battery-packs-card'), false);
+  for (const port of ['ac', 'dc', 'usb', 'car']) {
+    delete _pendingToggle[port];
+    const button = document.querySelector(`.switch[data-port="${port}"]`);
+    button?.classList.remove('on', 'pending', 'warn', 'wd-warn', 'wd-err');
+    if (button) button.title = 'Jackery Home monitoring only';
+    if ($(`sw-${port}`)) $(`sw-${port}`).textContent = '—';
+  }
+  for (const id of ['ac-charge-toggle', 'solar-charge-toggle']) {
+    const button = $(id);
+    if (button) { button.disabled = true; button.hidden = true; }
+  }
+  if ($('inverter-watchdog-enabled')) {
+    $('inverter-watchdog-enabled').disabled = true;
+    $('inverter-watchdog-enabled').checked = false;
+  }
+  forecastCache = null;
+  energyHistoryCache = null;
+  energyDailyCache = null;
+  window._systemSoc = null;
+  window._mainSoc = null;
+
+  const telemetry = status.telemetry || {};
+  const set = (id, value, digits = 0) => {
+    const element = $(id);
+    if (element) element.textContent = homeReading(value, digits);
+  };
+  set('home-soc', telemetry.battery_percent, 1);
+  set('home-capacity', telemetry.capacity_wh == null ? null : telemetry.capacity_wh / 1000, 3);
+  set('home-energy-remaining', telemetry.home_energy_remaining_wh == null ? null : telemetry.home_energy_remaining_wh / 1000, 2);
+  set('home-solar', telemetry.home_solar_power_w);
+  set('home-grid', telemetry.home_grid_power_w);
+  set('home-ac-socket', telemetry.home_ac_socket_power_w);
+  set('home-household', telemetry.home_household_power_w);
+  set('home-ac-main', telemetry.home_ac_main_power_w);
+  set('home-battery-count', telemetry.home_battery_count);
+  const received = $('home-received');
+  if (received) {
+    const sn = status.device?.device_sn || activeJackeryDevice()?.device_sn;
+    const receipt = status.cloud?.devices_telemetry?.[sn]?.ts ?? status.last_update_ts;
+    received.textContent = receipt ? new Date(receipt * 1000).toLocaleString() : '—';
+  }
+  const inventory = $('home-expansion-list');
+  if (inventory) {
+    inventory.replaceChildren();
+    const packs = Array.isArray(status.battery_packs) ? status.battery_packs : [];
+    const heading = document.createElement('p');
+    heading.textContent = packs.length
+      ? `Identified expansion batteries: ${packs.length}` : 'No expansion battery identities reported.';
+    inventory.append(heading);
+    for (const pack of packs) {
+      const row = document.createElement('p');
+      row.textContent = `${pack.deviceSn || 'Unknown battery'} — individual readings unavailable`;
+      inventory.append(row);
+    }
+  }
+  return true;
 }
 
 function renderRulesWithFilter() {
@@ -3937,16 +4072,18 @@ function applyStatus(s) {
   }
   const prevDeviceSn = activeJackeryDevice()?.device_sn;
   lastStatus = s;
+  const homeMonitoring = renderHomeMonitoring(s);
+  if (homeMonitoring && ['energy', 'forecast', 'automation'].includes(activeTab)) switchTab('live');
   // Stash for fetchBatteryPacks() — it derives the main unit's standalone
   // SOC from the combined SOC the dashboard is showing.
   window._lastStatus = s.telemetry || null;
   // If the active Jackery device changed and we're on the Automation tab,
   // re-render the rules list so the "Showing rules for: X" filter follows.
   const newDeviceSn = activeJackeryDevice()?.device_sn;
-  if (activeTab === 'device' && prevDeviceSn !== newDeviceSn) {
+  if (!homeMonitoring && activeTab === 'device' && prevDeviceSn !== newDeviceSn) {
     loadInverterWatchdogConfig();
   }
-  if (activeTab === 'automation' && prevDeviceSn !== newDeviceSn) {
+  if (!homeMonitoring && activeTab === 'automation' && prevDeviceSn !== newDeviceSn) {
     if (_allRules.length) renderRulesWithFilter();
     // Smart-charge config + AI insights are per-device — reload both.
     loadSmartCharge();
@@ -3966,7 +4103,7 @@ function applyStatus(s) {
     // place if the Energy tab is what the user is looking at.
     energyDailyCache = null;
     if (activeTab === 'energy') fetchEnergyDaily();
-    fetchEodForecast();
+    if (!homeMonitoring) fetchEodForecast();
     // Pack list is per-device — drop the previous device's cache so we
     // don't briefly show the old packs while the new fetch is in flight.
     // The next WS tick will populate cachedPacks from s.battery_packs.
@@ -4024,6 +4161,10 @@ function applyStatus(s) {
 
   // Telemetry
   const t = s.telemetry || {};
+  if (homeMonitoring) {
+    renderDeviceInfo(s, t);
+    return;
+  }
   if (t.battery_percent != null) {
     // Prefer the server-computed system SOC when packs are attached,
     // so the SOC card lands on the right number on the very first
@@ -4197,10 +4338,21 @@ function applyStatus(s) {
     }
   }
 
-  // Device tab
+  renderDeviceInfo(s, t);
+
+  // Energy KPIs (cards on Energy tab)
+  if (s.energy) renderEnergyKpis(s.energy);
+
+  // Live chart
+  if (activeTab === 'live') drawLiveChart(s);
+}
+
+function renderDeviceInfo(s, t) {
   const dev = s.device || {};
   $('dev-name').textContent  = dev.name  || '—';
-  $('dev-model').textContent = dev.model_code != null ? `model ${dev.model_code}` : '—';
+  $('dev-model').textContent = isHomeMonitoring(s)
+    ? (dev.model_name || 'Jackery Home')
+    : dev.model_code != null ? `model ${dev.model_code}` : '—';
   $('dev-sn').textContent    = dev.device_sn || '—';
   $('src-cloud').textContent = describeSrc(s.cloud);
   _lastCloudMeta = s.cloud || null;
@@ -4211,11 +4363,6 @@ function applyStatus(s) {
     : (t.ups_on === false || t.super_charge_on === false) ? 'Off' : '—';
   $('dev-err').textContent     = t.error_code != null ? String(t.error_code) : '—';
 
-  // Energy KPIs (cards on Energy tab)
-  if (s.energy) renderEnergyKpis(s.energy);
-
-  // Live chart
-  if (activeTab === 'live') drawLiveChart(s);
 }
 
 
@@ -4258,11 +4405,18 @@ function makeKasaPlugToggle({ buttonId, stateId, controllerName,
   const btn = document.getElementById(buttonId);
 
   async function readHost() {
+    if (isHomeMonitoring()) return { deviceSn: null, cfg: null };
     const deviceSn = activeJackeryDevice()?.device_sn;
     if (!deviceSn) return { deviceSn: null, cfg: null };
     try {
       const r = await fetch(`${configPath}?device_sn=${encodeURIComponent(deviceSn)}`);
-      if (r.ok) return { deviceSn, cfg: (await r.json()).config };
+      if (r.ok) {
+        const cfg = (await r.json()).config;
+        if (isHomeMonitoring() || activeJackeryDevice()?.device_sn !== deviceSn) {
+          return { deviceSn: null, cfg: null };
+        }
+        return { deviceSn, cfg };
+      }
     } catch (e) { /* ignore */ }
     return { deviceSn, cfg: null };
   }
@@ -4304,7 +4458,7 @@ function makeKasaPlugToggle({ buttonId, stateId, controllerName,
   }
 
   btn?.addEventListener('click', async () => {
-    if (busy) return;
+    if (busy || btn.disabled || isHomeMonitoring()) return;
     const { cfg } = await readHost();
     const host = cfg?.kasa_device_host;
     if (!host) return;
@@ -5001,6 +5155,7 @@ function chartTooltip(target) {
 }
 
 function drawLiveChart(s) {
+  if (isHomeMonitoring(s)) return;
   const canvas = $('chart-live');
   if (!canvas) return;
   const { ctx, w, h } = setCanvasSize(canvas);
@@ -5219,6 +5374,7 @@ window.addEventListener('resize', () => {
 // FORECAST TAB
 // ============================================================
 async function fetchForecast() {
+  if (isHomeMonitoring()) return;
   const needsConfig = $('forecast-needs-config');
   const content     = $('forecast-content');
   const stats       = $('forecast-stats');
@@ -5239,6 +5395,7 @@ async function fetchForecast() {
     const r = await fetch(url);
     if (!r.ok) { showNeedsConfig(); return; }
     const j = await r.json();
+    if (isHomeMonitoring() || sn !== activeJackeryDevice()?.device_sn) return;
     if (!j.configured) {
       showNeedsConfig('Allow location to enable forecasts',
         'The forecaster needs your approximate location to know which weather to fetch. Click below to share it.');
@@ -5755,11 +5912,13 @@ $('daily-accuracy-days')?.addEventListener('change', () => {
 // denial, set a localStorage flag so we don't pester them on every reload.
 // The Forecast tab still has a manual "Use my location" button for retry.
 async function maybePromptLocationOnBoot() {
+  if (isHomeMonitoring()) return;
   if (localStorage.getItem('jackery-location-denied') === '1') return;
   try {
     const r = await fetch('/api/location');
     if (!r.ok) return;
     const j = await r.json();
+    if (isHomeMonitoring()) return;
     if (j.latitude != null && j.longitude != null) return; // already set
   } catch { return; }
   const result = await requestAndSaveGeolocation();
@@ -6081,6 +6240,7 @@ const EOD_MIN_REFRESH_INTERVAL_MS = 5 * 60_000;
 async function fetchEodForecast() {
   const el = $('eod-forecast');
   if (!el) return;
+  if (isHomeMonitoring()) { el.hidden = true; return; }
   _eodLastFetchAt = Date.now();
 
   // Helper: surface the "still calibrating" state with progress hints
@@ -6117,6 +6277,7 @@ async function fetchEodForecast() {
     const r = await fetch(url);
     if (!r.ok) { el.hidden = true; return; }
     const j = await r.json();
+    if (isHomeMonitoring() || sn !== activeJackeryDevice()?.device_sn) { el.hidden = true; return; }
     if (!j.configured || j.error) { el.hidden = true; return; }
     // Readiness gate failed — show progress instead of hiding.
     if (j.ready === false) { showCalibrating(j.readiness); return; }
@@ -6294,6 +6455,7 @@ function packRow({ idx, soc, flow, flowClass, temp, label, snTitle, isMain,
 async function fetchBatteryPacks() {
   const card = $('battery-packs-card');
   if (!card) return;
+  if (isHomeMonitoring()) { card.hidden = true; return; }
   try {
     const viewSn = activeJackeryDevice()?.device_sn;
     const r = await fetch('/api/devices/battery_packs'
@@ -6327,6 +6489,7 @@ function renderBatteryPacks() {
   const list = $('battery-packs-list');
   const summary = $('battery-packs-summary');
   if (!card || !list) return;
+  if (isHomeMonitoring()) { card.hidden = true; list.replaceChildren(); return; }
 
   const packs = window._cachedPacks || [];
   const err = window._cachedPacksError;

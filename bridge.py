@@ -42,6 +42,7 @@ Env:
   JACKERY_EMAIL          (optional — sets cloud account email)
   JACKERY_PASSWORD       (optional — sets cloud account password)
   JACKERY_REGION         (optional — default US)
+  JACKERY_API_FAMILY     (optional — portable by default; home requires EU)
   JACKERY_CREDS_FILE     (optional — default /data/jackery-creds.json)
 """
 
@@ -51,6 +52,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import secrets
 import signal
@@ -92,6 +94,28 @@ PACK_REFRESH_RETRY_S = 30
 CREDS_FILE_DEFAULT = "/data/jackery-creds.json"
 CREDS_KEY_DEFAULT  = "/data/.jackery-creds.key"
 CREDS_ENV          = "v1"  # version tag in the encrypted blob
+
+
+def _normalise_api_family(api_family: str | None = None) -> str:
+    if api_family is not None and not isinstance(api_family, str):
+        raise ValueError("api_family must be portable or home")
+    family = (api_family or "portable").strip().lower() or "portable"
+    if family not in {"portable", "home"}:
+        raise ValueError("api_family must be portable or home")
+    return family
+
+
+def _make_cloud_client(email: str, password: str, region: str = "US",
+                       api_family: str = "portable"):
+    """Select an explicit backend. Empty portable accounts never fall back."""
+    family = _normalise_api_family(api_family)
+    if family == "home":
+        if region != "EU":
+            raise ValueError("Jackery Home is currently supported only in EU")
+        from home_cloud_client import JackeryHomeCloudClient
+        return JackeryHomeCloudClient(email=email, password=password, region=region)
+    from cloud_client import JackeryCloudClient
+    return JackeryCloudClient(email=email, password=password, region=region)
 
 
 def _creds_file_path() -> str:
@@ -222,11 +246,12 @@ def _load_creds_file() -> dict | None:
         except Exception as e:
             log.error("creds payload not valid JSON after decrypt: %s", e)
             return None
-        if inner.get("email") and inner.get("password"):
+        if isinstance(inner, dict) and inner.get("email") and inner.get("password"):
             return {
                 "email": str(inner["email"]),
                 "password": str(inner["password"]),
                 "region": str(inner.get("region") or "US").upper(),
+                "api_family": str(inner.get("api_family") or "portable").strip().lower(),
             }
         return None
 
@@ -235,25 +260,29 @@ def _load_creds_file() -> dict | None:
         email = str(data["email"])
         password = str(data["password"])
         region = str(data.get("region") or "US").upper()
+        api_family = str(data.get("api_family") or "portable").strip().lower()
         # Immediately re-encrypt in place so the plaintext doesn't linger.
         # The previous behavior only re-encrypted "on next save", which
         # could be never if the user didn't change credentials.
-        if _save_creds_file(email, password, region):
+        if _save_creds_file(email, password, region, api_family):
             log.info("migrated legacy plaintext creds at %s to encrypted form", path)
         else:
             log.warning("legacy plaintext creds at %s could not be re-encrypted "
                         "(continuing to use plaintext for this session)", path)
-        return {"email": email, "password": password, "region": region}
+        return {"email": email, "password": password, "region": region,
+                "api_family": api_family}
     return None
 
 
-def _save_creds_file(email: str, password: str, region: str) -> bool:
+def _save_creds_file(email: str, password: str, region: str,
+                     api_family: str = "portable") -> bool:
     """Encrypt with AES-256-GCM and write to disk atomically."""
     path = _creds_file_path()
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         payload = json.dumps(
-            {"email": email, "password": password, "region": region}
+            {"email": email, "password": password, "region": region,
+             "api_family": _normalise_api_family(api_family)}
         ).encode()
         blob = _encrypt_creds(payload)
         # Write to a temp file first, then rename, so a crash mid-write
@@ -287,7 +316,7 @@ def _delete_creds_file() -> bool:
 
 
 def load_cloud_credentials() -> dict | None:
-    """Return {email, password, region} from env / file / keychain, or None."""
+    """Return credentials plus explicit API family; legacy defaults portable."""
     # 1. Environment variables (Synology / generic Linux deployment)
     env_email = os.environ.get("JACKERY_EMAIL")
     env_pw = os.environ.get("JACKERY_PASSWORD")
@@ -297,6 +326,7 @@ def load_cloud_credentials() -> dict | None:
             "email": env_email.strip(),
             "password": env_pw,
             "region": (os.environ.get("JACKERY_REGION") or "US").strip().upper(),
+            "api_family": (os.environ.get("JACKERY_API_FAMILY") or "portable").strip().lower(),
         }
 
     # 2. JSON creds file (set_credentials persists here on non-mac hosts)
@@ -309,9 +339,11 @@ def load_cloud_credentials() -> dict | None:
     email = keychain_get("jackery-monitor", "cloud-email")
     password = keychain_get("jackery-monitor", "cloud-password")
     region = keychain_get("jackery-monitor", "cloud-region") or "US"
+    api_family = keychain_get("jackery-monitor", "cloud-api-family") or "portable"
     if email and password:
         log.info("Loaded cloud credentials from macOS keychain")
-        return {"email": email, "password": password, "region": region}
+        return {"email": email, "password": password, "region": region,
+                "api_family": api_family}
 
     log.info("No cloud credentials found (env / file / keychain all empty) — "
              "cloud poller idle. Sign in via the web UI or set JACKERY_EMAIL / "
@@ -327,7 +359,7 @@ def clear_cloud_credentials() -> tuple[bool, str]:
                        "environment variables \u2014 unset them or edit your .env to clear")
     cleared = []
     # macOS keychain best-effort delete (no-op on Linux)
-    for acct in ("cloud-email", "cloud-password", "cloud-region"):
+    for acct in ("cloud-email", "cloud-password", "cloud-region", "cloud-api-family"):
         try:
             r = subprocess.run(
                 ["security", "delete-generic-password", "-s", "jackery-monitor", "-a", acct],
@@ -343,7 +375,8 @@ def clear_cloud_credentials() -> tuple[bool, str]:
     return True, ", ".join(cleared) or "nothing to clear"
 
 
-def save_cloud_credentials(email: str, password: str, region: str) -> tuple[bool, str]:
+def save_cloud_credentials(email: str, password: str, region: str,
+                           api_family: str = "portable") -> tuple[bool, str]:
     """Persist creds. Returns (ok, where) describing where they were stored.
        Won't try to overwrite env-var-supplied creds (those are managed by the
        operator, not the web UI)."""
@@ -353,10 +386,11 @@ def save_cloud_credentials(email: str, password: str, region: str) -> tuple[bool
     # Try macOS keychain first (preserves original behaviour on Mac)
     if keychain_set("jackery-monitor", "cloud-email", email) \
        and keychain_set("jackery-monitor", "cloud-password", password) \
-       and keychain_set("jackery-monitor", "cloud-region", region):
+       and keychain_set("jackery-monitor", "cloud-region", region) \
+       and keychain_set("jackery-monitor", "cloud-api-family", api_family):
         return True, "macOS keychain"
     # Fall back to JSON file (Synology, Linux, Docker)
-    if _save_creds_file(email, password, region):
+    if _save_creds_file(email, password, region, api_family):
         return True, _creds_file_path()
     return False, "no writable credential store available"
 
@@ -451,7 +485,7 @@ async def _inverter_protect_check(device_sn: str, load_w: float | None) -> None:
     event and returns. We do NOT propagate errors back to the MQTT push
     handler — that path must stay responsive even if the inverter
     protection layer has trouble talking to its dependencies."""
-    if not device_sn or load_w is None:
+    if not device_sn or load_w is None or _cloud_capabilities()["read_only"]:
         return
     cfg = _inverter_protect_cfg(device_sn)
     if not cfg or cfg.get("mode") == "off":
@@ -563,6 +597,52 @@ class State:
 
 state = State()
 
+
+def _cloud_capabilities() -> dict:
+    family = (state.cloud_creds or {}).get("api_family", "portable")
+    return {"api_family": family,
+            "read_only": family == "home" or bool(
+                getattr(state.cloud_client, "read_only", False))}
+
+
+def _home_props_to_telemetry(props: dict) -> dict:
+    """Home REST reports system SOC, not portable battery power or controls."""
+    def number(key: str, *, minimum: float | None = None,
+               maximum: float | None = None) -> float | None:
+        value = props.get(key)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        if minimum is not None and parsed < minimum:
+            return None
+        if maximum is not None and parsed > maximum:
+            return None
+        return parsed
+
+    telemetry = dict.fromkeys((
+        "battery_temp_c", "input_power_w", "output_power_w", "ac_input_w",
+        "car_input_w", "solar_input_w", "ac_output_v", "ac_output_v_l1",
+        "ac_output_hz", "ac_on", "dc_on", "usb_on", "car_on", "ups_on",
+        "super_charge_on", "error_code", "time_to_full_h", "time_remaining_h",
+        "utc_offset_seconds"))
+    capacity = number("_installed_capacity_wh", minimum=0)
+    telemetry.update({
+        "battery_percent": number("rb", minimum=0, maximum=100),
+        "soc_scope": "system",
+        "capacity_wh": capacity if capacity else None,
+        "api_family": "home", "read_only": True,
+    })
+    for key in ("home_solar_power_w", "home_ac_socket_power_w",
+                "home_household_power_w", "home_grid_power_w", "home_ac_main_power_w",
+                "home_energy_remaining_wh", "home_battery_count"):
+        telemetry[key] = number("_" + key)
+    return telemetry
+
 # Per-pack firmware-update flags change only when Jackery ships a new
 # release, so refresh them at most hourly (one extra HTTP call/hour).
 PACK_UPGRADE_TTL_S = 3600.0
@@ -574,7 +654,7 @@ async def _annotate_pack_upgrades(device_sn: str, packs: list[dict]) -> list[dic
     slow TTL and annotate whatever packs we're about to return. Best
     effort — on any fetch error we keep the last-known flags and never
     raise (the live telemetry path must not depend on this)."""
-    if not packs or not state.cloud_client:
+    if not packs or not state.cloud_client or _cloud_capabilities()["read_only"]:
         return packs
     now = time.time()
     last_attempt = state.pack_upgrade_attempt_ts.get(device_sn)
@@ -639,11 +719,13 @@ def _merge_cloud_properties(device_sn: str, props: dict, *, source: str,
 
     received_at = time.time()
     incoming = dict(props)
+    home = _cloud_capabilities()["api_family"] == "home"
     if "rb" in incoming:
         rb = incoming["rb"]
         try:
             usable_rb = not isinstance(rb, bool) and 0 <= float(rb) <= 100
-            int(rb)  # must be usable by the telemetry adapter too
+            if not home:
+                int(rb)  # must be usable by the portable telemetry adapter too
         except (TypeError, ValueError, OverflowError):
             usable_rb = False
         if not usable_rb:
@@ -652,15 +734,24 @@ def _merge_cloud_properties(device_sn: str, props: dict, *, source: str,
                  and state.soc_revision_by_sn.get(device_sn, 0) != request_soc_revision)
     newer_receipt = (request_started_at is not None
                      and state.soc_source_ts_by_sn.get(device_sn, 0.0) > request_started_at)
-    if source == "http" and (newer_soc or newer_receipt):
+    outdated_soc_response = source == "http" and (newer_soc or newer_receipt)
+    if outdated_soc_response:
         incoming.pop("rb", None)
+    if home and source == "http":
+        # Home monitor is a full snapshot: omitted fields are unknown now.
+        latest_rb = state.props_raw_by_sn.get(device_sn, {}).get("rb")
+        state.props_raw_by_sn[device_sn] = (
+            {"rb": latest_rb} if outdated_soc_response and latest_rb is not None else {})
+        if "rb" not in incoming and not outdated_soc_response:
+            state.soc_source_ts_by_sn.pop(device_sn, None)
+            state.soc_source_by_sn.pop(device_sn, None)
     raw = state.props_raw_by_sn.setdefault(device_sn, {})
     raw.update(incoming)
     if "rb" in incoming:
         state.soc_source_ts_by_sn[device_sn] = received_at
         state.soc_source_by_sn[device_sn] = source
         state.soc_revision_by_sn[device_sn] = state.soc_revision_by_sn.get(device_sn, 0) + 1
-    telemetry = cloud_props_to_telemetry(raw)
+    telemetry = _home_props_to_telemetry(raw) if home else cloud_props_to_telemetry(raw)
     telemetry["soc_source_ts"] = state.soc_source_ts_by_sn.get(device_sn)
     telemetry["soc_source"] = state.soc_source_by_sn.get(device_sn)
     state.telemetry_by_sn[device_sn] = telemetry
@@ -730,8 +821,10 @@ async def _get_battery_packs(device_sn: str, *, force_refresh: bool = False) -> 
                 try:
                     generation = state.cache_generation
                     revision = state.packs_revision_by_sn.get(device_sn, 0)
-                    packs = await state.cloud_client.fetch_battery_packs(
-                        device_sn, force_refresh=True)
+                    client = state.cloud_client
+                    packs = await client.fetch_battery_packs(
+                        device_sn, force_refresh=(force_refresh if
+                            _cloud_capabilities()["api_family"] == "home" else True))
                 except Exception as e:
                     # A fresh MQTT receipt during the failed request is
                     # already sufficient; otherwise preserve stale data.
@@ -741,13 +834,26 @@ async def _get_battery_packs(device_sn: str, *, force_refresh: bool = False) -> 
                         state.packs_refresh_error_by_sn[device_sn] = (
                             f"pack refresh failed ({type(e).__name__})")
                 else:
-                    if generation != state.cache_generation:
+                    if generation != state.cache_generation or state.cloud_client is not client:
                         return {"ok": False, "device_sn": device_sn, "packs": [],
                                 "fetched_at": 0.0, "source": None, "stale": True,
                                 "error": "pack cache reset during refresh"}
                     if state.packs_revision_by_sn.get(device_sn, 0) == revision:
-                        _cache_pack_snapshot(device_sn, packs, source="http",
-                                             received_at=time.time())
+                        if _cloud_capabilities()["api_family"] == "home":
+                            # The Home client may reuse a recent monitor snapshot.
+                            # Preserve that HTTP receipt rather than the cache read.
+                            received_at = client.pack_cache_ts_by_sn.get(device_sn)
+                            if received_at:
+                                _cache_pack_snapshot(
+                                    device_sn, packs,
+                                    source=client.pack_cache_source_by_sn.get(device_sn, "http"),
+                                    received_at=received_at)
+                            else:
+                                state.packs_refresh_error_by_sn[device_sn] = (
+                                    "Home pack receipt timestamp unavailable")
+                        else:
+                            _cache_pack_snapshot(device_sn, packs, source="http",
+                                                 received_at=time.time())
         packs = state.battery_packs_by_sn.get(device_sn, [])
         if not _packs_stale(device_sn):
             await _annotate_pack_upgrades(device_sn, packs)
@@ -772,9 +878,12 @@ async def cloud_loop() -> None:
         return
     # lazy import so users without httpx/pycryptodome aren't blocked at boot
     try:
-        from cloud_client import (
-            JackeryCloudClient,
-            SessionContestedError,
+        from cloud_client import SessionContestedError
+        c = _make_cloud_client(
+            email=state.cloud_creds["email"],
+            password=state.cloud_creds["password"],
+            region=state.cloud_creds.get("region", "US"),
+            api_family=state.cloud_creds.get("api_family", "portable"),
         )
     except Exception as e:
         log.warning("Cloud client unavailable: %s", e)
@@ -782,11 +891,6 @@ async def cloud_loop() -> None:
         state.cloud_error = f"import: {e}"
         return
 
-    c = JackeryCloudClient(
-        email=state.cloud_creds["email"],
-        password=state.cloud_creds["password"],
-        region=state.cloud_creds.get("region", "US"),
-    )
     state.cloud_client = c
     backoff = 10
 
@@ -905,6 +1009,7 @@ async def cloud_loop() -> None:
                         "model_code": d.model_code,
                         "model_name": d.model_name,
                         "device_sn": d.device_sn,
+                        **_cloud_capabilities(),
                     }
                     for d in devs
                 ]
@@ -920,6 +1025,7 @@ async def cloud_loop() -> None:
                     "model_code": sel.model_code,
                     "device_sn": sel.device_sn,
                     "device_type": device_type_for(sel.model_code),
+                    **_cloud_capabilities(),
                 }
                 log.info("Cloud device active: %s (model %s); %d total on account",
                          sel.name, sel.model_code, len(devs))
@@ -978,7 +1084,7 @@ async def cloud_loop() -> None:
             # the first successful HTTP poll (so user_id is set + device
             # selected). paho-mqtt handles reconnect re-subscription via
             # on_connect.
-            if not realtime_subscribed:
+            if not realtime_subscribed and getattr(c, "supports_realtime", True):
                 try:
                     await c.subscribe_realtime(_on_property_push,
                                                on_pack_change=_on_pack_push)
@@ -988,6 +1094,12 @@ async def cloud_loop() -> None:
                     event("warn", "mqtt", f"Realtime subscribe failed: {e}")
             backoff = 10
         except SessionContestedError as e:
+            if getattr(e, "stale_auth_response", False):
+                # A parallel Home read already established a newer session.
+                # This old-token response does not invalidate it or justify
+                # pausing otherwise usable telemetry for a minute.
+                log.debug("Ignoring obsolete cloud authentication rejection")
+                continue
             # The phone app (or another client) just logged in and bumped us.
             # Don't fight back — cool down and let them keep the session.
             # Exponential backoff on generic contention signals avoids a
@@ -1172,6 +1284,7 @@ def merged_poll() -> dict:
             "ts": state.ts_by_sn.get(sn),
             "soc_source_ts": state.soc_source_ts_by_sn.get(sn),
             "soc_source": state.soc_source_by_sn.get(sn),
+            **_cloud_capabilities(),
         }
         for sn in state.telemetry_by_sn
     }
@@ -1180,6 +1293,7 @@ def merged_poll() -> dict:
         "source": src,
         "device": device,
         "cloud": {
+            **_cloud_capabilities(),
             "state": state.cloud_state,
             "ts": state.cloud_ts,
             "age_s": round(cloud_age, 1) if cloud_age is not None else None,
@@ -1205,6 +1319,8 @@ def merged_poll() -> dict:
 
 # ---- RPC handlers ----
 async def handle(method: str, params: dict) -> dict:
+    if method in {"set_output", "cloud_probe"} and _cloud_capabilities()["read_only"]:
+        return {"ok": False, "error": "Jackery Home is read-only; this operation is unavailable"}
     if method == "ping":
         return {"ok": True}
 
@@ -1237,6 +1353,7 @@ async def handle(method: str, params: dict) -> dict:
             "has_credentials": bool(state.cloud_creds),
             "email": (state.cloud_creds or {}).get("email"),
             "region": (state.cloud_creds or {}).get("region", "US"),
+            **_cloud_capabilities(),
             "cloud_state": state.cloud_state,
             "cloud_error": state.cloud_error,
         }
@@ -1250,26 +1367,31 @@ async def handle(method: str, params: dict) -> dict:
 
         # 1) verify against the cloud BEFORE saving — avoids storing bad creds
         try:
-            from cloud_client import JackeryCloudClient
+            api_family = _normalise_api_family(params.get("api_family"))
+            probe = _make_cloud_client(email, password, region, api_family)
         except Exception as e:
             return {"ok": False, "error": f"cloud client unavailable: {e}"}
-
-        probe = JackeryCloudClient(email=email, password=password, region=region)
         try:
             await probe.login()
+            if api_family == "home" and not await probe.fetch_devices():
+                raise RuntimeError("no systems on this Jackery Home account")
         except Exception as e:
+            # The Home backend's response body may contain account data.
+            if api_family == "home":
+                error = ("no systems on this Jackery Home account"
+                         if str(e) == "no systems on this Jackery Home account"
+                         else f"Home login/discovery failed ({type(e).__name__})")
+            else:
+                error = f"login failed: {e}"
+            return {"ok": False, "error": error}
+        finally:
             try:
                 await probe.aclose()
             except Exception:
                 pass
-            return {"ok": False, "error": f"login failed: {e}"}
-        try:
-            await probe.aclose()
-        except Exception:
-            pass
 
         # 2) persist (keychain on macOS, JSON file otherwise)
-        ok, where = save_cloud_credentials(email, password, region)
+        ok, where = save_cloud_credentials(email, password, region, api_family)
         if not ok:
             return {"ok": False, "error": f"failed to persist credentials: {where}"}
         log.info("persisted cloud credentials to %s", where)
@@ -1284,7 +1406,8 @@ async def handle(method: str, params: dict) -> dict:
                 await old_client.aclose()
             except Exception:
                 pass
-        state.cloud_creds = {"email": email, "password": password, "region": region}
+        state.cloud_creds = {"email": email, "password": password, "region": region,
+                             "api_family": api_family}
         state.cloud_state = "logging-in"
         state.cloud_error = None
         state.cloud_device = None
@@ -1295,7 +1418,7 @@ async def handle(method: str, params: dict) -> dict:
         state.cloud_ts = None
         _clear_device_caches()
         state.cloud_task = asyncio.create_task(cloud_loop(), name="cloud_loop")
-        return {"ok": True, "email": email, "region": region}
+        return {"ok": True, "email": email, "region": region, **_cloud_capabilities()}
 
     if method == "select_device":
         device_id = str(params.get("device_id") or "").strip()
@@ -1314,6 +1437,7 @@ async def handle(method: str, params: dict) -> dict:
                 "model_code": match["model_code"],
                 "device_sn": match["device_sn"],
                 "device_type": device_type_for(match["model_code"]),
+                **_cloud_capabilities(),
             }
             # Drop stale telemetry so the UI doesn't briefly show old data
             state.cloud_telemetry = None

@@ -2702,3 +2702,10 @@ footer {
 @keyframes spin { to { transform: rotate(360deg); } }
 body.device-switching .tab-panel { opacity: .45; pointer-events: none;
   transition: opacity .15s ease; }
+/* Jackery Home has separate system meters and no portable-device controls. */
+body.home-monitoring [data-portable],
+body.home-monitoring footer { display: none !important; }
+.home-monitor-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin: 20px 0; }
+.home-monitor-values { display: grid; grid-template-columns: minmax(140px, 1fr) 1fr; gap: 10px 18px; }
+.home-monitor-values dt { color: var(--text-dim); }
+.home-monitor-values dd { margin: 0; text-align: right; }
