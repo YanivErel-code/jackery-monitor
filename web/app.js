@@ -11,6 +11,59 @@
      • Output state display (read-only — cloud API does not expose toggles).
    ======================================================================== */
 
+// Keep startup self-contained: a cached HTML shell may omit the compatibility
+// helper script, and a failed helper fetch must not stop live monitoring.
+const _dashboardRequestTools = (() => {
+  function createKeyedLoader({ load, ttlMs = 0, now = Date.now, cacheable = () => true }) {
+    const pending = new Map();
+    const cached = new Map();
+    let generation = 0;
+    return {
+      get(key) {
+        const previous = cached.get(key);
+        if (previous && now() - previous.at < ttlMs) return Promise.resolve(previous.value);
+        if (pending.has(key)) return pending.get(key);
+        const startedGeneration = generation;
+        const request = Promise.resolve().then(() => load(key)).then(value => {
+          if (generation === startedGeneration && ttlMs > 0 && cacheable(value)) {
+            cached.set(key, { value, at: now() });
+          }
+          return value;
+        }).finally(() => {
+          if (pending.get(key) === request) pending.delete(key);
+        });
+        pending.set(key, request);
+        return request;
+      },
+      clear() { generation++; cached.clear(); pending.clear(); },
+    };
+  }
+
+  function createStatusFallback({ load, onStatus, staleMs = 6000, now = Date.now }) {
+    let lastWsAt = null;
+    let wsGeneration = 0;
+    let pending = null;
+    return {
+      markWsStatus() { lastWsAt = now(); wsGeneration++; },
+      markDisconnected() { lastWsAt = null; },
+      markViewChanged() { lastWsAt = null; wsGeneration++; },
+      tick() {
+        if (pending) return pending;
+        if (lastWsAt !== null && now() - lastWsAt < staleMs) return Promise.resolve();
+        const startedGeneration = wsGeneration;
+        pending = Promise.resolve().then(load).then(status => {
+          // A push received after this read began is newer than the HTTP snapshot.
+          if (startedGeneration === wsGeneration) onStatus(status);
+        }).catch(() => { /* A later tick retries after a transient failure. */ })
+          .finally(() => { pending = null; });
+        return pending;
+      },
+    };
+  }
+
+  return { createKeyedLoader, createStatusFallback };
+})();
+
 const $ = (id) => document.getElementById(id);
 
 // Canonical HTML escape. Use this whenever interpolating untrusted data
@@ -57,13 +110,13 @@ async function dashboardJson(url) {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
-const _dashboardReads = DashboardRequests.createKeyedLoader({ load: dashboardJson });
-const _forecastReads = DashboardRequests.createKeyedLoader({
+const _dashboardReads = _dashboardRequestTools.createKeyedLoader({ load: dashboardJson });
+const _forecastReads = _dashboardRequestTools.createKeyedLoader({
   load: sn => dashboardJson(`/api/forecast?device_sn=${encodeURIComponent(sn)}`),
   ttlMs: 30_000,
   cacheable: result => !result.error,
 });
-const _statusFallback = DashboardRequests.createStatusFallback({
+const _statusFallback = _dashboardRequestTools.createStatusFallback({
   load: () => dashboardJson('/api/status'),
   onStatus: applyStatus,
   staleMs: 6000,

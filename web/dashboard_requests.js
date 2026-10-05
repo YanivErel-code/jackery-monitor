@@ -1,4 +1,7 @@
-/* Small request coordinators shared by the dashboard and dependency-free tests. */
+/* Compatibility for cached app builds that still expect window.DashboardRequests.
+ * Current app.js embeds its coordinators so startup never depends on this asset.
+ * Keep this file available while older HTML/app scripts may remain cached.
+ */
 (function (root) {
   'use strict';
 

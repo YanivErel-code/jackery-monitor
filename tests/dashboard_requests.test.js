@@ -5,7 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const { createKeyedLoader, createStatusFallback } = require('../web/dashboard_requests.js');
+const appSource = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
+const helperStart = appSource.indexOf('const _dashboardRequestTools =');
+const helperEnd = appSource.indexOf('\nconst $', helperStart);
+assert.ok(helperStart >= 0 && helperEnd > helperStart);
+const { createKeyedLoader, createStatusFallback } = vm.runInNewContext(
+  appSource.slice(helperStart, helperEnd) + '\n_dashboardRequestTools;',
+);
 
 function deferred() {
   let resolve, reject;
@@ -114,7 +120,6 @@ test('repeated WS reconnect failures do not discard a valid slow REST fallback',
 
 // Exercise the real page loaders against delayed synthetic API responses.
 // No browser or device/cloud connection is needed for these network guards.
-const appSource = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 function pageHarness() {
   const elements = new Map();
   function element(id) {

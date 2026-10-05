@@ -9,6 +9,9 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Keep dashboard startup self-contained when cached HTML omits the request
+  helper or that helper fails to load. Preserve compatibility with older
+  cached scripts and refresh the service-worker shell.
 - Speed up Live, Energy and Forecast by refreshing dashboard-only historical
   aggregates on read-only background connections, with a 30-second cache.
   SOC and power remain live; cold snapshots no longer wait for yearly scans.
