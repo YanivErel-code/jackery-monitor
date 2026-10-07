@@ -9,6 +9,13 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Prevent smart-charge startup forecasts from using 50% SOC or a generic
+  capacity when real readings or model metadata are unavailable. Preserve
+  valid zero SOC, require fresh main/pack receipts, and resolve inputs after
+  weather fetching using the same device's saved model when needed.
+- Continue partial smart-charge top-ups during the final hour when predicted
+  sunrise SOC remains below target, including when current SOC is above target.
+
 - Keep dashboard startup self-contained when cached HTML omits the request
   helper or that helper fails to load. Preserve compatibility with older
   cached scripts and refresh the service-worker shell.
@@ -31,6 +38,10 @@ Pre-1.0 means breaking changes can land in any minor.
   snapshots; historical provenance remains unknown.
 
 ### Added
+- Exact smart-charge input snapshots with SOC/source timestamps, capacity,
+  weather through sunrise, model parameters, and baseline forecasts. Bound
+  each snapshot to 128 KiB, expire snapshots after 30 days, and expose them in
+  decision details and the advisor's `query_decision_inputs` tool.
 - Explicit Jackery Home EU sign-in and read-only system discovery for
   HomePower 2000 Ultra accounts (issue #2). Show aggregate SOC, reported total
   capacity and distinct Home power fields; keep missing readings unknown.

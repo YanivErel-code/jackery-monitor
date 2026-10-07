@@ -1089,6 +1089,15 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
             return {"rows": out[:_MAX_TOOL_ROWS], "row_count": len(out),
                     "truncated": len(out) > _MAX_TOOL_ROWS}
 
+        if name == "query_decision_inputs":
+            decided_at = _parse_iso(args.get("decided_at_iso"))
+            if not decided_at:
+                return {"error": "decided_at_iso required (ISO 8601)"}
+            snapshot = state.energy.smart_charge_decision_inputs(device_sn, decided_at)
+            return {"decided_at": _iso(decided_at), "inputs_saved": snapshot is not None,
+                    "input_snapshot": snapshot,
+                    "note": "Exact snapshots are retained for 30 days; legacy inputs are unavailable"}
+
         if name == "query_decisions":
             start = _parse_iso(args.get("start_iso"))
             end = _parse_iso(args.get("end_iso"))

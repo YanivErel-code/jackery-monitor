@@ -1883,6 +1883,104 @@ def _car_load_w(device_sn: str | None) -> float:
         return 1400.0
 
 
+def _smart_charge_inputs(device_sn: str, now: float) -> tuple[dict, str | None]:
+    """Capture one coherent, validated battery snapshot after async input fetches."""
+    cloud = state.last_cloud_meta or {}
+    active = state.device if state.device and state.device.device_sn == device_sn else None
+    meta = next((d for d in cloud.get("devices") or []
+                 if str(d.get("device_sn")) == device_sn), {})
+    def known_model(value):
+        return (isinstance(value, int) and not isinstance(value, bool)
+                and value in forecaster.BATTERY_CAPACITY_WH)
+
+    model = next((m for m in (getattr(active, "model_code", None), meta.get("model_code"))
+                  if known_model(m)), None)
+    if model is None:
+        saved = next((d for d in state.energy.list_devices()
+                      if d.get("device_sn") == device_sn), {})
+        model = saved.get("model_code")
+    entry = (cloud.get("devices_telemetry") or {}).get(device_sn) or {}
+    telemetry = entry.get("telemetry") or (state.last_status if active else None) or {}
+
+    def soc(value):
+        return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                and isfinite(value) and 0 <= value <= 100 else None)
+
+    def fresh(received):
+        return (isinstance(received, (int, float)) and not isinstance(received, bool)
+                and isfinite(received) and received > 0 and -5 <= now - received <= PACK_CACHE_TTL_S)
+
+    def receipt(received):
+        return (float(received) if isinstance(received, (int, float))
+                and not isinstance(received, bool) and isfinite(received) and received > 0 else None)
+
+    def source(value):
+        return value if value in ("mqtt", "http", "ble", "mock") else None
+
+    main_soc = soc(telemetry.get("battery_percent"))
+    main_received = telemetry.get("soc_source_ts")
+    packs = state.battery_packs_by_sn.get(device_sn) or []
+    pack_meta = state.battery_pack_meta_by_sn.get(device_sn) or {}
+    pack_received = pack_meta.get("fetched_at")
+    inputs = {
+        "captured_at": now, "model_code": model,
+        "main_soc_pct": main_soc,
+        "main_soc_source_ts": receipt(main_received),
+        "main_soc_source": source(telemetry.get("soc_source")),
+        "pack_count": len(packs), "pack_soc_pct": [soc(p.get("rb")) for p in packs],
+        "pack_source_ts": receipt(pack_received),
+        "pack_source": source(pack_meta.get("source")),
+        "capacity_wh": None, "system_soc_pct": None,
+    }
+    if not known_model(model):
+        inputs["model_code"] = None
+        return inputs, "awaiting known device model and capacity"
+    if main_soc is None or not fresh(main_received):
+        return inputs, "awaiting valid, fresh main SOC"
+    if pack_meta.get("stale") or pack_meta.get("error") or not fresh(pack_received):
+        return inputs, "awaiting fresh expansion-pack state"
+    if any(value is None for value in inputs["pack_soc_pct"]):
+        return inputs, "awaiting valid expansion-pack SOC"
+    if not packs and state.energy.latest_battery_packs(device_sn):
+        return inputs, "awaiting known expansion-pack state"
+    inputs["capacity_wh"] = _total_capacity_wh(device_sn, model)
+    inputs["system_soc_pct"] = _system_soc_pct(main_soc, device_sn, model)
+    inputs["main_capacity_wh"] = forecaster.battery_capacity_wh(model)
+    inputs["pack_capacity_wh"] = forecaster.expansion_pack_capacity_wh(model)
+    return inputs, None
+
+
+def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
+                                 weather: dict, forecast: dict, plan) -> dict:
+    """Keep bounded planning inputs, excluding credentials and location coordinates."""
+    end = min(plan.sunrise_ts or plan.decided_at + 36 * 3600,
+              plan.decided_at + 36 * 3600) + 3600
+    start = plan.decided_at // 3600 * 3600
+    weather_keys = ("ts", "ghi_w_m2", "cloud_cover_pct")
+    forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w")
+    model_keys = ("solar_coefficient", "fit_samples", "diurnal_shape", "charge_efficiency",
+                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",
+                  "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
+                  "solar_cap_w", "charge_ceiling_pct", "readiness")
+    return {
+        "version": 1, **inputs,
+        "config": {k: cfg.get(k) for k in ("mode", "target_sunrise_soc_pct",
+                                           "max_charge_w", "max_on_duration_minutes")},
+        "cost_plan": {"type": cost_plan.get("type"), "rate_per_kwh": cost_plan.get("rate_per_kwh"),
+                      "tou_rates": [{k: rate.get(k) for k in ("start_hour", "end_hour", "rate", "months")
+                                    if k in rate} for rate in cost_plan.get("tou_rates") or []]},
+        "weather": {"fetched_at": weather.get("fetched_at"),
+                    "stale": bool(weather.get("stale")),
+                    "utc_offset_seconds": weather.get("utc_offset_seconds"),
+                    "hourly": [{k: h.get(k) for k in weather_keys}
+                               for h in weather.get("hourly") or [] if start <= h["ts"] <= end]},
+        "model": {k: forecast.get(k) for k in model_keys if k in forecast},
+        "baseline_forecast": [{k: h.get(k) for k in forecast_keys if k in h}
+                              for h in forecast.get("forecast") or [] if start <= h["ts"] <= end],
+        "planned_hours": plan.planned_hours, "extension_active": plan.extension_active,
+    }
+
+
 async def _smart_charge_evaluate(record: bool = True,
                                  device_sn: str | None = None):
     """Pull the inputs the smart-charge module needs, compute a Plan, and
@@ -1898,25 +1996,6 @@ async def _smart_charge_evaluate(record: bool = True,
     if cfg["mode"] == "off":
         return None
 
-    # Resolve metadata for the target device — fall back to active device's
-    # model_code if we don't have it stored, since the per-device telemetry
-    # cache doesn't carry model_code.
-    active_sn = state.device.device_sn if state.device else None
-    if device_sn == active_sn:
-        model_code = getattr(state.device, "model_code", None)
-        cloud = state.last_cloud_meta or {}
-        devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
-        main_soc = float((state.last_status or {}).get("battery_percent") or 50)
-    else:
-        cloud = state.last_cloud_meta or {}
-        devs = (cloud.get("devices") or []) if isinstance(cloud, dict) else []
-        meta = next((d for d in devs if str(d.get("device_sn")) == device_sn), {})
-        model_code = meta.get("model_code")
-        devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
-        entry = devs_t.get(device_sn) or {}
-        t = entry.get("telemetry") or {}
-        main_soc = float(t.get("battery_percent") or 50)
-
     # Inputs: forecast (uses the same cached weather as the Forecast tab),
     # current SOC, capacity (override-aware), TOU plan, tz offset.
     loc = device_location.get() or {}
@@ -1926,7 +2005,7 @@ async def _smart_charge_evaluate(record: bool = True,
         return smart_charge.compute_plan(
             config=cfg, current_soc_pct=None,
             forecast={"forecast": []}, cost_plan=cost_module.get_plan(),
-            capacity_wh=_total_capacity_wh(device_sn, model_code),
+            capacity_wh=0,
         )
     lat, lon = loc["latitude"], loc["longitude"]
     weather = await weather_client.fetch_irradiance(lat, lon)
@@ -1934,17 +2013,32 @@ async def _smart_charge_evaluate(record: bool = True,
         return None
     if weather.get("error"):
         return None
+    cfg = smart_charge.get_config(device_sn)
+    if cfg["mode"] == "off":
+        return None
+    now = time.time()
+    inputs, unavailable = _smart_charge_inputs(device_sn, now)
+    if unavailable:
+        plan = smart_charge.Plan(action="skip", reason=unavailable, mode=cfg["mode"],
+                                 decided_at=int(now), current_soc_pct=inputs["system_soc_pct"],
+                                 target_sunrise_soc_pct=cfg["target_sunrise_soc_pct"])
+        if record:
+            state.energy.record_smart_charge_decision(
+                device_sn, plan.to_dict(), executed=False,
+                input_snapshot={"version": 1, **inputs, "unavailable_reason": unavailable})
+        return plan
     # If packs are attached, the forecaster needs the system-wide SOC to
     # match the system-wide capacity it'll be paired with.
-    starting_soc = _system_soc_pct(main_soc, device_sn, model_code)
-    main_wh, pack_wh = _capacity_hints(device_sn)
+    starting_soc = inputs["system_soc_pct"]
+    main_wh, pack_wh = inputs["main_capacity_wh"], inputs["pack_capacity_wh"]
     energy_hist = state.energy.history(
         device_sn, hours=14 * 24, bucket_s=3600,
         main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
     )
-    capacity = _total_capacity_wh(device_sn, model_code)
-    pack_count = _pack_count_for(device_sn)
+    capacity = inputs["capacity_wh"]
+    pack_count = inputs["pack_count"]
     tz_off = int(weather.get("utc_offset_seconds") or device_location.get_tz_offset() or 0)
+    inputs["tz_offset_seconds"] = tz_off
     car_load_w = _car_load_w(device_sn)
     fcast = forecaster.build_forecast(
         energy_history=energy_hist,
@@ -1955,6 +2049,7 @@ async def _smart_charge_evaluate(record: bool = True,
         car_load_w=car_load_w,
         pack_count=pack_count,
         utc_offset_seconds=tz_off,
+        now_ts=now,
     )
     # Counterfactual — same forecast computed without the AC charge
     # floor injected. Used by compute_plan to decide if AC is actually
@@ -1969,6 +2064,7 @@ async def _smart_charge_evaluate(record: bool = True,
         car_load_w=car_load_w,
         pack_count=pack_count,
         utc_offset_seconds=tz_off,
+        now_ts=now,
     )
     # If we don't have enough history yet to fit a trustworthy forecast,
     # don't act on it — return a no-op plan so the controller stays in
@@ -1993,13 +2089,16 @@ async def _smart_charge_evaluate(record: bool = True,
             state.energy.record_forecast(device_sn, time.time(), fcast["forecast"])
         except Exception as e:
             log.debug("forecast persist (smart_charge) failed: %s", e)
+    cost_plan = cost_module.get_plan()
     plan = smart_charge.compute_plan(
         config=cfg, current_soc_pct=starting_soc,
         forecast=fcast, baseline_forecast=baseline_fcast,
-        cost_plan=cost_module.get_plan(),
+        cost_plan=cost_plan,
         capacity_wh=capacity,
-        tz_offset_seconds=int(loc.get("utc_offset_seconds") or 0),
+        tz_offset_seconds=tz_off,
+        now_ts=now,
     )
+    input_snapshot = _smart_charge_input_snapshot(inputs, cfg, cost_plan, weather, baseline_fcast, plan)
 
     # Always update the daily sunset/sunrise summary regardless of mode —
     # it's pure data tracking, not a control action.
@@ -2046,6 +2145,7 @@ async def _smart_charge_evaluate(record: bool = True,
                 plan=plan.to_dict() if hasattr(plan, "to_dict") else plan,
                 executed=executed,
                 narration=narration,
+                input_snapshot=input_snapshot,
             )
         except Exception as e:
             log.warning("smart_charge: failed to record decision: %s", e)
@@ -4297,11 +4397,10 @@ def api_smart_charge_decision_details(decided_at: int, device_sn: str | None = N
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         raise HTTPException(400, "no active device")
-    decisions = state.energy.list_smart_charge_decisions(device_sn, limit=200)
-    decision = next((d for d in decisions
-                     if int(d.get("decided_at") or 0) == int(decided_at)), None)
+    decision = state.energy.smart_charge_decision(device_sn, int(decided_at))
     if not decision:
         raise HTTPException(404, "decision not found")
+    input_snapshot = state.energy.smart_charge_decision_inputs(device_sn, int(decided_at))
 
     # Forecast trace from the snapshot taken closest to (and at-or-
     # before) this decision. `record_forecast` floors made_at to the
@@ -4349,6 +4448,15 @@ def api_smart_charge_decision_details(decided_at: int, device_sn: str | None = N
     except Exception as e:
         log.debug("weather lookup failed: %s", e)
 
+    # New ticks keep exact inputs independently of the hourly prediction
+    # table. Legacy rows retain the approximate historical lookup above.
+    if input_snapshot is not None:
+        forecast_made_at = int(input_snapshot.get("captured_at") or decided_at)
+        forecast_trace = [{"made_at": forecast_made_at, "target": h["ts"],
+                           "predicted_soc": h.get("predicted_soc")}
+                          for h in input_snapshot.get("baseline_forecast") or []]
+        weather_obs = (input_snapshot.get("weather") or {}).get("hourly") or []
+
     # Actual SOC trajectory from decided_at through now (or sunrise+1h
     # if past, so the user can see the actual sunrise SOC alongside
     # the predicted one). Use the existing history() helper at 10-min
@@ -4389,6 +4497,8 @@ def api_smart_charge_decision_details(decided_at: int, device_sn: str | None = N
         "weather": weather_obs,
         "samples_trace": samples_trace,
         "resolved_params": resolved_params,
+        "input_snapshot": input_snapshot,
+        "inputs_saved": input_snapshot is not None,
     }
 
 

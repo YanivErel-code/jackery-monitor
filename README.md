@@ -76,13 +76,22 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   minutes, runs a counterfactual forecast (what would SOC do without
   any AC charging?). If the predicted sunrise SOC falls below your
   target, picks the cheapest TOU hours up to sunrise–1h margin, with
-  the deadline anchor mandatory so charging always finishes in time.
-  Locks ON past sunrise if the target hasn't been hit. Re-enters on
-  drift below target. All decisions persisted with predicted-vs-
-  actual analytics. **Backtest button** replays the last N days of
+  the deadline anchor mandatory. During the final hour, continues a
+  partial top-up while the forecast still predicts a sunrise deficit,
+  even if current SOC has reached the target. After sunrise, extends
+  only while current SOC remains below target. Re-enters on drift below
+  target. Missing or stale battery readings skip control instead of
+  substituting 50% SOC or a generic battery capacity. Device metadata
+  can fall back to the same device's persisted catalog model. All decisions
+  are persisted with predicted-vs-actual analytics. **Backtest button** replays the last N days of
   decisions through the current code so behavior changes can be
   validated without waiting for fresh data; supports a `target_override`
   to stress-test the discontinuous-schedule path.
+  Exact decision inputs (SOC and receipt sources, capacity, weather used
+  through sunrise, model parameters, and baseline trace) are saved for
+  30 days and available in decision details and the advisor's
+  `query_decision_inputs` tool. Older decisions remain in history with
+  unknown original inputs. Snapshots omit credentials and location coordinates.
 - **AI advisor** (optional, daily Claude Opus) — diagnoses the residual
   errors in your forecast and smart-charge tracking, proposes config
   tweaks bounded to a safe whitelist, surfaces anomalies. Human approves
