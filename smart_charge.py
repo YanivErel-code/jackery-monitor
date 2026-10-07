@@ -33,9 +33,9 @@ Algorithm:
          right before margin) — the plug toggles between segments.
   4. Decide:
        * if `now_hour ∈ planned_hours` → on
-       * elif now ≥ (sunrise - margin) AND soc < target → on
-         (post-margin extension: we're behind schedule, push past
-          sunrise if needed — Q2 lock-in)
+       * elif now ≥ (sunrise - margin) AND the pre-sunrise forecast
+         still has a deficit → on, including a partial final-hour top-up
+       * after sunrise, extend only while current soc < target
        * else → off
   5. Mid-session check: every tick the baseline forecast is recomputed
      from the *current* SOC. If baseline_predicted_sunrise rises to ≥
@@ -495,7 +495,12 @@ def compute_plan(
         cur += 3600
 
     soc_now = float(current_soc_pct) if current_soc_pct is not None else 0.0
-    extension_active = now >= margin_end_ts and soc_now < target
+    # The goal is SOC at sunrise, so hitting target *now* is not enough
+    # while the remaining dark interval is forecast to drain below it.
+    # Baseline >= target already returned above. After sunrise preserve
+    # the existing current-SOC extension rule instead of chasing a past
+    # forecast deficit.
+    extension_active = now >= margin_end_ts and (now < sunrise_ts or soc_now < target)
 
     if not candidates and not extension_active:
         return Plan(action="off", reason="not enough time before sunrise",
@@ -572,9 +577,11 @@ def compute_plan(
     if extension_active:
         return Plan(
             action="on",
-            reason=(f"extension: past margin (sunrise-{SUNRISE_MARGIN_S // 3600}h) "
-                    f"and SOC {soc_now:.0f}% < target {target:.0f}% — charging "
-                    f"until target hit"),
+            reason=(f"extension: baseline sunrise SOC {baseline_predicted:.1f}% "
+                    f"< target {target:.0f}% — topping up before sunrise"
+                    if now < sunrise_ts else
+                    f"extension: SOC {soc_now:.1f}% < target {target:.0f}% "
+                    "— charging until target hit"),
             mode=mode, decided_at=now,
             current_soc_pct=soc_now,
             predicted_sunrise_soc_pct=predicted,

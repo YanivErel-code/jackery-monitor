@@ -356,6 +356,22 @@ QUERY_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "query_decision_inputs",
+        "description": (
+            "Exact saved inputs for one smart-charge decision: main/system SOC, "
+            "model/capacity, expansion-pack SOC, receipt timestamps/sources, weather "
+            "forecast used through sunrise, fitted model parameters and baseline "
+            "hourly forecast. Use after query_decisions to investigate a jump or "
+            "boundary. Only new decisions within 30 days have snapshots; never "
+            "substitute current settings or weather for unavailable historical inputs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"decided_at_iso": {"type": "string"}},
+            "required": ["decided_at_iso"],
+        },
+    },
+    {
         "name": "query_decisions",
         "description": (
             "Smart-charge decision history joined to actual sunrise SOC. "

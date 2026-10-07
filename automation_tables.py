@@ -14,7 +14,11 @@ Splitting it out shrinks energy_db.py without changing the API.
 
 from __future__ import annotations
 
+import json
+import logging
 import time
+
+log = logging.getLogger("automation_tables")
 
 
 class AutomationTablesMixin:
@@ -23,12 +27,24 @@ class AutomationTablesMixin:
     # ---------- smart-charge decisions ----------
     def record_smart_charge_decision(self, device_sn: str, plan: dict,
                                      executed: bool,
-                                     narration: str = "") -> None:
+                                     narration: str = "", *,
+                                     input_snapshot: dict | None = None) -> None:
         """Persist one tick's worth of smart-charge decision. Idempotent on
         (decided_at, device_sn) — safe if the periodic tick fires twice
         in the same second."""
         if not device_sn or not plan:
             return
+        snapshot_json = None
+        if input_snapshot is not None:
+            try:
+                snapshot_json = json.dumps(input_snapshot, separators=(",", ":"), allow_nan=False)
+                if len(snapshot_json.encode()) > 128 * 1024:
+                    raise ValueError("snapshot exceeds 128 KiB")
+            except (TypeError, ValueError):
+                # Diagnostic failure must not erase an otherwise valid
+                # decision, including its physical-action audit flag.
+                snapshot_json = None
+                log.warning("smart-charge input snapshot invalid or oversized; decision retained")
         row = (
             int(plan.get("decided_at") or time.time()),
             device_sn,
@@ -46,6 +62,7 @@ class AutomationTablesMixin:
             plan.get("cheapest_rate"),
             (narration or "")[:512],
             plan.get("baseline_predicted_sunrise_soc_pct"),
+            snapshot_json,
         )
         with self._conn() as c:
             c.execute(
@@ -54,10 +71,40 @@ class AutomationTablesMixin:
                         current_soc_pct, predicted_sunrise_soc_pct,
                         target_sunrise_soc_pct, deficit_kwh,
                         window_start, window_end, sunrise_ts, cheapest_rate,
-                        narration, baseline_predicted_sunrise_soc_pct)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        narration, baseline_predicted_sunrise_soc_pct, input_snapshot_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 row,
             )
+            # Bound diagnostic growth without discarding decision history.
+            # The partial index keeps this scan off old NULL snapshots.
+            now = time.time()
+            prune = now - getattr(self, "_last_smart_input_prune", 0) >= 86400
+            if prune:
+                c.execute("UPDATE smart_charge_decisions SET input_snapshot_json=NULL "
+                          "WHERE decided_at < ? AND input_snapshot_json IS NOT NULL",
+                          (int(now) - 30 * 86400,))
+        if prune:
+            self._last_smart_input_prune = now
+
+    def smart_charge_decision_inputs(self, device_sn: str, decided_at: int) -> dict | None:
+        """Exact inputs for one device/tick; legacy or expired snapshots are unknown."""
+        with self._conn() as c:
+            row = c.execute("SELECT input_snapshot_json FROM smart_charge_decisions "
+                            "WHERE device_sn=? AND decided_at=?",
+                            (device_sn, int(decided_at))).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+
+    def smart_charge_decision(self, device_sn: str, decided_at: int) -> dict | None:
+        """Retrieve a device-scoped historical tick without a latest-N cutoff."""
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM smart_charge_decisions WHERE device_sn=? AND decided_at=?",
+                            (device_sn, int(decided_at))).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result.pop("input_snapshot_json", None)
+        result["executed"] = bool(result["executed"])
+        return result
 
     def list_smart_charge_decisions(self, device_sn: str | None = None,
                                     limit: int = 100,

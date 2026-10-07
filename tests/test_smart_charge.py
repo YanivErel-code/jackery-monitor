@@ -387,9 +387,12 @@ def test_post_margin_extension_keeps_charging(tmp_path, monkeypatch):
     assert "extension" in plan.reason
 
 
-def test_post_margin_target_hit_releases(tmp_path, monkeypatch):
-    """Past the margin AND SOC has hit target → off. Extension only
-    fires while SOC < target."""
+def test_post_margin_current_target_does_not_mask_sunrise_deficit(tmp_path, monkeypatch):
+    """Current SOC above target must not mask the remaining sunrise deficit.
+
+    This used to return OFF until current SOC fell below target, wasting
+    the first part of the final hour despite a predicted sunrise deficit.
+    """
     sc = _fresh(monkeypatch, tmp_path)
     base = 1_700_000_000 - (1_700_000_000 % 3600)
     fc = []
@@ -406,8 +409,48 @@ def test_post_margin_target_hit_releases(tmp_path, monkeypatch):
         cost_plan=_flat_plan(0.30), capacity_wh=5040,
         now_ts=base + 3 * 3600 + 1800,
     )
-    assert plan.action == "off"
-    assert plan.extension_active is False
+    assert plan.action == "on"
+    assert plan.extension_active is True
+
+
+@pytest.mark.parametrize("minutes,soc,predicted", [
+    (2, 32.6667, 29.7), (7, 32.3333, 29.8),
+    (12, 32.1667, 29.8), (17, 32.1667, 30.1),
+])
+def test_october_sunrise_boundary_top_up(tmp_path, monkeypatch, minutes, soc, predicted):
+    sc = _fresh(monkeypatch, tmp_path)
+    sunrise = 1_791_295_200  # 2026-10-06 14:00 UTC
+    forecast = {"forecast": [
+        {"ts": sunrise, "duration_h": 1, "solar_w": 0,
+         "load_w": 550, "predicted_soc": predicted},
+        {"ts": sunrise + 3600, "duration_h": 1, "solar_w": 200,
+         "load_w": 550, "predicted_soc": predicted},
+    ]}
+    plan = sc.compute_plan(
+        config={"mode": "test", "target_sunrise_soc_pct": 32, "max_charge_w": 1400},
+        current_soc_pct=soc, forecast=forecast, baseline_forecast=forecast,
+        cost_plan=_flat_plan(0.25), capacity_wh=30240,
+        now_ts=sunrise - 3600 + minutes * 60,
+    )
+    assert plan.action == "on"
+    assert plan.extension_active
+
+
+@pytest.mark.parametrize("current_soc,action", [(33, "off"), (31, "on")])
+def test_after_sunrise_extension_uses_current_soc(tmp_path, monkeypatch, current_soc, action):
+    sc = _fresh(monkeypatch, tmp_path)
+    sunrise = 1_791_295_200
+    forecast = {"forecast": [
+        {"ts": sunrise, "duration_h": 1, "solar_w": 0, "predicted_soc": 30},
+        {"ts": sunrise + 3600, "duration_h": 1, "solar_w": 100, "predicted_soc": 30},
+    ]}
+    plan = sc.compute_plan(
+        config={"mode": "test", "target_sunrise_soc_pct": 32},
+        current_soc_pct=current_soc, forecast=forecast, cost_plan=_flat_plan(),
+        capacity_wh=30240, now_ts=sunrise + 60,
+    )
+    assert plan.action == action
+    assert plan.extension_active is (action == "on")
 
 
 def test_counterfactual_releases_lock_when_baseline_recovers(tmp_path, monkeypatch):

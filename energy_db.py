@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS smart_charge_decisions (
     cheapest_rate             REAL,
     narration                 TEXT,
     baseline_predicted_sunrise_soc_pct REAL,
+    input_snapshot_json TEXT,         -- exact tick inputs, retained for 30 days
     PRIMARY KEY (decided_at, device_sn)
 );
 CREATE INDEX IF NOT EXISTS idx_sc_decided ON smart_charge_decisions(decided_at);
@@ -472,6 +473,10 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                     "ALTER TABLE smart_charge_decisions "
                     "ADD COLUMN baseline_predicted_sunrise_soc_pct REAL"
                 )
+            if "input_snapshot_json" not in existing_sc:
+                c.execute("ALTER TABLE smart_charge_decisions ADD COLUMN input_snapshot_json TEXT")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_sc_input_retention "
+                      "ON smart_charge_decisions(decided_at) WHERE input_snapshot_json IS NOT NULL")
             # daily_solar_summary: predictions_made_at tracks when the row's
             # predicted_* values were last written (NOT bumped by backfill of
             # actual_*). Used by the Forecast tab to filter the headline
