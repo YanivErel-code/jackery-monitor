@@ -87,6 +87,9 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   decisions through the current code so behavior changes can be
   validated without waiting for fresh data; supports a `target_override`
   to stress-test the discontinuous-schedule path.
+  Active mode warns about enabled battery rules controlling the same plug.
+  **Disable them** pauses those rules, refreshes their switches, and confirms
+  success; it does not turn the plug on or off.
   Exact decision inputs (SOC and receipt sources, capacity, weather used
   through sunrise, model parameters, and baseline trace) are saved for
   30 days and available in decision details and the advisor's

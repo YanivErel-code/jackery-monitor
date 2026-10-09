@@ -9,6 +9,8 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Refresh automation-rule switches after smart-charge's "Disable them"
+  action, confirm success, and restore the button for future conflicts.
 - Prevent smart-charge startup forecasts from using 50% SOC or a generic
   capacity when real readings or model metadata are unavailable. Preserve
   valid zero SOC, require fresh main/pack receipts, and resolve inputs after

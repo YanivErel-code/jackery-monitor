@@ -3267,17 +3267,21 @@ document.getElementById('sc-conflict-disable')?.addEventListener('click', async 
       body: JSON.stringify({ rule_ids: ids }),
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    // Reload the smart-charge panel so the banner clears + rule list
-    // reflects the new disabled state.
-    await loadSmartCharge();
+    await Promise.all([loadSmartCharge(), loadRules()]);
+    const status = $('sc-status');
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Conflicting rules disabled.';
+    }
   } catch (err) {
-    btn.disabled = false;
-    btn.textContent = 'Disable them';
     const status = $('sc-status');
     if (status) {
       status.hidden = false;
       status.textContent = `Disable failed: ${err.message || err}`;
     }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Disable them';
   }
 });
 
