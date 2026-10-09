@@ -234,6 +234,40 @@ class AutomationTablesMixin:
             ).fetchone()
         return float(r[0] if r else 0.0)
 
+    def control_history(self, device_sn: str, start_ts: int, end_ts: int,
+                        limit: int = 500) -> dict:
+        """Device-scoped control evidence, bounded before each stream's row cap."""
+        streams = (
+            ("smart_charge", "smart_charge_decisions", "device_sn", "decided_at",
+             "decided_at, mode, action, executed, reason, current_soc_pct, "
+             "predicted_sunrise_soc_pct, target_sunrise_soc_pct, sunrise_ts"),
+            ("solar_charge", "solar_charge_decisions", "device_sn", "decided_at",
+             "decided_at, mode, action, executed, reason, current_soc_pct, "
+             "solar_w, load_w, surplus_w, plug_state_before"),
+            ("automation_firings", "automation_firings", "jackery_sn", "fired_at",
+             "id, fired_at, rule_id, rule_name, action, kasa_host, jackery_sn, "
+             "soc_at_fire, trigger, operator, threshold"),
+        )
+        result = {}
+        with self._conn() as connection:
+            for key, table, device_column, time_column, columns in streams:
+                where = f"{device_column}=? AND {time_column}>=? AND {time_column}<?"
+                params = (device_sn, int(start_ts), int(end_ts))
+                count = connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {where}", params,
+                ).fetchone()[0]
+                order = f"{time_column}, id" if key == "automation_firings" else time_column
+                rows = [dict(row) for row in connection.execute(
+                    f"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order} LIMIT ?",
+                    (*params, max(1, int(limit))),
+                )]
+                for row in rows:
+                    if "executed" in row:
+                        row["executed"] = bool(row["executed"])
+                result[key] = {"rows": rows, "row_count": count,
+                               "returned_rows": len(rows), "truncated": count > len(rows)}
+        return result
+
     def smart_charge_analytics(self, device_sn: str,
                                days: int = 14,
                                main_capacity_wh: int | None = None,

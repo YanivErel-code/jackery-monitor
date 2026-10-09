@@ -303,7 +303,24 @@ reviews:
 - Last 24h hourly weather (GHI, cloud cover)
 - Last 48h predicted-vs-actual SOC pairs
 - Last 7d smart-charge decisions joined to the actual sunrise SOC
+- Last 48h independent control history: smart-charge and solar-charge
+  decisions, including balance holds, plus automation and rescue firings
 - Current per-device smart-charge config
+- Current solar-charge mode and balance settings
+
+The advisor can query specific control windows with `query_control_history`
+and simultaneous pack readings with `query_battery_pack_history`. Both tools
+filter by device and time before limiting results, and report truncation so
+the advisor can narrow its query. Pack history keeps every pack in a snapshot
+together and includes HTTP/MQTT receipt provenance; receipt freshness does
+not establish when the device measured SOC or whether that reading is correct.
+
+Smart-charge test mode records decisions without toggling the grid plug;
+independent rescue and automation rules can still charge. Balance holds keep
+solar diversion off, including already-off decisions that need no new toggle.
+The advisor correlates these records with measured AC input before attributing
+forecast misses or recommending changes. It treats unresolved SOC/power
+discontinuities separately from model bias and avoids tuning drain from them.
 
 …and proposes specific config tweaks bound to a whitelist of safe
 parameters (`max_charge_w`, `target_sunrise_soc_pct`,

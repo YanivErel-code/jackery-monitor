@@ -38,6 +38,11 @@ Pre-1.0 means breaking changes can land in any minor.
   snapshots; historical provenance remains unknown.
 
 ### Added
+- Advisor control-history queries and a bounded 48-hour preview covering
+  smart-charge execution, solar-charge balance holds, and independent
+  automation/rescue firings. Add simultaneous pack history with preserved
+  HTTP/MQTT receipt provenance and explicit truncation. Guide reviews to
+  distinguish measurement discontinuities, test decisions and actual AC input.
 - Exact smart-charge input snapshots with SOC/source timestamps, capacity,
   weather through sunrise, model parameters, and baseline forecasts. Bound
   each snapshot to 128 KiB, expire snapshots after 30 days, and expose them in

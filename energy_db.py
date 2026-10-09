@@ -947,6 +947,33 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             "latest_ts": int(row[3]) if row[3] is not None else None,
         }
 
+    def battery_pack_history(self, parent_sn: str, start_ts: int, end_ts: int,
+                             limit: int = 500) -> dict:
+        """Keep all packs together; the cap counts simultaneous snapshots."""
+        params = (parent_sn, int(start_ts), int(end_ts))
+        with self._conn() as connection:
+            count = connection.execute(
+                "SELECT COUNT(DISTINCT ts) FROM battery_packs "
+                "WHERE parent_sn=? AND ts>=? AND ts<?", params,
+            ).fetchone()[0]
+            rows = connection.execute(
+                "SELECT ts, pack_sn, device_order, soc_pct, input_w, output_w, "
+                "error_code, source_ts, source FROM battery_packs "
+                "WHERE parent_sn=? AND ts IN ("
+                "SELECT DISTINCT ts FROM battery_packs "
+                "WHERE parent_sn=? AND ts>=? AND ts<? ORDER BY ts LIMIT ?) "
+                "ORDER BY ts, device_order, pack_sn",
+                (parent_sn, *params, max(1, int(limit))),
+            ).fetchall()
+        snapshots = {}
+        for row in rows:
+            pack = dict(row)
+            timestamp = pack.pop("ts")
+            snapshots.setdefault(timestamp, {"ts": timestamp, "packs": []})["packs"].append(pack)
+        result = list(snapshots.values())
+        return {"rows": result, "row_count": count,
+                "returned_rows": len(result), "truncated": count > len(result)}
+
     def latest_battery_packs(self, parent_sn: str) -> list[dict]:
         """Most recent snapshot of all packs for a given main device. Returns
         rows ordered by device_order so the UI renders them in app order."""

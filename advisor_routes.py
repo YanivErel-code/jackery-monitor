@@ -254,6 +254,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
                 "decided_iso": _iso(d.get("decided_at")),
                 "action": d.get("action"),
                 "mode": d.get("mode"),
+                "executed": d.get("executed"),
                 "predicted_sunrise_soc_pct": d.get("predicted_sunrise_soc_pct"),
                 "baseline_predicted_sunrise_soc_pct": d.get("baseline_predicted_sunrise_soc_pct"),
                 "actual_sunrise_soc_pct": d.get("actual_sunrise_soc_pct"),
@@ -262,6 +263,20 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
             })
     except Exception as e:
         log.debug("advisor: decisions bundle failed: %s", e)
+
+    recent_control_history = {}
+    try:
+        now = int(time.time())
+        recent_control_history = state.energy.control_history(
+            device_sn, now - 48 * 3600, now + 1, limit=20,
+        )
+        for stream in recent_control_history.values():
+            for row in stream["rows"]:
+                for key in ("decided_at", "fired_at", "sunrise_ts"):
+                    if key in row:
+                        row[key] = _iso(row[key]) if row[key] is not None else None
+    except Exception as e:
+        log.debug("advisor: control history bundle failed: %s", e)
 
     return {
         "window_label": f"last 48h ending {datetime.now().isoformat(timespec='minutes')}",
@@ -272,6 +287,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         "main_soc_pct": main_soc,
         "system_soc_pct": round(sys_soc, 1) if sys_soc is not None else None,
         "smart_charge_config": cfg,
+        "solar_charge_config": solar_charge.get_config(device_sn),
         "balance_spread_trigger_pp": solar_charge.get_config(device_sn).get(
             "balance_spread_trigger_pp"),
         # Hybrid drain model: surface both terms so the advisor can
@@ -321,6 +337,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         "recent_weather": recent_weather,
         "recent_predictions": recent_predictions,
         "recent_decisions": recent_decisions,
+        "recent_control_history": recent_control_history,
         # Hand-maintained list of recent fixes that change the meaning of
         # historical data. The advisor sees a 48h window, so every fix
         # less than 48h old has stale data on both sides of it; without
@@ -987,6 +1004,42 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
     async def query(name: str, args: dict) -> dict:
         if helpers.is_read_only(device_sn):
             return {"error": "Device supports monitoring only; portable advisor tools are unavailable"}
+        if name in ("query_control_history", "query_battery_pack_history"):
+            start = _parse_iso(args.get("start_iso"))
+            end = _parse_iso(args.get("end_iso"))
+            if start is None or end is None:
+                return {"error": "start_iso/end_iso required (ISO 8601)"}
+            if end <= start:
+                return {"error": "end_iso must be after start_iso"}
+            if end - start > _MAX_LOOKBACK_HOURS * 3600:
+                return {"error": "window must be at most 45 days; query a smaller interval"}
+            if name == "query_control_history":
+                result = state.energy.control_history(device_sn, start, end, limit=_MAX_TOOL_ROWS)
+                for stream in result.values():
+                    for row in stream["rows"]:
+                        for key in ("decided_at", "fired_at", "sunrise_ts"):
+                            if key in row:
+                                row[key] = _iso(row[key])
+                result["note"] = (
+                    "Smart-charge test decisions do not execute. Rescue watchdog and automation "
+                    "rules run independently. executed records successful controller toggles; "
+                    "a solar skip with plug_state_before=off can confirm a balance hold. "
+                    "Correlate actions with measured AC input; missing firings do not prove "
+                    "there was no manual or external intervention. Rescue soc_at_fire is main SOC."
+                )
+            else:
+                result = state.energy.battery_pack_history(device_sn, start, end, limit=_MAX_TOOL_ROWS)
+                for snapshot in result["rows"]:
+                    snapshot["ts"] = _iso(snapshot["ts"])
+                    for pack in snapshot["packs"]:
+                        pack["source_ts"] = _iso(pack["source_ts"])
+                result["note"] = (
+                    "Rows are simultaneous saved pack snapshots; the row cap counts snapshots, "
+                    "not individual packs. source_ts is a bridge receipt timestamp, not a "
+                    "device measurement timestamp. Unknown historical provenance remains null. "
+                    "Match packs by pack_sn; device_order can differ between HTTP and MQTT."
+                )
+            return {**result, "window_start": _iso(start), "window_end": _iso(end)}
         if name == "query_samples":
             start = _parse_iso(args.get("start_iso"))
             end = _parse_iso(args.get("end_iso"))
@@ -1116,6 +1169,7 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                     "decided_at": _iso(d.get("decided_at")),
                     "action": d.get("action"),
                     "mode": d.get("mode"),
+                    "executed": d.get("executed"),
                     "predicted_sunrise_soc_pct": d.get("predicted_sunrise_soc_pct"),
                     "actual_sunrise_soc_pct": d.get("actual_sunrise_soc_pct"),
                     "target_sunrise_soc_pct": d.get("target_sunrise_soc_pct"),

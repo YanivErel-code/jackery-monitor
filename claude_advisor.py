@@ -188,6 +188,14 @@ def _format_starter_bundle(bundle: dict) -> str:
                      f"{bundle['balance_spread_trigger_pp']}")
     lines.append("")
 
+    solar_cfg = bundle.get("solar_charge_config") or {}
+    if solar_cfg:
+        lines.append("## Current solar-charge config")
+        for key in ("mode", "balance_spread_trigger_pp", "balance_every_days",
+                    "balance_target_main_pct", "balance_max_window_days"):
+            lines.append(f"- {key}: {solar_cfg.get(key)}")
+        lines.append("")
+
     parasitic_w = bundle.get("fitted_parasitic_w")
     overhead_pct = bundle.get("fitted_inverter_overhead_pct")
     drain_n = bundle.get("fitted_drain_n_windows", 0)
@@ -243,11 +251,25 @@ def _format_starter_bundle(bundle: dict) -> str:
             lines.append(
                 f"- {d.get('decided_iso')} {d.get('action', '?').upper()} "
                 f"[{d.get('mode')}] "
+                f"executed={d.get('executed', 'unknown')} "
                 f"pred_sunrise={d.get('predicted_sunrise_soc_pct')}% → "
                 f"actual={d.get('actual_sunrise_soc_pct')}% "
                 f"target={d.get('target_sunrise_soc_pct')}% "
                 f"reason: {d.get('reason')}"
             )
+        lines.append("")
+
+    control_history = bundle.get("recent_control_history") or {}
+    if control_history:
+        lines.append("## Independent control history (last 48h)")
+        lines.append("Smart-charge test mode does not disable rescue or automation rules. "
+                     "This is a bounded preview; query_control_history can drill into "
+                     "truncated streams. Missing entries do not prove no intervention.")
+        for key, stream in control_history.items():
+            lines.append(f"### {key}: {stream['returned_rows']}/{stream['row_count']} rows, "
+                         f"truncated={stream['truncated']}")
+            for row in stream["rows"]:
+                lines.append(json.dumps(row, separators=(",", ":")))
         lines.append("")
 
     lines.append("## Your tools")
@@ -260,6 +282,10 @@ def _format_starter_bundle(bundle: dict) -> str:
     lines.append("- query_samples on overnight windows where SOC drained "
                  "(use bucket_s=300 for 5-min, 60 for 1-min)")
     lines.append("- query_weather to correlate solar misses with cloud cover")
+    lines.append("- query_control_history around AC input or pack-balance triggers "
+                 "to identify smart-charge, solar-charge, rescue and automation responses")
+    lines.append("- query_battery_pack_history around SOC/power mismatches to compare "
+                 "simultaneous pack readings and HTTP/MQTT receipt provenance")
 
     return "\n".join(lines)
 
@@ -282,6 +308,18 @@ def _system_prompt() -> str:
         " - Reconcile SOC drain with reported power. SOC change x capacity "
         "should match the integrated power delta. Big mismatches = "
         "measurement gap (inverter overhead, SOC drift, unmeasured loads).\n"
+        " - For a large SOC/power mismatch, inspect query_decision_inputs and "
+        "query_battery_pack_history. Receipt freshness does not establish "
+        "measurement correctness. Check whether the decline continues within "
+        "one source and whether later HTTP/MQTT readings agree; do not assume "
+        "a source switch caused it. Treat an unresolved measurement discontinuity "
+        "separately from forecast bias and do not tune drain from that interval.\n"
+        " - Before attributing AC input or a target miss to smart-charge, use "
+        "query_control_history. Test ON decisions do not execute; independent "
+        "rescue and automation rules can still charge. Correlate firings with "
+        "measured AC input. Account for intervention energy when comparing to "
+        "a no-intervention forecast. Missing audit entries leave the initiating "
+        "path unknown rather than proving no intervention.\n"
         " - Open-Meteo hourly GHI at timestamp T is the mean for (T-1h,T], "
         "while query_samples buckets start at T. Compare GHI at T with "
         "on-site solar in the PRECEDING hour. Cloud cover is an "
@@ -292,6 +330,10 @@ def _system_prompt() -> str:
         "is normal monitoring context, not an anomaly. Flag a spread only "
         "when it reaches the trigger, worsens substantially, or comes "
         "with pack errors.\n"
+        " - When pack spread reaches the trigger, query_control_history for "
+        "the solar-charge response. An already-off skip with a balance reason "
+        "can confirm diversion was held off without a new executed toggle. "
+        "A balance hold stops diversion; it does not itself switch grid charging on.\n"
         "\n"
         "Hard rules for output:\n"
         " - Only suggest changes to parameters in the submit tool's enum. "
@@ -385,6 +427,35 @@ QUERY_TOOLS: list[dict] = [
                 "start_iso": {"type": "string"},
                 "end_iso": {"type": "string"},
             },
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "query_control_history",
+        "description": (
+            "Device-scoped smart-charge and solar-charge decisions, plus independent "
+            "automation/rescue firings, in [start_iso,end_iso). Includes mode, action, "
+            "executed, reason, plug state and rule details. Each stream has its own "
+            "row_count, returned_rows and truncated flag; narrow truncated windows. "
+            "Returns live decisions even before sunrise actuals exist. Maximum window: 45 days."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"start_iso": {"type": "string"}, "end_iso": {"type": "string"}},
+            "required": ["start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "query_battery_pack_history",
+        "description": (
+            "Simultaneous historical expansion-pack snapshots in [start_iso,end_iso). "
+            "Each snapshot has ts and packs with pack_sn, SOC, input/output W, error "
+            "code and source receipt timestamp/source. Match packs by serial, not order. "
+            "Counts and truncation refer to complete snapshots. Maximum window: 45 days."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"start_iso": {"type": "string"}, "end_iso": {"type": "string"}},
             "required": ["start_iso", "end_iso"],
         },
     },
