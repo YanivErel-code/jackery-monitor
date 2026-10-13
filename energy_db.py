@@ -1448,7 +1448,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
     def history(self, device_sn: str, hours: int = 24,
                 bucket_s: int = 600,
                 main_capacity_wh: int | None = None,
-                pack_capacity_wh: int | None = None) -> list[dict]:
+                pack_capacity_wh: int | None = None, *,
+                include_calibration: bool = False,
+                until_ts: float | None = None) -> list[dict]:
         """Time-bucketed history. bucket_s controls aggregation granularity:
            600 (10min) for 24h view, 3600 (1h) for 7d, 86400 (1d) for 30d.
 
@@ -1465,9 +1467,17 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         `battery_pct`. With `system_soc` available they walk that
         instead. Single-unit devices and back-compat callers (no
         capacity hints) keep the prior behavior; `system_soc` is
-        omitted from those rows."""
-        since = int(time.time()) - hours * 3600
+        omitted from those rows.
+
+        include_calibration annotates hourly rows using receipt-aware
+        minute energy and synchronized pack snapshots. until_ts bounds
+        all evidence for causal replay; incomplete hours cannot train loads.
+        """
+        as_of = int(time.time() if until_ts is None else until_ts)
+        since = as_of - hours * 3600
+        upper_bound = as_of if include_calibration or until_ts is not None else 2**63 - 1
         bucket_s = max(BUCKET_S, int(bucket_s))
+        calibration = {}
         with self._conn() as c:
             rows = c.execute(
                 """SELECT (bucket / ?) * ? AS b,
@@ -1483,12 +1493,13 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                            AVG(last_battery_pct) AS bat,
                            MIN(last_soc_source_ts) AS soc_source_min,
                            MAX(last_soc_source_ts) AS soc_source_max,
-                           COUNT(last_soc_source_ts) AS soc_source_known
+                           COUNT(last_soc_source_ts) AS soc_source_known,
+                           COUNT(*) AS minute_count
                     FROM samples
-                    WHERE device_sn = ? AND bucket >= ?
+                    WHERE device_sn = ? AND bucket >= ? AND bucket < ?
                     GROUP BY b
                     ORDER BY b""",
-                (bucket_s, bucket_s, device_sn, since),
+                (bucket_s, bucket_s, device_sn, since, upper_bound),
             ).fetchall()
             # Bulk-fetch pack snapshots covering the bucket range when
             # capacity hints permit a system-SOC computation. The same
@@ -1497,17 +1508,34 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             ts_sorted: list[int] = []
             if main_capacity_wh and pack_capacity_wh and rows:
                 ts_min = rows[0][0] - 1800
-                ts_max = rows[-1][0] + 1800
+                ts_max = as_of if include_calibration else min(rows[-1][0] + 1800, upper_bound)
                 pack_rows = c.execute(
-                    """SELECT ts, soc_pct FROM battery_packs
+                    """SELECT ts, soc_pct, pack_sn, source_ts, source, error_code FROM battery_packs
                         WHERE parent_sn = ?
-                          AND ts >= ? AND ts < ?
-                          AND soc_pct IS NOT NULL""",
+                          AND ts >= ? AND ts < ?""",
                     (device_sn, ts_min, ts_max),
                 ).fetchall()
-                for ts, soc in pack_rows:
-                    packs_by_ts.setdefault(int(ts), []).append(float(soc))
+                for ts, soc, *_metadata in pack_rows:
+                    if soc is not None:
+                        packs_by_ts.setdefault(int(ts), []).append(float(soc))
                 ts_sorted = sorted(packs_by_ts)
+                if include_calibration and bucket_s == 3600:
+                    from forecast_calibration import build_discharge_intervals
+
+                    sample_rows = c.execute(
+                        """SELECT bucket, output_wh, solar_wh, ac_input_wh,
+                                  last_battery_pct, last_soc_source_ts, last_soc_source
+                             FROM samples WHERE device_sn=? AND bucket>=? AND bucket<?
+                             ORDER BY bucket""",
+                        (device_sn, rows[0][0] - 300, as_of),
+                    ).fetchall()
+                    calibration = build_discharge_intervals(
+                        sample_rows,
+                        [(record[0], record[2], record[1], *record[3:]) for record in pack_rows],
+                        main_capacity_wh=main_capacity_wh,
+                        pack_capacity_wh=pack_capacity_wh,
+                        since_ts=rows[0][0], until_ts=as_of,
+                    )
             # Per-bucket fraction of time the solar-charge plug was ON,
             # from the controller's decision log. This is the RELIABLE
             # diversion signal — emeter-independent — used by the
@@ -1525,9 +1553,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                                    THEN 1 ELSE 0 END) AS on_n,
                           COUNT(*) AS tot_n
                    FROM solar_charge_decisions
-                   WHERE device_sn = ? AND decided_at >= ?
+                   WHERE device_sn = ? AND decided_at >= ? AND decided_at < ?
                    GROUP BY b""",
-                (bucket_s, bucket_s, device_sn, since),
+                (bucket_s, bucket_s, device_sn, since, upper_bound),
             ).fetchall()
             plug_on_frac = {int(b): on_n / tot_n
                             for b, on_n, tot_n in plug_on_rows if tot_n}
@@ -1558,6 +1586,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 frac = plug_on_frac.get(int(r[0]))
                 if frac is not None:
                     row["solar_charge_plug_on_frac"] = frac
+            if include_calibration and bucket_s == 3600:
+                row["calibration"] = calibration.get(int(r[0]))
+                row["history_complete"] = r[14] >= 55 and int(r[0]) + 3600 <= as_of
             out.append(row)
         return out
 

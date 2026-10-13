@@ -128,6 +128,50 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
 
 ---
 
+## Forecast calibration safeguards
+
+The original physical drain fit still requires near-full SOC (85% or higher).
+Systems that never reach that level can additionally learn an **empirical SOC
+drain correction**, rather than pretending their unmeasured losses are known.
+This does not validate the BMS or identify individual pack/inverter losses.
+
+- Learn only from complete, uncharged, dark-hour intervals with fresh,
+  synchronized main/pack receipts and unchanged pack identity/capacity.
+- Reject energy-inconsistent SOC jumps, stale readings, gaps, and pack errors.
+- Require at least three independent nights with four-hour evidence inside
+  the same SOC range. Overlapping windows and midnight crossings do not
+  count as extra nights. Use an upper-quartile baseline plus a half-SOC-point
+  endpoint-uncertainty allowance; retain priors if evidence is inconsistent.
+- Apply the correction only in dark hours while the **entire projected hour**
+  stays in its validated SOC range. Outside it, during solar charging, or when
+  evidence ages out, retain the conservative legacy model. Diversion lookahead
+  includes those fallback transitions.
+- Load learning follows a sustained shift on multiple recent days, not one
+  transient load spike. Future/incomplete hours cannot become training data.
+
+Forecasts and saved smart-charge input snapshots expose `drain_calibration`,
+including SOC bands, independent-night count, and newest evidence timestamp.
+`pack_baseline_w` remains a legacy prior, not a measured per-pack loss;
+`pack_baseline_applied_w` is null when a combined empirical model is available.
+Charging targets, power limits, and controller modes are not retuned by this.
+
+Validation on 2026-10-13 uses a read-only NAS extract and as-of-only local replay.
+On two uncharged holdout nights, the legacy replay matched the saved predictions:
+October 11 improved from 34.7% to 40.4% versus 41.33% actual; October 13 improved
+from 35.2% to 40.7% versus 41.79% actual. These are limited replay results, not a
+live-performance guarantee. Charging and the October 8 SOC discontinuity
+intervals are rejected for calibration; charged outcomes are not used to claim
+baseline forecast accuracy. Earlier replays have incomplete lookback and do
+not exactly reproduce their saved predictions. Replay is offline validation,
+not evidence of live deployment or a reason to retune controller settings.
+
+Self-review covers pack/configuration matching, source freshness, causal
+training cutoffs, independent-night counting, band-exit/diversion safety, and
+legacy fallback. Strict type checking and Bandit pass for the new calibration
+core. Whole touched-file scanning also reports existing parameterized-SQL
+false positives, expected container-interface binding, and old exception
+handlers; none are introduced by this change. No runtime dependency is added.
+
 ## Architecture
 
 ```

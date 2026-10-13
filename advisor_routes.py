@@ -107,6 +107,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
     fitted_parasitic_w: float | None = None
     fitted_overhead_pct: float | None = None
     fitted_drain_n: int = 0
+    drain_calibration = None
     main_wh = forecaster.battery_capacity_wh(model_code)
     pack_wh = forecaster.expansion_pack_capacity_wh(model_code)
     try:
@@ -118,6 +119,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         ehist = state.energy.history(
             device_sn, hours=14 * 24, bucket_s=3600,
             main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+            include_calibration=True,
         )
         # pack_count already resolved above via _pack_count_for. Pass it
         # to fit_drain_model so the per-pack BMS baseline is correctly
@@ -125,8 +127,19 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         fitted_parasitic_w, fitted_overhead_pct, fitted_drain_n = (
             forecaster.fit_drain_model(ehist, capacity, pack_count=pack_count)
         )
+        drain_calibration = forecaster.fit_system_residual(
+            ehist, capacity, pack_count=pack_count, overhead_pct=fitted_overhead_pct,
+            now_ts=time.time(), utc_offset_seconds=device_location.get_tz_offset() or 0,
+        )
     except Exception as e:
         log.debug("advisor: drain model fit failed: %s", e)
+
+    effective_baseline = (fitted_parasitic_w or 0) + forecaster.per_pack_baseline_w(pack_count)
+    if drain_calibration and sys_soc is not None:
+        for band in drain_calibration["soc_bands"]:
+            if band["min_soc"] <= sys_soc <= band["max_soc"]:
+                effective_baseline = band["baseline_w"]
+                break
 
     # Compute both legacy 14d-all and a post-fix slice gated on the
     # forecaster's last breaking-change cutoff, mirroring
@@ -300,24 +313,16 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         "fitted_inverter_overhead_pct": (round(fitted_overhead_pct, 4)
                                          if fitted_overhead_pct is not None else None),
         "fitted_drain_n_windows": fitted_drain_n,
-        # Per-pack BMS baseline term (constant; PER_PACK_BASELINE_W × pack_count).
-        # Added separately from fitted_parasitic_w so the advisor can reason
-        # about the two contributions independently. effective_parasitic_w =
-        # fitted_parasitic_w + pack_baseline_w is what the simulator actually
-        # uses as the constant drain baseline; that's the field worth comparing
-        # to empirical reconciliations.
         "per_pack_baseline_w": forecaster.PER_PACK_BASELINE_W,
         "pack_baseline_w": round(forecaster.per_pack_baseline_w(pack_count), 1),
-        "effective_parasitic_w": (
-            round((fitted_parasitic_w or 0)
-                  + forecaster.per_pack_baseline_w(pack_count), 1)
-        ),
+        "pack_baseline_applied_w": None if drain_calibration else round(forecaster.per_pack_baseline_w(pack_count), 1),
+        "drain_calibration": drain_calibration or {"source": "legacy_priors", "n_runs": 0},
+        "effective_parasitic_w": round(effective_baseline, 1),
         # Legacy alias — kept so older narrator code doesn't break, but now
         # holds the EFFECTIVE figure (main + pack) since callers comparing
         # against empirical observations want the full baseline.
         "fitted_idle_overhead_w": (
-            round((fitted_parasitic_w or 0)
-                  + forecaster.per_pack_baseline_w(pack_count), 1)
+            round(effective_baseline, 1)
             if fitted_parasitic_w is not None else None
         ),
         "fitted_idle_overhead_n_windows": fitted_drain_n,

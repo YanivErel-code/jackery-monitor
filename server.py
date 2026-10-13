@@ -1635,6 +1635,7 @@ def _cached_history(device_sn: str) -> list[dict]:
     h = state.energy.history(
         device_sn, hours=14 * 24, bucket_s=3600,
         main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+        include_calibration=True,
     )
     _param_fit_cache[key] = (now, h)
     return h
@@ -1957,11 +1958,13 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
               plan.decided_at + 36 * 3600) + 3600
     start = plan.decided_at // 3600 * 3600
     weather_keys = ("ts", "ghi_w_m2", "cloud_cover_pct")
-    forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w")
+    forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w",
+                     "load_without_baseline_w", "drain_baseline_prior_w")
     model_keys = ("solar_coefficient", "fit_samples", "diurnal_shape", "charge_efficiency",
                   "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
-                  "solar_cap_w", "charge_ceiling_pct", "readiness")
+                  "solar_cap_w", "charge_ceiling_pct", "readiness", "drain_calibration",
+                  "pack_baseline_applied_w")
     return {
         "version": 1, **inputs,
         "config": {k: cfg.get(k) for k in ("mode", "target_sunrise_soc_pct",
@@ -2034,6 +2037,8 @@ async def _smart_charge_evaluate(record: bool = True,
     energy_hist = state.energy.history(
         device_sn, hours=14 * 24, bucket_s=3600,
         main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+        include_calibration=True,
+        until_ts=now,
     )
     capacity = inputs["capacity_wh"]
     pack_count = inputs["pack_count"]
@@ -2647,6 +2652,7 @@ async def _solar_charge_evaluate(record: bool = True,
                 energy_hist = state.energy.history(
                     device_sn, hours=14 * 24, bucket_s=3600,
                     main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+                    include_calibration=True,
                 )
                 capacity = _total_capacity_wh(device_sn, model_code)
 
@@ -3690,6 +3696,7 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         reader.history,
         device_sn, hours=14 * 24, bucket_s=3600,
         main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
+        include_calibration=True,
     )
     if not current_account():
         return account_changed

@@ -32,6 +32,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from forecast_calibration import SocDrainBand, fit_system_residual
+
 log = logging.getLogger("forecaster")
 
 
@@ -1437,11 +1439,10 @@ def fit_load_profile(
     Pipeline:
       1. Cap each sample at global 95th percentile (kills one-off spikes).
       2. Bucket by (hour-of-day, weekend-flag), keeping the timestamp.
-      3. For each bucket, compute median + IQR. If IQR/median is small
-         (stable hour — typical for overnight idle), use the median. If
-         large (variable hour — daytime activity), blend recent (last 3d
-         at 70%) with older (30%) so the forecast follows recent shifts.
-      4. Final per-bucket cap at LOAD_BUCKET_CAP_MULT x overall mean —
+      3. Follow a stable shift confirmed on multiple recent days with
+         an 80/20 recent/older blend. Otherwise stable buckets retain
+         their median; variable buckets retain the 70/30 blend.
+      4. Final per-bucket cap at the global 95th-percentile load —
          protects against a single high-output event in a sparse history
          (e.g. running an oven once at 1pm) from claiming "1pm load is
          2.5kW every day". Without this, 18-24h-out predictions snap to
@@ -1452,6 +1453,9 @@ def fit_load_profile(
     daytime activity into nighttime forecasts.
     """
     now_ts = now_ts if now_ts is not None else time.time()
+    energy_history = [row for row in energy_history
+                      if row.get("ts") is not None and row["ts"] <= now_ts
+                      and row.get("history_complete", True)]
     recency_cutoff = now_ts - LOAD_RECENCY_S
 
     # Net out solar-charge diversion before fitting demand patterns.
@@ -1535,14 +1539,25 @@ def fit_load_profile(
         iqr = q75 - q25
         rel_iqr = iqr / median if median > 0 else 0
 
+        recent = sorted(value for value, timestamp in samples if timestamp >= recency_cutoff)
+        older = sorted(value for value, timestamp in samples if timestamp < recency_cutoff)
+        recent_days = {timestamp // 86400 for _, timestamp in samples
+                       if timestamp >= recency_cutoff}
+        if n >= 6 and len(recent_days) >= 2 and len(older) >= 3:
+            recent_center = _trimmed_median(recent, LOAD_BUCKET_TRIM_PCT)
+            older_center = _trimmed_median(older, LOAD_BUCKET_TRIM_PCT)
+            recent_spread = recent[(3 * len(recent)) // 4] - recent[len(recent) // 4]
+            shifted = abs(recent_center - older_center) >= max(30, abs(older_center) * 0.08)
+            if shifted and recent_spread <= max(30, recent_center * 0.25):
+                profile[key] = min(0.8 * recent_center + 0.2 * older_center, bucket_ceiling)
+                continue
+
         # Stable bucket OR too few samples to recency-weight reliably.
         if rel_iqr < LOAD_VARIABILITY_THRESHOLD or n < 6:
             profile[key] = min(median, bucket_ceiling)
             continue
 
         # Variable bucket: blend recent and older trimmed medians.
-        recent = sorted(v for v, t in samples if t >= recency_cutoff)
-        older = sorted(v for v, t in samples if t < recency_cutoff)
         if not recent:
             profile[key] = min(median, bucket_ceiling)
             continue
@@ -1677,6 +1692,22 @@ def fit_charge_ceiling(
     return ceiling
 
 
+def _calibrated_load(hour: dict[str, Any], soc: float, capacity_wh: int, bands: list[SocDrainBand],
+                     additional_load_w: float = 0) -> float:
+    prior = float(hour.get("load_w") or 0)
+    if not bands or "load_without_baseline_w" not in hour or (hour.get("solar_w") or 0) > 5:
+        return prior
+    base = float(hour["load_without_baseline_w"])
+    duration = max(0.0, min(1.0, float(hour.get("duration_h", 1.0))))
+    for band in bands:
+        if band["min_soc"] <= soc <= band["max_soc"]:
+            load = base + band["baseline_w"]
+            ending = soc + (float(hour.get("solar_w") or 0) - load - additional_load_w) * duration / capacity_wh * 100
+            if band["min_soc"] <= ending <= band["max_soc"]:
+                return load
+    return base + float(hour.get("drain_baseline_prior_w") or 0)
+
+
 def simulate_soc(
     starting_soc_pct: float,
     capacity_wh: int,
@@ -1687,6 +1718,7 @@ def simulate_soc(
     extra_load_w: float | None = None,
     extra_load_floor_pct: float | None = None,
     soc_ceiling_pct: float | None = None,
+    drain_calibration_bands: list[SocDrainBand] | None = None,
 ) -> list[dict[str, Any]]:
     """Walk SOC forward through the forecast window.
 
@@ -1723,6 +1755,10 @@ def simulate_soc(
     (in addition to the hard 100% clamp). Models the BMS plateau on
     imbalanced multi-pack rigs that never reach 100% system SOC. None
     (default) → no extra cap. Fit per-device with `fit_charge_ceiling`.
+
+    `drain_calibration_bands`: empirical combined baselines for validated
+    SOC ranges, applied only to dark intervals wholly inside their range.
+    Band exits retain the legacy prior, including diversion lookahead.
     """
     eff = CHARGE_EFFICIENCY if charge_efficiency is None else float(charge_efficiency)
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
@@ -1745,12 +1781,15 @@ def simulate_soc(
     # still stay above the floor. Effectively models the controller's
     # actual ON/OFF behavior tick-by-tick.
     nat_hourly_pp = []
+    natural_soc = soc
     for h in forecast_hours:
         duration_h = max(0.0, min(1.0, float(h.get("duration_h", 1.0))))
-        net = float(h.get("solar_w") or 0) - float(h.get("load_w") or 0)
+        natural_load = _calibrated_load(h, natural_soc, capacity_wh, drain_calibration_bands or [])
+        net = float(h.get("solar_w") or 0) - natural_load
         if net > 0:
             net *= eff
         nat_hourly_pp.append(net * duration_h / capacity_wh * 100.0)
+        natural_soc = max(0.0, min(100.0, natural_soc + nat_hourly_pp[-1]))
     # cum_nat[i] = cumulative natural SOC delta from start to start of hour i
     cum_nat = [0.0] * (n + 1)
     for i in range(n):
@@ -1766,12 +1805,15 @@ def simulate_soc(
     for i, h in enumerate(forecast_hours):
         duration_h = max(0.0, min(1.0, float(h.get("duration_h", 1.0))))
         solar = float(h.get("solar_w") or 0)
-        load = float(h.get("load_w") or 0)
+        load = _calibrated_load(h, soc, capacity_wh, drain_calibration_bands or [])
         applied_extra = 0.0
         if extra_w > 0 and extra_floor is not None:
             # Tentatively apply extra this hour and compute SOC at end
             # of the hour.
-            tentative_net = solar - (load + extra_w)
+            tentative_load = _calibrated_load(
+                h, soc, capacity_wh, drain_calibration_bands or [], additional_load_w=extra_w,
+            )
+            tentative_net = solar - (tentative_load + extra_w)
             if tentative_net > 0:
                 tentative_net *= eff
             tentative_soc = soc + tentative_net * duration_h / capacity_wh * 100.0
@@ -1783,11 +1825,30 @@ def simulate_soc(
             # tentative_soc at hour i+1.
             min_future_soc = (tentative_soc
                               + (min_cum_from[i + 1] - cum_nat[i + 1]))
+            if drain_calibration_bands:
+                future_soc = tentative_soc
+                min_future_soc = tentative_soc
+                for future_hour in forecast_hours[i + 1:]:
+                    future_load = _calibrated_load(
+                        future_hour, future_soc, capacity_wh, drain_calibration_bands,
+                    )
+                    future_net = float(future_hour.get("solar_w") or 0) - future_load
+                    if future_net > 0:
+                        future_net *= eff
+                    future_duration = max(0.0, min(1.0, float(future_hour.get("duration_h", 1.0))))
+                    future_soc = max(0.0, min(100.0, future_soc + future_net * future_duration / capacity_wh * 100))
+                    if soc_ceiling_pct is not None:
+                        future_soc = min(soc_ceiling_pct, future_soc)
+                    min_future_soc = min(min_future_soc, future_soc)
             if min_future_soc >= extra_floor:
                 applied_extra = extra_w
+                load = tentative_load
         elif extra_w > 0 and extra_floor is None:
             # No floor constraint — apply extra every hour.
             applied_extra = extra_w
+            load = _calibrated_load(
+                h, soc, capacity_wh, drain_calibration_bands or [], additional_load_w=extra_w,
+            )
         # Interval-aware Euler step. Apply CHARGE_EFFICIENCY when
         # net inflow positive — discharge already accounts for inverter
         # losses on the load side.
@@ -1808,7 +1869,8 @@ def simulate_soc(
         # but cleanly addresses the "predicted 0% / actual 92%" cliff.
         if floor is not None and soc < floor:
             soc = floor
-        out.append({**h, "predicted_soc": round(soc, 1),
+        out.append({**h, "load_w": round(load, 1), "net_w": round(solar - load, 1),
+                    "predicted_soc": round(soc, 1),
                     "extra_load_w_applied": round(applied_extra, 1)})
     return out
 
@@ -1940,6 +2002,16 @@ def build_forecast(
     # get pack_baseline=0 and behave exactly as before.
     pack_baseline_w = per_pack_baseline_w(pack_count)
     effective_parasitic_w = parasitic_w + pack_baseline_w
+    prior_effective_parasitic_w = effective_parasitic_w
+    drain_calibration = fit_system_residual(
+        energy_history, capacity_wh, pack_count=pack_count, overhead_pct=overhead_pct,
+        now_ts=now_ts, utc_offset_seconds=utc_offset_seconds,
+    )
+    if drain_calibration:
+        for band in drain_calibration["soc_bands"]:
+            if band["min_soc"] <= starting_soc_pct <= band["max_soc"]:
+                effective_parasitic_w = band["baseline_w"]
+                break
     # Per-device charge efficiency, same idea: fit from the ratio of
     # observed SOC gain to reported input_wh on clean charging windows.
     charge_eff, charge_eff_n = fit_charge_efficiency(energy_history, capacity_wh)
@@ -1956,6 +2028,7 @@ def build_forecast(
     # advisor) tell at a glance whether the device is calibrated or
     # still using population defaults.
     overhead_source = "fit" if overhead_n >= 5 else "default"
+    readiness["low_confidence_overhead_fit"] = overhead_n < MIN_FORECAST_IDLE_WINDOWS
     charge_eff_source = "fit" if charge_eff_n >= 5 else "default"
 
     # Cap projected solar by the device's observed peak in the last
@@ -2006,7 +2079,7 @@ def build_forecast(
             solar_w = solar_cap
             capped = True
         load_w = expected_load_w(profile, interval_start,
-                                  idle_overhead_w=effective_parasitic_w,
+                                  idle_overhead_w=prior_effective_parasitic_w,
                                   inverter_overhead_pct=overhead_pct)
         forecast_hours.append({
             "ts": ts,
@@ -2025,6 +2098,9 @@ def build_forecast(
             "load_w": round(load_w, 1),
             "cloud_cover_pct": round(float(w.get("cloud_cover_pct") or 0), 1),
         })
+        if drain_calibration:
+            forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
+            forecast_hours[-1]["drain_baseline_prior_w"] = prior_effective_parasitic_w
 
     simulated = simulate_soc(
         starting_soc_pct, capacity_wh, forecast_hours,
@@ -2033,6 +2109,7 @@ def build_forecast(
         extra_load_w=extra_load_w,
         extra_load_floor_pct=extra_load_floor_pct,
         soc_ceiling_pct=soc_ceiling,
+        drain_calibration_bands=drain_calibration["soc_bands"] if drain_calibration else None,
     )
     return {
         "ready": True,
@@ -2073,6 +2150,8 @@ def build_forecast(
         "pack_baseline_w": round(pack_baseline_w, 1),
         "pack_count": int(pack_count),
         "effective_parasitic_w": round(effective_parasitic_w, 1),
+        "drain_calibration": drain_calibration or {"source": "legacy_priors", "n_runs": 0},
+        "pack_baseline_applied_w": None if drain_calibration else round(pack_baseline_w, 1),
         "inverter_overhead_pct": round(overhead_pct, 4),
         "inverter_overhead_n_windows": overhead_n,
         "inverter_overhead_source": overhead_source,
