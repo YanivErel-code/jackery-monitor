@@ -14,6 +14,61 @@ def db(tmp_path):
     return EnergyDB(str(tmp_path / "energy.db"))
 
 
+@pytest.mark.parametrize("main_capacity_wh,pack_capacity_wh", [(5040, 5040), (5040, 0), (None, None)])
+def test_hourly_history_opt_in_exposes_fresh_discharge_quality_without_future_rows(
+    db, main_capacity_wh, pack_capacity_wh,
+):
+    from tests.test_forecast_calibration import BASE, telemetry_fixture
+
+    samples, packs = telemetry_fixture()
+    with db._conn() as connection:
+        connection.executemany(
+            "INSERT INTO samples(device_sn,bucket,output_wh,solar_wh,ac_input_wh,"
+            "last_battery_pct,last_soc_source_ts,last_soc_source) VALUES(?,?,?,?,?,?,?,?)",
+            [("fixture", *row) for row in samples],
+        )
+        connection.executemany(
+            "INSERT INTO battery_packs(parent_sn,ts,pack_sn,soc_pct,source_ts,source,error_code) "
+            "VALUES(?,?,?,?,?,?,?)", [("fixture", *row) for row in packs],
+        )
+    rows = db.history("fixture", hours=24, bucket_s=3600, main_capacity_wh=main_capacity_wh,
+                      pack_capacity_wh=pack_capacity_wh, include_calibration=True, until_ts=BASE + 7200)
+    target = next(row for row in rows if row["ts"] == BASE)
+    if main_capacity_wh and pack_capacity_wh:
+        assert target["calibration"]["quality"] == "ok"
+    else:
+        assert target["calibration"] is None
+    assert target["history_complete"]
+    earlier = db.history("fixture", hours=24, bucket_s=3600, main_capacity_wh=main_capacity_wh,
+                        pack_capacity_wh=pack_capacity_wh, include_calibration=True, until_ts=BASE + 1800)
+    assert all(not row["calibration"] or row["calibration"]["quality"] != "ok" for row in earlier)
+    assert not any(row["history_complete"] for row in earlier)
+
+
+def test_calibration_rejects_pack_errors_with_missing_soc_between_checkpoints(db):
+    from tests.test_forecast_calibration import BASE, telemetry_fixture
+
+    samples, packs = telemetry_fixture()
+    with db._conn() as connection:
+        connection.executemany(
+            "INSERT INTO samples(device_sn,bucket,output_wh,solar_wh,ac_input_wh,"
+            "last_battery_pct,last_soc_source_ts,last_soc_source) VALUES(?,?,?,?,?,?,?,?)",
+            [("fixture", *row) for row in samples],
+        )
+        connection.executemany(
+            "INSERT INTO battery_packs(parent_sn,ts,pack_sn,soc_pct,source_ts,source,error_code) "
+            "VALUES(?,?,?,?,?,?,?)", [("fixture", *row) for row in packs],
+        )
+        connection.execute(
+            "UPDATE battery_packs SET soc_pct=NULL,error_code=1 WHERE parent_sn=? AND ts=?",
+            ("fixture", BASE + 630),
+        )
+    rows = db.history("fixture", hours=24, bucket_s=3600, main_capacity_wh=5040,
+                      pack_capacity_wh=5040, include_calibration=True, until_ts=BASE + 7200)
+    target = next(row for row in rows if row["ts"] == BASE)
+    assert target["calibration"]["quality"] == "pack_error_or_stale"
+
+
 def test_record_and_history_includes_solar(db):
     sn = "TEST-001"
     db.upsert_device(sn, "Test 5000", 13, "Explorer 5000 Plus")

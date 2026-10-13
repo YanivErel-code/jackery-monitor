@@ -199,8 +199,17 @@ def _format_starter_bundle(bundle: dict) -> str:
     parasitic_w = bundle.get("fitted_parasitic_w")
     overhead_pct = bundle.get("fitted_inverter_overhead_pct")
     drain_n = bundle.get("fitted_drain_n_windows", 0)
+    empirical = bundle.get("drain_calibration") or {}
+    if empirical.get("source") == "validated_system_residual":
+        lines.append("## Validated empirical SOC drain model")
+        lines.append("- Applies only in dark hours inside the listed SOC ranges; other conditions keep legacy priors.")
+        lines.append("- Combined system baseline; do not attribute it separately to the main unit or expansion packs.")
+        for band in empirical.get("soc_bands", []):
+            lines.append(f"- SOC {band['min_soc']}–{band['max_soc']}%: {band['baseline_w']:.1f} W baseline, {band['n_days']} independent nights")
+        lines.append("")
     if parasitic_w is not None or overhead_pct is not None:
-        lines.append("## Auto-fitted drain model")
+        lines.append("## Legacy physical drain estimate" if empirical.get("soc_bands")
+                     else "## Auto-fitted drain model")
         lines.append(
             "- model: drain_w = parasitic_w + load_w * (1 + inverter_overhead_pct)"
         )

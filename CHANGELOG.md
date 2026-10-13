@@ -9,6 +9,14 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Learn a quality-gated, SOC-range-specific system drain correction without
+  relaxing the legacy 85% physical-fit safeguard or forcing the fixed pack
+  baseline onto validated low-SOC discharge data. Require three independent
+  nights, synchronized fresh receipts, complete energy coverage, and a
+  conservative quantization allowance; reject charging and SOC discontinuities.
+- Follow sustained stable household-load changes while retaining spike
+  rejection. Exclude future/incomplete training hours, preserve diversion
+  safety when SOC leaves a calibrated range, and save calibration provenance.
 - Refresh automation-rule switches after smart-charge's "Disable them"
   action, confirm success, and restore the button for future conflicts.
 - Prevent smart-charge startup forecasts from using 50% SOC or a generic
