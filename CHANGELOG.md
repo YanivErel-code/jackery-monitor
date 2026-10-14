@@ -9,6 +9,12 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Preserve an immutable sunset-to-sunrise forecast, its capture time and
+  target separately from rolling estimates. Keep overnight updates on the
+  sunset date across midnight and measure sunrise accuracy against the
+  original target's actual system SOC. Capture without smart charge or an
+  open dashboard; mark historical/missed originals unknown instead of
+  presenting later revisions as accurate overnight forecasts.
 - Learn a quality-gated, SOC-range-specific system drain correction without
   relaxing the legacy 85% physical-fit safeguard or forcing the fixed pack
   baseline onto validated low-SOC discharge data. Require three independent

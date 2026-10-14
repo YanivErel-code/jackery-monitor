@@ -2635,8 +2635,17 @@ $('dbg-daily-summary')?.addEventListener('click', async () => {
     date: r.date,
     sunset_pred: r.predicted_sunset_soc_pct != null ? Math.round(r.predicted_sunset_soc_pct) : null,
     sunset_actual: r.actual_sunset_soc_pct != null ? Math.round(r.actual_sunset_soc_pct) : null,
-    sunrise_pred: r.predicted_sunrise_soc_pct != null ? Math.round(r.predicted_sunrise_soc_pct) : null,
-    sunrise_actual: r.actual_sunrise_soc_pct != null ? Math.round(r.actual_sunrise_soc_pct) : null,
+    sunrise_original: r.sunset_forecast_soc_pct != null ? Math.round(r.sunset_forecast_soc_pct) : null,
+    original_saved_at: r.sunset_forecast_made_at
+      ? new Date(r.sunset_forecast_made_at * 1000).toLocaleString() : null,
+    original_target: r.sunset_forecast_sunrise_ts
+      ? new Date(r.sunset_forecast_sunrise_ts * 1000).toLocaleString() : null,
+    original_actual: r.sunset_forecast_actual_soc_pct != null
+      ? Math.round(r.sunset_forecast_actual_soc_pct) : null,
+    original_error_pp: r.sunset_forecast_error_pp != null
+      ? r.sunset_forecast_error_pp.toFixed(1) : null,
+    sunrise_rolling: r.predicted_sunrise_soc_pct != null ? Math.round(r.predicted_sunrise_soc_pct) : null,
+    rolling_actual: r.actual_sunrise_soc_pct != null ? Math.round(r.actual_sunrise_soc_pct) : null,
   }));
   _dbgRender(`Daily sunset/sunrise predicted vs actual (${rows.length} days)`, rows);
 });
@@ -5890,7 +5899,7 @@ function renderTodayEnergyBudget(j) {
 
 // ============================================================
 // Daily sunset/sunrise prediction accuracy table on Forecast tab.
-// Data source: /api/daily_summary, written each smart-charge tick.
+// Data source: /api/daily_summary.
 // ============================================================
 async function renderDailyAccuracy() {
   const card = $('daily-accuracy-card');
@@ -5898,12 +5907,16 @@ async function renderDailyAccuracy() {
   const sel = $('daily-accuracy-days');
   const days = parseInt(sel?.value || '14', 10) || 14;
   const sn = activeJackeryDevice()?.device_sn;
+  const generation = _forecastGeneration;
   const url = sn
     ? `/api/daily_summary?days=${days}&device_sn=${encodeURIComponent(sn)}`
     : `/api/daily_summary?days=${days}`;
   const r = await fetch(url);
+  if (generation !== _forecastGeneration || activeJackeryDevice()?.device_sn !== sn) return;
   if (!r.ok) { card.hidden = true; return; }
   const j = await r.json();
+  if (generation !== _forecastGeneration || activeJackeryDevice()?.device_sn !== sn
+      || (parseInt(sel?.value || '14', 10) || 14) !== days) return;
   const rows = j.rows || [];
   card.hidden = false;
   const tbody = $('daily-accuracy-tbody');
@@ -5919,11 +5932,6 @@ async function renderDailyAccuracy() {
   if (empty) empty.hidden = true;
   if (table) table.hidden = false;
 
-  // Render newest-first. Track sunset/sunrise errors in two buckets:
-  // ALL (everything visible) and POST-FIX (predictions_made_at >=
-  // cutoff_ts — i.e. made by current code, not stale older code).
-  // Stale rows still render so the user can see history; they're
-  // visually muted and don't count toward the post-fix MAE headline.
   const cutoffTs = Number(j.cutoff_ts || 0);
   const sorted = [...rows].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const sunsetErrsAll = [];
@@ -5934,28 +5942,35 @@ async function renderDailyAccuracy() {
     const date = row.date || '—';
     const sp = row.predicted_sunset_soc_pct;
     const sa = row.actual_sunset_soc_pct;
-    const rp = row.predicted_sunrise_soc_pct;
-    const ra = row.actual_sunrise_soc_pct;
+    const rp = row.sunset_forecast_soc_pct;
+    const ra = row.sunset_forecast_actual_soc_pct;
     const sErr = (sp != null && sa != null) ? sa - sp : null;
     const rErr = (rp != null && ra != null) ? ra - rp : null;
     const madeAt = Number(row.predictions_made_at || 0);
-    const isPostFix = cutoffTs > 0 && madeAt > 0 && madeAt >= cutoffTs;
+    const snapshotMadeAt = Number(row.sunset_forecast_made_at || 0);
+    const sunsetPostFix = madeAt > 0 && madeAt >= cutoffTs;
+    const sunrisePostFix = snapshotMadeAt > 0 && snapshotMadeAt >= cutoffTs;
     if (sErr != null) {
       sunsetErrsAll.push(sErr);
-      if (isPostFix) sunsetErrsPostFix.push(sErr);
+      if (sunsetPostFix) sunsetErrsPostFix.push(sErr);
     }
     if (rErr != null) {
       sunriseErrsAll.push(rErr);
-      if (isPostFix) sunriseErrsPostFix.push(rErr);
+      if (sunrisePostFix) sunriseErrsPostFix.push(rErr);
     }
+    const isPostFix = sunsetPostFix || sunrisePostFix;
     const rowCls = isPostFix ? '' : 'acc-row-stale';
     const staleBadge = isPostFix ? '' : ' <span class="acc-stale-badge" title="Predictions made by older code (before the latest forecaster fix). Excluded from the post-fix MAE.">stale</span>';
     return `<tr class="${rowCls}">
-      <td>${date}${staleBadge}</td>
+      <td>${escapeHtml(date)}${staleBadge}</td>
       <td>${_fmtPct(sp)}</td>
       <td>${_fmtPct(sa)}</td>
       ${_fmtErrCell(sErr)}
-      <td>${_fmtPct(rp)}</td>
+      <td>${_fmtSunsetForecast(row)}</td>
+      <td>${_fmtPct(row.predicted_sunrise_soc_pct)}
+        <small class="acc-forecast-time">Updated ${_fmtForecastTime(madeAt)}</small>
+        <small class="acc-forecast-time">Target ${_fmtForecastTime(row.sunrise_ts)}</small>
+      </td>
       <td>${_fmtPct(ra)}</td>
       ${_fmtErrCell(rErr)}
     </tr>`;
@@ -5965,6 +5980,22 @@ async function renderDailyAccuracy() {
     sunsetErrsAll, sunriseErrsAll,
     sunsetErrsPostFix, sunriseErrsPostFix,
   );
+}
+
+function _fmtForecastTime(ts) {
+  if (ts == null || !Number.isFinite(Number(ts)) || Number(ts) <= 0) return '—';
+  return escapeHtml(new Date(Number(ts) * 1000).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  }));
+}
+
+function _fmtSunsetForecast(row) {
+  if (row.sunset_forecast_soc_pct == null) {
+    return '<span class="acc-missing">Not captured</span>';
+  }
+  return `${_fmtPct(row.sunset_forecast_soc_pct)}
+    <small class="acc-forecast-time">Saved ${_fmtForecastTime(row.sunset_forecast_made_at)}</small>
+    <small class="acc-forecast-time">Target ${_fmtForecastTime(row.sunset_forecast_sunrise_ts)}</small>`;
 }
 
 function _fmtPct(v) {
@@ -6004,15 +6035,12 @@ function _renderAccuracySummary(sunsetErrsAll, sunriseErrsAll,
   setText('daily-acc-sunrise-n', sunriseErrs.length
     ? `${sunriseErrs.length} day${sunriseErrs.length === 1 ? '' : 's'} measured${scopeNote}`
     : 'no data');
-  // Hit rate = share of all measured points (sunset + sunrise) where
-  // |error| ≤ 5pp. Single number across both phases gives a quick "is
-  // the model basically right" read independent of which phase.
-  const all = sunsetErrs.concat(sunriseErrs);
+  const all = sunriseErrs;
   const hits = all.filter((e) => Math.abs(e) <= 5).length;
   const hitRate = all.length ? Math.round((hits / all.length) * 100) : null;
   setText('daily-acc-hitrate', hitRate ?? '—');
   setText('daily-acc-hitrate-sub', all.length
-    ? `${hits} of ${all.length} predictions within 5pp${scopeNote}`
+    ? `${hits} of ${all.length} originals within 5pp${scopeNote}`
     : 'no data');
 }
 
