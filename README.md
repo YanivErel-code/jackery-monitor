@@ -66,6 +66,21 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   from your own observed solar-vs-GHI pairs (Open-Meteo); load model uses
   per-hour-of-day medians with a runaway-bucket cap so a single high-output
   event doesn't dominate. Predicted-vs-actual chart accumulates over time.
+  **Sunset / sunrise accuracy** keeps the first ready sunrise prediction
+  made within 15 minutes after the forecast's sunset boundary immutable,
+  alongside the latest rolling estimate. Saved time and original sunrise
+  target are visible; sunrise MAE uses only these original snapshots,
+  not near-sunrise revisions. Nights stay grouped by their sunset date
+  through midnight. The background recorder checks for missing sunset
+  snapshots every five minutes even with smart charge off and the tab closed;
+  otherwise it builds hourly. Sunrise actuals are finalized after the saved
+  target's ±30-minute telemetry window, using capacity-weighted system SOC.
+  A moved sunrise target does not change the original evaluation horizon.
+  **Not captured** means no ready forecast was available in the sunset
+  window (or the row predates this feature); such nights are excluded from
+  sunrise accuracy rather than reconstructing an unreliable original.
+  Older rolling values remain available. Displayed timestamps use the
+  browser's time zone. No forecast-model or charging-control logic changes.
 - **Battery packs card** (5000 Plus + expansions) — per-pack SOC,
   input W, temp. Real-time updates over MQTT (no polling).
   Auto-detected total capacity = main + N × expansion. Collapsed by

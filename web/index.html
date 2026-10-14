@@ -643,10 +643,6 @@
         </div>
       </section>
 
-      <!-- Sunset/sunrise prediction-vs-actual table — daily accuracy
-           rollup. Backed by daily_solar_summary, written each smart-
-           charge tick. Surfaces the same data as the Logs → Debug
-           panel but in a scannable visual + summary KPIs. -->
       <section id="daily-accuracy-card" class="card collapsible collapsed"
                data-collapse-key="daily-accuracy" hidden>
         <div class="card-header collapsible-header"
@@ -665,8 +661,11 @@
         </div>
         <div id="daily-accuracy-body">
         <p class="hint" style="margin:6px 0 12px">
-          Predicted SOC at sunset / sunrise vs what actually happened. Error in pp.
-          Green ≤3pp, yellow 4-8pp, red &gt;8pp.
+          Sunrise accuracy compares the original forecast saved at sunset with
+          actual SOC at its saved target. The latest rolling estimate is separate.
+          Dates identify the night starting at sunset; times use your browser's time zone.
+          Error = actual − original, in pp. Green ≤3pp, yellow ≤8pp, red &gt;8pp.
+          Older or missed originals show “Not captured” and do not count toward sunrise accuracy.
         </p>
 
         <!-- Summary KPIs over the selected window. MAE = mean absolute
@@ -676,41 +675,45 @@
              truth drives both the table and the summary. -->
         <div id="daily-accuracy-summary" class="acc-summary">
           <div class="acc-summary-tile">
-            <div class="acc-summary-label">Sunset MAE</div>
+            <div class="acc-summary-label">Sunset MAE (rolling)</div>
             <div class="acc-summary-value"><span id="daily-acc-sunset-mae">—</span><small>pp</small></div>
             <div class="acc-summary-sub" id="daily-acc-sunset-n">—</div>
           </div>
           <div class="acc-summary-tile">
-            <div class="acc-summary-label">Sunrise MAE</div>
+            <div class="acc-summary-label">Sunrise MAE (original)</div>
             <div class="acc-summary-value"><span id="daily-acc-sunrise-mae">—</span><small>pp</small></div>
             <div class="acc-summary-sub" id="daily-acc-sunrise-n">—</div>
           </div>
           <div class="acc-summary-tile">
-            <div class="acc-summary-label">Hit rate (|err| ≤ 5pp)</div>
+            <div class="acc-summary-label">Original sunrise within 5pp</div>
             <div class="acc-summary-value"><span id="daily-acc-hitrate">—</span><small>%</small></div>
             <div class="acc-summary-sub" id="daily-acc-hitrate-sub">—</div>
           </div>
         </div>
 
         <div id="daily-accuracy-empty" class="hint" hidden>
-          No daily summary rows yet — fills in over the next few days as
-          the smart-charge tick logs each sunset/sunrise.
+          No daily summary rows yet — forecasts will populate this table.
+          Original sunrise snapshots start at the next sunset. Missed snapshots
+          and older nights stay “Not captured” and do not count toward sunrise accuracy.
         </div>
+        <div class="acc-table-scroll">
         <table id="daily-accuracy-table" class="acc-table" hidden>
           <thead>
             <tr>
               <th>Date</th>
               <th colspan="3" class="acc-group acc-group-sunset">Sunset</th>
-              <th colspan="3" class="acc-group acc-group-sunrise">Sunrise</th>
+              <th colspan="4" class="acc-group acc-group-sunrise">Sunrise</th>
             </tr>
             <tr class="acc-subhead">
               <th></th>
-              <th>Pred</th><th>Actual</th><th>Err</th>
-              <th>Pred</th><th>Actual</th><th>Err</th>
+              <th>Latest pred</th><th>Actual</th><th>Err</th>
+              <th>Original at sunset</th><th>Latest rolling</th>
+              <th>Actual at saved target</th><th>Original err</th>
             </tr>
           </thead>
           <tbody id="daily-accuracy-tbody"></tbody>
         </table>
+        </div>
         </div>
       </section>
     </section>

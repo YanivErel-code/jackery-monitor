@@ -71,6 +71,7 @@ MAX_GAP_S = 600
 
 # Aggregation bucket size in seconds (60 = per-minute)
 BUCKET_S = 60
+SUNSET_FORECAST_CAPTURE_WINDOW_S = 15 * 60
 
 
 SCHEMA = """
@@ -499,6 +500,14 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                     "SET predictions_made_at = COALESCE(sunset_ts, sunrise_ts) "
                     "WHERE predictions_made_at IS NULL"
                 )
+            for column, sql_type in (
+                ("sunset_forecast_soc_pct", "REAL"),
+                ("sunset_forecast_made_at", "INTEGER"),
+                ("sunset_forecast_sunrise_ts", "INTEGER"),
+                ("sunset_forecast_actual_soc_pct", "REAL"),
+            ):
+                if column not in existing_ds:
+                    c.execute(f"ALTER TABLE daily_solar_summary ADD COLUMN {column} {sql_type}")
 
     # ---------- ingestion ----------
     def upsert_device(self, device_sn: str, name: str | None,
@@ -1010,9 +1019,13 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                              actual_sunset_soc_pct: float | None = None,
                              predicted_sunrise_soc_pct: float | None = None,
                              actual_sunrise_soc_pct: float | None = None) -> None:
-        """Upsert one daily row. Only NON-None values overwrite the existing
-        row, so the same call can fill predicted at noon and actual at
-        midnight without clobbering anything that's already there."""
+        """Update rolling estimates without overwriting the sunset snapshot.
+
+        Capture the first new sunrise prediction within 15 minutes after
+        the forecast's sunset boundary, including its original target and
+        exact creation time. Late estimates and actual-only writes cannot
+        masquerade as an original forecast. None preserves existing values.
+        """
         if not device_sn or not local_date:
             return
         now = int(time.time())
@@ -1068,23 +1081,44 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                      predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
                      now, now if writing_predictions else None),
                 )
+            if predicted_sunrise_soc_pct is not None:
+                c.execute(
+                    """UPDATE daily_solar_summary
+                          SET sunset_forecast_soc_pct = ?,
+                              sunset_forecast_made_at = ?,
+                              sunset_forecast_sunrise_ts = sunrise_ts
+                        WHERE date = ? AND device_sn = ?
+                          AND sunset_forecast_made_at IS NULL
+                          AND sunset_ts BETWEEN ? AND ?
+                          AND sunrise_ts > ?""",
+                    (predicted_sunrise_soc_pct, now, local_date, device_sn,
+                     now - SUNSET_FORECAST_CAPTURE_WINDOW_S, now, now),
+                )
+
+    def sunset_forecast_due(self, device_sn: str) -> bool:
+        """Whether a ready daytime row needs its sunset snapshot now."""
+        now = int(time.time())
+        with self._conn() as c:
+            return c.execute(
+                """SELECT 1 FROM daily_solar_summary
+                    WHERE device_sn = ? AND sunset_forecast_made_at IS NULL
+                      AND sunset_ts BETWEEN ? AND ? AND sunrise_ts > ?
+                    LIMIT 1""",
+                (device_sn, now - SUNSET_FORECAST_CAPTURE_WINDOW_S, now, now),
+            ).fetchone() is not None
 
     def backfill_daily_actuals(self, device_sn: str, *,
                                days: int = 14,
                                main_capacity_wh: int | None = None,
                                pack_capacity_wh: int | None = None) -> int:
-        """Walk daily_solar_summary rows missing actual_sunset / actual_sunrise
-        whose corresponding `*_ts` is in the past, and fill in the actual
-        from the samples + battery_packs join.
+        """Fill recent missing actuals from the samples + battery_packs join.
 
-        The single-shot tick path (`_update_daily_summary`) only ever writes
-        to today's row, but the row's `sunrise_ts` typically falls on the
-        FOLLOWING calendar day — so today's tick can't back-fill yesterday's
-        sunrise. This helper, run from each tick, walks recent rows and
-        fills in any actuals that have aged into the past.
+        Sunset-snapshot accuracy uses the immutable target, even if later
+        weather updates move sunrise. Wait for its full +/-30-minute
+        observation window before finalizing that measurement.
 
-        Returns the count of values filled (sunset + sunrise across all
-        rows). Idempotent — re-running over already-filled rows is a no-op.
+        Returns the count of values filled, including snapshot actuals.
+        Idempotent — re-running over already-filled rows is a no-op.
         """
         if not device_sn:
             return 0
@@ -1096,18 +1130,23 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         with self._conn() as c:
             rows = c.execute(
                 """SELECT date, sunset_ts, sunrise_ts,
-                          actual_sunset_soc_pct, actual_sunrise_soc_pct
+                          actual_sunset_soc_pct, actual_sunrise_soc_pct,
+                          sunset_forecast_sunrise_ts, sunset_forecast_actual_soc_pct
                      FROM daily_solar_summary
                     WHERE device_sn = ?
                       AND date >= ?
                       AND ((actual_sunset_soc_pct IS NULL AND sunset_ts IS NOT NULL
                             AND sunset_ts <= ?)
                         OR (actual_sunrise_soc_pct IS NULL AND sunrise_ts IS NOT NULL
-                            AND sunrise_ts <= ?))""",
-                (device_sn, cutoff_date, now, now),
+                            AND sunrise_ts <= ?)
+                        OR (sunset_forecast_actual_soc_pct IS NULL
+                            AND sunset_forecast_sunrise_ts IS NOT NULL
+                            AND sunset_forecast_sunrise_ts <= ?))""",
+                (device_sn, cutoff_date, now, now, now - 1800),
             ).fetchall()
         filled = 0
-        for date, sunset_ts, sunrise_ts, act_sunset, act_sunrise in rows:
+        for (date, sunset_ts, sunrise_ts, act_sunset, act_sunrise,
+             snapshot_target, snapshot_actual) in rows:
             fill_sunset: float | None = None
             fill_sunrise: float | None = None
             if act_sunset is None and sunset_ts and sunset_ts <= now:
@@ -1122,20 +1161,34 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                     main_capacity_wh=main_capacity_wh,
                     pack_capacity_wh=pack_capacity_wh,
                 )
-            if fill_sunset is None and fill_sunrise is None:
-                continue
-            self.upsert_daily_summary(
-                device_sn=device_sn, local_date=date,
-                sunset_ts=None, sunrise_ts=None,
-                predicted_sunset_soc_pct=None,
-                actual_sunset_soc_pct=fill_sunset,
-                predicted_sunrise_soc_pct=None,
-                actual_sunrise_soc_pct=fill_sunrise,
-            )
+            if fill_sunset is not None or fill_sunrise is not None:
+                self.upsert_daily_summary(
+                    device_sn=device_sn, local_date=date,
+                    sunset_ts=None, sunrise_ts=None,
+                    actual_sunset_soc_pct=fill_sunset,
+                    actual_sunrise_soc_pct=fill_sunrise,
+                )
             if fill_sunset is not None:
                 filled += 1
             if fill_sunrise is not None:
                 filled += 1
+            if (snapshot_actual is None and snapshot_target is not None
+                    and snapshot_target <= now - 1800):
+                actual = self.system_soc_at(
+                    device_sn, int(snapshot_target),
+                    main_capacity_wh=main_capacity_wh, pack_capacity_wh=pack_capacity_wh,
+                )
+                if actual is not None:
+                    with self._conn() as c:
+                        result = c.execute(
+                            """UPDATE daily_solar_summary
+                                  SET sunset_forecast_actual_soc_pct = ?, updated_at = ?
+                                WHERE date = ? AND device_sn = ?
+                                  AND sunset_forecast_sunrise_ts = ?
+                                  AND sunset_forecast_actual_soc_pct IS NULL""",
+                            (actual, now, date, device_sn, snapshot_target),
+                        )
+                        filled += result.rowcount
         return filled
 
     def list_daily_summary(self, device_sn: str, days: int = 30) -> list[dict]:
@@ -1155,7 +1208,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                 """SELECT date, sunset_ts, sunrise_ts,
                           predicted_sunset_soc_pct, actual_sunset_soc_pct,
                           predicted_sunrise_soc_pct, actual_sunrise_soc_pct,
-                          updated_at, predictions_made_at
+                          updated_at, predictions_made_at,
+                          sunset_forecast_soc_pct, sunset_forecast_made_at,
+                          sunset_forecast_sunrise_ts, sunset_forecast_actual_soc_pct
                      FROM daily_solar_summary
                     WHERE device_sn = ?
                       AND date >= ?
@@ -1171,7 +1226,13 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
              "sunrise_error_pp": (r[6] - r[5])
                                  if r[5] is not None and r[6] is not None else None,
              "updated_at": r[7],
-             "predictions_made_at": r[8]}
+             "predictions_made_at": r[8],
+             "sunset_forecast_soc_pct": r[9],
+             "sunset_forecast_made_at": r[10],
+             "sunset_forecast_sunrise_ts": r[11],
+             "sunset_forecast_actual_soc_pct": r[12],
+             "sunset_forecast_error_pp": (r[12] - r[9])
+                 if r[9] is not None and r[12] is not None else None}
             for r in rows
         ]
 
