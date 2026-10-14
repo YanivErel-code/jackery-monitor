@@ -1340,17 +1340,21 @@ def _local_date_str(ts: int, tz_offset_seconds: int) -> str:
 
 async def _update_daily_summary(device_sn: str, fcast: dict,
                                 tz_offset_seconds: int) -> None:
-    """Fill in today's daily_solar_summary row with whatever we currently
-    know — predicted values for moments still ahead, actual values pulled
-    from the samples table for moments already past. Called from the
-    smart-charge tick (every 5 min) so the row converges to ground truth
-    progressively."""
+    """Keep rolling estimates on the sunset date, including after midnight.
+
+    The database freezes a separate sunset-to-sunrise snapshot. Both the
+    smart-charge tick and the dashboard/background forecast path write here.
+    """
     fc = fcast.get("forecast") or []
     if not fc:
         return
     sunset_ts, sunrise_ts, sunset_e, sunrise_e = _find_sun_phases(fc)
     now = int(time.time())
-    today = _local_date_str(now, tz_offset_seconds)
+    night_date = _local_date_str(
+        sunset_ts if sunset_ts is not None else
+        sunrise_ts - 86400 if sunrise_ts is not None else now,
+        tz_offset_seconds,
+    )
 
     pred_sunset = sunset_e.get("predicted_soc") if sunset_e else None
     pred_sunrise = sunrise_e.get("predicted_soc") if sunrise_e else None
@@ -1368,19 +1372,13 @@ async def _update_daily_summary(device_sn: str, fcast: dict,
                       if sunrise_ts and sunrise_ts <= now else None)
 
     state.energy.upsert_daily_summary(
-        device_sn=device_sn, local_date=today,
+        device_sn=device_sn, local_date=night_date,
         sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
         predicted_sunset_soc_pct=pred_sunset,
         actual_sunset_soc_pct=actual_sunset,
         predicted_sunrise_soc_pct=pred_sunrise,
         actual_sunrise_soc_pct=actual_sunrise,
     )
-    # Back-fill any past rows whose actuals are still null. Each row's
-    # `sunrise_ts` typically falls on the FOLLOWING calendar day, so
-    # today's tick can never back-fill yesterday's sunrise from the
-    # single-row write above. The back-fill walks the last 14 days
-    # and fills in actuals for any (sunset_ts, sunrise_ts) that has
-    # aged into the past with samples available.
     try:
         state.energy.backfill_daily_actuals(
             device_sn,
@@ -3732,6 +3730,10 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
                                 time.time(), result["forecast"], should_record=current_account)
         if not current_account():
             return account_changed
+        await _update_daily_summary(
+            device_sn, result,
+            int(weather.get("utc_offset_seconds") or device_location.get_tz_offset() or 0),
+        )
     # Today's actual solar so far — used by the day-strip "Today" tile
     # to show full-day total (actual past + forecast remaining) rather
     # than just the forward-looking remainder. Without this the user
@@ -3802,7 +3804,7 @@ FORECAST_RECORDER_INTERVAL_S = 3600
 FORECAST_RECORDER_INITIAL_DELAY_S = 90
 
 
-async def _record_forecasts_for_all_devices() -> None:
+async def _record_forecasts_for_all_devices(*, sunset_only: bool = False) -> None:
     """Build + persist a forecast for every device on the account that
     we have recent cloud_meta for. Skips devices whose forecaster isn't
     ready (returns ready=False); those will start landing rows once
@@ -3822,6 +3824,8 @@ async def _record_forecasts_for_all_devices() -> None:
         if not sn:
             continue
         try:
+            if sunset_only and not state.energy.sunset_forecast_due(sn):
+                continue
             result = await _build_and_record_forecast(sn)
             if result.get("ready") and result.get("forecast"):
                 recorded += 1
@@ -3830,29 +3834,31 @@ async def _record_forecasts_for_all_devices() -> None:
         except Exception as e:
             log.warning("forecast_recorder: build for %s failed: %s", sn, e)
             skipped += 1
-    log.info("forecast_recorder: recorded predictions for %d device(s); skipped %d (calibrating or error)",
-             recorded, skipped)
+    if recorded or skipped:
+        log.info("forecast_recorder: recorded predictions for %d device(s); skipped %d (calibrating or error)",
+                 recorded, skipped)
 
 
 async def forecast_recorder_loop() -> None:
-    """Build per-device forecasts on a fixed cadence so the prediction-
-    accuracy table keeps accumulating data regardless of smart-charge
-    state or Forecast-tab traffic. Without this, prediction_accuracy
-    only gets new rows when (a) the user opens the Forecast tab or
-    (b) the smart-charge controller is enabled and ticking — both can
-    be quiet for days, which then leaves the daily advisor with no
-    post-deploy predictions to evaluate (advisor anomaly flagged
-    2026-05-02)."""
+    """Record hourly forecasts even without charging or dashboard traffic.
+
+    Check for uncaptured sunset snapshots every five minutes; only build
+    an extra forecast for devices currently in their sunset capture window.
+    """
     await asyncio.sleep(FORECAST_RECORDER_INITIAL_DELAY_S)
     bo = _backoff.LoopBackoff(max_s=4 * 3600)
+    next_regular = 0.0
     while True:
         try:
-            await _record_forecasts_for_all_devices()
+            regular_due = time.time() >= next_regular
+            await _record_forecasts_for_all_devices(sunset_only=not regular_due)
+            if regular_due:
+                next_regular = time.time() + FORECAST_RECORDER_INTERVAL_S
             bo.reset()
         except Exception as e:
             bo.record_failure()
             log.warning("forecast_recorder loop iteration failed: %s", e)
-        await asyncio.sleep(bo.next_sleep(FORECAST_RECORDER_INTERVAL_S))
+        await asyncio.sleep(bo.next_sleep(300))
 
 
 class AccuracyBucket(TypedDict, total=False):
@@ -4192,15 +4198,14 @@ def api_diagnostics_parasitic_fit_windows(device_sn: str | None = None,
 
 @app.get("/api/daily_summary")
 def api_daily_summary(device_sn: str | None = None, days: int = 7):
-    """Daily sunset/sunrise predicted vs actual SOC rows. Sourced from
-    daily_solar_summary, written by the smart-charge tick. Used by the
-    Logs → Debug panel + Forecast tab's accuracy table.
+    """Daily estimates grouped by the date the overnight period starts.
 
-    `cutoff_ts` returned alongside the rows is the active forecaster
-    breaking-change timestamp. Each row has its own `predictions_made_at`
-    so the UI can split MAE into "all-shown" and "post-fix-only" — the
-    latter only counts rows whose predictions were made AT or AFTER
-    cutoff_ts (i.e. by current code, not stale buggy older code)."""
+    Legacy predicted_* fields remain rolling estimates. sunset_forecast_*
+    fields hold the immutable sunrise prediction, capture time, target and
+    matching actual/error. Historical or missed originals remain null.
+    cutoff_ts distinguishes forecaster versions; sunrise accuracy filters
+    on sunset_forecast_made_at, not the rolling predictions_made_at.
+    """
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:

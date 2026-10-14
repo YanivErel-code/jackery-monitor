@@ -2493,6 +2493,15 @@ footer {
   font-variant-numeric: tabular-nums;
   font-size: 13px;
 }
+.acc-table-scroll {
+  overflow-x: auto;
+}
+.acc-forecast-time {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
 .acc-table th, .acc-table td {
   padding: 6px 10px;
   text-align: right;
@@ -2501,6 +2510,7 @@ footer {
 .acc-table th:first-child, .acc-table td:first-child {
   text-align: left;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 .acc-table thead th {
   font-weight: 500;
