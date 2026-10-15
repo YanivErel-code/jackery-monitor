@@ -9,6 +9,13 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Avoid losing consistent discharge evidence at arbitrary SOC-bin edges by
+  adding a five-night, observed-range-bounded pooled fallback. Preserve
+  specific-band, source-quality, freshness, and higher-drain-regime guards;
+  allow validated net discharge in twilight without calibrating solar charging.
+- Stop learned charge ceilings from discarding already measured SOC, and
+  account for ceiling curtailment in diversion lookahead. Report the actual
+  modeled baseline per interval and expose when the legacy pack prior remains.
 - Preserve an immutable sunset-to-sunrise forecast, its capture time and
   target separately from rolling estimates. Keep overnight updates on the
   sunset date across midnight and measure sunrise accuracy against the

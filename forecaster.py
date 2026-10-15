@@ -1695,17 +1695,30 @@ def fit_charge_ceiling(
 def _calibrated_load(hour: dict[str, Any], soc: float, capacity_wh: int, bands: list[SocDrainBand],
                      additional_load_w: float = 0) -> float:
     prior = float(hour.get("load_w") or 0)
-    if not bands or "load_without_baseline_w" not in hour or (hour.get("solar_w") or 0) > 5:
+    if not bands or "load_without_baseline_w" not in hour:
         return prior
     base = float(hour["load_without_baseline_w"])
     duration = max(0.0, min(1.0, float(hour.get("duration_h", 1.0))))
-    for band in bands:
+    for band in sorted(bands, key=lambda value: value.get("source") == "pooled_discharge"):
         if band["min_soc"] <= soc <= band["max_soc"]:
             load = base + band["baseline_w"]
+            if (hour.get("solar_w") or 0) > load + additional_load_w:
+                break
             ending = soc + (float(hour.get("solar_w") or 0) - load - additional_load_w) * duration / capacity_wh * 100
             if band["min_soc"] <= ending <= band["max_soc"]:
                 return load
+            break
     return base + float(hour.get("drain_baseline_prior_w") or 0)
+
+
+def _advance_soc(soc: float, net_w: float, duration_h: float, capacity_wh: int,
+                 charge_efficiency: float, ceiling_pct: float | None) -> float:
+    """Limit new charging without erasing already measured battery energy."""
+    net = net_w * charge_efficiency if net_w > 0 else net_w
+    updated = soc + net * duration_h / capacity_wh * 100
+    if net_w > 0 and ceiling_pct is not None:
+        updated = min(updated, max(soc, ceiling_pct))
+    return max(0.0, min(100.0, updated))
 
 
 def simulate_soc(
@@ -1757,7 +1770,7 @@ def simulate_soc(
     (default) → no extra cap. Fit per-device with `fit_charge_ceiling`.
 
     `drain_calibration_bands`: empirical combined baselines for validated
-    SOC ranges, applied only to dark intervals wholly inside their range.
+    SOC ranges, applied only to net-discharge intervals wholly inside their range.
     Band exits retain the legacy prior, including diversion lookahead.
     """
     eff = CHARGE_EFFICIENCY if charge_efficiency is None else float(charge_efficiency)
@@ -1786,10 +1799,9 @@ def simulate_soc(
         duration_h = max(0.0, min(1.0, float(h.get("duration_h", 1.0))))
         natural_load = _calibrated_load(h, natural_soc, capacity_wh, drain_calibration_bands or [])
         net = float(h.get("solar_w") or 0) - natural_load
-        if net > 0:
-            net *= eff
-        nat_hourly_pp.append(net * duration_h / capacity_wh * 100.0)
-        natural_soc = max(0.0, min(100.0, natural_soc + nat_hourly_pp[-1]))
+        updated_soc = _advance_soc(natural_soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
+        nat_hourly_pp.append((net * eff if net > 0 else net) * duration_h / capacity_wh * 100.0)
+        natural_soc = updated_soc
     # cum_nat[i] = cumulative natural SOC delta from start to start of hour i
     cum_nat = [0.0] * (n + 1)
     for i in range(n):
@@ -1814,10 +1826,7 @@ def simulate_soc(
                 h, soc, capacity_wh, drain_calibration_bands or [], additional_load_w=extra_w,
             )
             tentative_net = solar - (tentative_load + extra_w)
-            if tentative_net > 0:
-                tentative_net *= eff
-            tentative_soc = soc + tentative_net * duration_h / capacity_wh * 100.0
-            tentative_soc = max(0.0, min(100.0, tentative_soc))
+            tentative_soc = _advance_soc(soc, tentative_net, duration_h, capacity_wh, eff, soc_ceiling_pct)
             # From start of hour i+1 onward, assume natural-only (the
             # controller stops). Worst-case SOC achieved:
             #   min_future = tentative_soc + (min_cum_from[i+1] - cum_nat[i+1])
@@ -1825,20 +1834,18 @@ def simulate_soc(
             # tentative_soc at hour i+1.
             min_future_soc = (tentative_soc
                               + (min_cum_from[i + 1] - cum_nat[i + 1]))
-            if drain_calibration_bands:
+            if drain_calibration_bands or soc_ceiling_pct is not None:
                 future_soc = tentative_soc
                 min_future_soc = tentative_soc
                 for future_hour in forecast_hours[i + 1:]:
                     future_load = _calibrated_load(
-                        future_hour, future_soc, capacity_wh, drain_calibration_bands,
+                        future_hour, future_soc, capacity_wh, drain_calibration_bands or [],
                     )
                     future_net = float(future_hour.get("solar_w") or 0) - future_load
-                    if future_net > 0:
-                        future_net *= eff
                     future_duration = max(0.0, min(1.0, float(future_hour.get("duration_h", 1.0))))
-                    future_soc = max(0.0, min(100.0, future_soc + future_net * future_duration / capacity_wh * 100))
-                    if soc_ceiling_pct is not None:
-                        future_soc = min(soc_ceiling_pct, future_soc)
+                    future_soc = _advance_soc(
+                        future_soc, future_net, future_duration, capacity_wh, eff, soc_ceiling_pct,
+                    )
                     min_future_soc = min(min_future_soc, future_soc)
             if min_future_soc >= extra_floor:
                 applied_extra = extra_w
@@ -1853,16 +1860,7 @@ def simulate_soc(
         # net inflow positive — discharge already accounts for inverter
         # losses on the load side.
         net = solar - (load + applied_extra)
-        if net > 0:
-            net *= eff
-        soc += net * duration_h / capacity_wh * 100.0
-        soc = max(0.0, min(100.0, soc))
-        # Learned charge ceiling — multi-pack rigs plateau below 100%
-        # system SOC (weakest pack saturates, BMS curtails). Clamp here
-        # so net-positive days don't run the simulated SOC up to 100%
-        # when the real system tops out lower. None → no cap (default).
-        if soc_ceiling_pct is not None and soc > soc_ceiling_pct:
-            soc = soc_ceiling_pct
+        soc = _advance_soc(soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
         # Smart-charge floor — the user has Kasa-driven grid top-up that
         # holds SOC at or above target_sunrise_soc_pct. Modeling it as a
         # hard floor undercounts how much grid energy is actually used
@@ -1872,6 +1870,8 @@ def simulate_soc(
         out.append({**h, "load_w": round(load, 1), "net_w": round(solar - load, 1),
                     "predicted_soc": round(soc, 1),
                     "extra_load_w_applied": round(applied_extra, 1)})
+        if "load_without_baseline_w" in h:
+            out[-1]["drain_baseline_applied_w"] = round(load - float(h["load_without_baseline_w"]), 1)
     return out
 
 
@@ -2098,9 +2098,8 @@ def build_forecast(
             "load_w": round(load_w, 1),
             "cloud_cover_pct": round(float(w.get("cloud_cover_pct") or 0), 1),
         })
-        if drain_calibration:
-            forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
-            forecast_hours[-1]["drain_baseline_prior_w"] = prior_effective_parasitic_w
+        forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
+        forecast_hours[-1]["drain_baseline_prior_w"] = prior_effective_parasitic_w
 
     simulated = simulate_soc(
         starting_soc_pct, capacity_wh, forecast_hours,
@@ -2151,7 +2150,10 @@ def build_forecast(
         "pack_count": int(pack_count),
         "effective_parasitic_w": round(effective_parasitic_w, 1),
         "drain_calibration": drain_calibration or {"source": "legacy_priors", "n_runs": 0},
-        "pack_baseline_applied_w": None if drain_calibration else round(pack_baseline_w, 1),
+        "pack_baseline_applied_w": round(pack_baseline_w, 1) if any(
+            hour["drain_baseline_applied_w"] == round(prior_effective_parasitic_w, 1)
+            for hour in simulated
+        ) else None,
         "inverter_overhead_pct": round(overhead_pct, 4),
         "inverter_overhead_n_windows": overhead_n,
         "inverter_overhead_source": overhead_source,

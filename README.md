@@ -157,17 +157,30 @@ This does not validate the BMS or identify individual pack/inverter losses.
   the same SOC range. Overlapping windows and midnight crossings do not
   count as extra nights. Use an upper-quartile baseline plus a half-SOC-point
   endpoint-uncertainty allowance; retain priors if evidence is inconsistent.
-- Apply the correction only in dark hours while the **entire projected hour**
-  stays in its validated SOC range. Outside it, during solar charging, or when
-  evidence ages out, retain the conservative legacy model. Diversion lookahead
-  includes those fallback transitions.
+- When discharge crosses the fixed SOC-bin edges, additionally allow a pooled
+  fallback after **five independent nights** of consistent four-hour evidence
+  between 40% and 95% SOC. Bound it to the union of actually observed SOC
+  ranges, never bridge missing ranges, and expire each disconnected range
+  without recent evidence. Reject a materially higher-drain night even if the
+  pooled quartiles would hide it. Specific SOC fits always take precedence;
+  the pool cannot bypass their band-exit safeguards.
+- Apply the correction only while the **entire projected hour** remains a
+  net discharge within its validated range, including weak-solar twilight.
+  Outside it, during net solar charging, or when evidence ages out, retain the
+  conservative legacy model. Diversion lookahead includes these transitions
+  and charge-ceiling curtailment.
+- A learned charge ceiling limits new charging; it cannot remove energy
+  already present in the measured SOC. Real discharge still lowers SOC, and
+  later charging remains subject to the learned ceiling.
 - Load learning follows a sustained shift on multiple recent days, not one
   transient load spike. Future/incomplete hours cannot become training data.
 
 Forecasts and saved smart-charge input snapshots expose `drain_calibration`,
 including SOC bands, independent-night count, and newest evidence timestamp.
-`pack_baseline_w` remains a legacy prior, not a measured per-pack loss;
-`pack_baseline_applied_w` is null when a combined empirical model is available.
+`pack_baseline_w` remains a legacy prior, not a measured per-pack loss.
+`pack_baseline_applied_w` is non-null if any projected interval retains that
+prior, even when a calibration exists elsewhere. Each interval also reports
+`drain_baseline_applied_w`, preserved in smart-charge input snapshots.
 Charging targets, power limits, and controller modes are not retuned by this.
 
 Validation on 2026-10-13 uses a read-only NAS extract and as-of-only local replay.
@@ -186,6 +199,20 @@ legacy fallback. Strict type checking and Bandit pass for the new calibration
 core. Whole touched-file scanning also reports existing parameterized-SQL
 false positives, expected container-interface binding, and old exception
 handlers; none are introduced by this change. No runtime dependency is added.
+
+The October 15 extension was replayed using only telemetry available at each
+saved sunset decision, holding its weather, solar coefficient, load forecast,
+efficiency, capacity, and charge ceiling fixed. Original replay reproduced all
+seven saved decisions. Across five uncharged nights, the current production
+algorithm's replay MAE was 6.73 percentage points; the updated replay was 5.13.
+On the two nights after the previous calibration deploy, the predictions moved
+from 50.0% to 52.6% versus 56.27% actual, and from 55.3% to 60.7% versus 68.91%.
+Two nights with grid input were excluded from those accuracy claims. This is
+a partial improvement, not a guarantee: unsupported high-SOC ranges still use
+priors, and the latest night's replay still missed by 8.21 points. A present
+SOC of 94% also does not require a sunset prediction above 94%: weak late-day
+solar can be lower than the expected load. See
+[`docs/adr/0002-pooled-discharge-calibration.md`](docs/adr/0002-pooled-discharge-calibration.md).
 
 ## Architecture
 
