@@ -7,18 +7,19 @@ import hashlib
 import math
 import statistics
 from collections import defaultdict
-from typing import Any, TypedDict, TypeGuard
+from typing import Any, NotRequired, TypedDict, TypeGuard
 
 Sample = tuple[int, float, float, float, float | None, float | None, str | None]
 Pack = tuple[int, str, float | None, float | None, str | None, int | None]
 
 
 class SocDrainBand(TypedDict):
-    min_soc: int
-    max_soc: int
+    min_soc: float
+    max_soc: float
     baseline_w: float
     n_days: int
     newest_run_ts: int
+    source: NotRequired[str]
 
 
 class DischargeInterval(TypedDict, total=False):
@@ -257,8 +258,14 @@ def fit_system_residual(
     if current:
         runs.append(current)
     bands: list[SocDrainBand] = []
-    for minimum, maximum in ((20, 40), (40, 60), (60, 80), (80, 95)):
-        by_day: dict[int, list[tuple[float, int]]] = defaultdict(list)
+    for minimum, maximum, required_days in (
+        (20, 40, 3),
+        (40, 60, 3),
+        (60, 80, 3),
+        (80, 95, 3),
+        (40, 95, 5),
+    ):
+        by_day: dict[int, list[tuple[float, int, float, float]]] = defaultdict(list)
         for run in runs:
             for position in range(len(run) - 3):
                 window = run[position : position + 4]
@@ -274,31 +281,70 @@ def fit_system_residual(
                 if dropped_wh < output_wh - capacity_wh * 0.01 or not -75 <= baseline <= 1000:
                     continue
                 day = (window[-1]["end_ts"] + utc_offset_seconds - 12 * 3600) // 86400
-                by_day[day].append((baseline, window[-1]["end_ts"]))
+                by_day[day].append(
+                    (
+                        baseline,
+                        window[-1]["end_ts"],
+                        min(min(interval["start_soc"], interval["end_soc"]) for interval in window),
+                        max(max(interval["start_soc"], interval["end_soc"]) for interval in window),
+                    )
+                )
+        nights = sorted(by_day.items())[-10:]
         evidence = [
             (
                 statistics.median(value[0] for value in observations),
                 max(value[1] for value in observations),
+                min(value[2] for value in observations),
+                max(value[3] for value in observations),
             )
-            for _, observations in sorted(by_day.items())
-        ][-10:]
-        if len(evidence) < 3 or now_ts - max(value[1] for value in evidence) > 2 * 86400:
+            for _, observations in nights
+        ]
+        if (
+            len(evidence) < required_days
+            or now_ts - max(value[1] for value in evidence) > 2 * 86400
+        ):
             continue
         baselines = sorted(value[0] for value in evidence)
         median = statistics.median(baselines)
         lower = baselines[int((len(baselines) - 1) * 0.25)]
         upper = baselines[math.ceil((len(baselines) - 1) * 0.75)]
-        if upper - lower > max(100, abs(median) * 0.5):
+        consistency_limit = max(100, abs(median) * 0.5)
+        uncertainty_w = capacity_wh * 0.005 / 4
+        if upper - lower > consistency_limit:
             continue
-        bands.append(
-            {
-                "min_soc": minimum,
-                "max_soc": maximum,
-                "baseline_w": max(0.0, upper) + capacity_wh * 0.005 / 4,
-                "n_days": len(evidence),
-                "newest_run_ts": max(value[1] for value in evidence),
-            }
-        )
+        if required_days == 5 and max(baselines) - upper > consistency_limit + uncertainty_w:
+            continue
+        band: SocDrainBand = {
+            "min_soc": min(value[2] for value in evidence) if required_days == 5 else minimum,
+            "max_soc": max(value[3] for value in evidence) if required_days == 5 else maximum,
+            "baseline_w": max(0.0, upper) + uncertainty_w,
+            "n_days": len(evidence),
+            "newest_run_ts": max(value[1] for value in evidence),
+        }
+        if required_days == 5:
+            band["source"] = "pooled_discharge"
+            coverage: list[tuple[float, float, int]] = []
+            for start_soc, end_soc, newest in sorted(
+                (value[2], value[3], value[1])
+                for _, observations in nights
+                for value in observations
+            ):
+                if coverage and start_soc <= coverage[-1][1]:
+                    previous = coverage[-1]
+                    coverage[-1] = (
+                        previous[0],
+                        max(previous[1], end_soc),
+                        max(previous[2], newest),
+                    )
+                else:
+                    coverage.append((start_soc, end_soc, newest))
+            for start_soc, end_soc, newest in coverage:
+                if now_ts - newest <= 2 * 86400:
+                    bands.append(
+                        {**band, "min_soc": start_soc, "max_soc": end_soc, "newest_run_ts": newest}
+                    )
+        else:
+            bands.append(band)
     if not bands:
         return None
     selected = max(bands, key=lambda band: band["n_days"])

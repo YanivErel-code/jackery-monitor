@@ -127,6 +127,69 @@ def test_inconsistent_night_residuals_do_not_relax_fallback():
     assert fitted(rows) is None
 
 
+def crossing_history(days=5):
+    rows = clean_history(days=days)
+    for index, row in enumerate(rows):
+        hour = index % 8
+        row["calibration"]["start_soc"] += 20
+        row["calibration"]["end_soc"] += 20
+        if hour >= 4:
+            row["calibration"]["quality"] = "charging"
+    return rows
+
+
+def test_pooled_discharge_does_not_lose_evidence_at_arbitrary_soc_bin_edges():
+    result = fitted(crossing_history())
+    assert result is not None
+    pooled = next(band for band in result["soc_bands"] if band.get("source") == "pooled_discharge")
+    assert pooled["n_days"] == 5
+    assert pooled["baseline_w"] == pytest.approx(177.8)
+    assert pooled["min_soc"] > 70
+    assert pooled["max_soc"] == 85
+
+
+def test_pooled_discharge_requires_five_independent_nights():
+    assert fitted(crossing_history(days=4)) is None
+
+
+def test_pooled_discharge_cannot_hide_a_recent_higher_drain_regime():
+    rows = crossing_history(days=10)
+    for hour, row in enumerate(rows[-8:]):
+        row["calibration"]["start_soc"] = 85 - hour * 1150 / CAPACITY * 100
+        row["calibration"]["end_soc"] = 85 - (hour + 1) * 1150 / CAPACITY * 100
+    assert fitted(rows, now=BASE + 10 * 86400) is None
+
+
+def test_pooled_discharge_keeps_low_soc_and_bad_intervals_out():
+    rows = crossing_history()
+    for row in rows:
+        row["calibration"]["start_soc"] -= 50
+        row["calibration"]["end_soc"] -= 50
+    result = fitted(rows)
+    assert result is None or all(
+        band.get("source") != "pooled_discharge" for band in result["soc_bands"]
+    )
+    rows = crossing_history()
+    for row in rows:
+        if row["calibration"]["start_ts"] % 86400 == 2 * 3600:
+            row["calibration"]["quality"] = "stale"
+    assert fitted(rows) is None
+
+
+def test_pooled_discharge_cannot_fill_unobserved_gaps_between_soc_ranges():
+    rows = crossing_history(days=10)
+    for row in rows[5 * 8 :]:
+        row["calibration"]["start_soc"] -= 30
+        row["calibration"]["end_soc"] -= 30
+    result = fitted(rows, now=BASE + 10 * 86400)
+    assert result is not None
+    assert not any(
+        band["min_soc"] <= 65 <= band["max_soc"]
+        for band in result["soc_bands"]
+        if band.get("source") == "pooled_discharge"
+    )
+
+
 def telemetry_fixture():
     samples = []
     packs = []
