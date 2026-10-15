@@ -1957,7 +1957,8 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     start = plan.decided_at // 3600 * 3600
     weather_keys = ("ts", "ghi_w_m2", "cloud_cover_pct")
     forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w",
-                     "load_without_baseline_w", "drain_baseline_prior_w")
+                     "load_without_baseline_w", "drain_baseline_prior_w",
+                     "drain_baseline_applied_w")
     model_keys = ("solar_coefficient", "fit_samples", "diurnal_shape", "charge_efficiency",
                   "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",

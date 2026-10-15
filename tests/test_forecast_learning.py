@@ -55,6 +55,20 @@ def test_forecast_uses_validated_system_baseline_instead_of_pack_prior():
     assert result["forecast"][-1]["predicted_soc"] > 40
 
 
+def test_forecast_reports_pack_prior_when_available_calibration_does_not_apply():
+    history = clean_history()
+    for row in history:
+        row.update(
+            output_w=500, output_wh=500, solar_wh=0, ac_input_wh=0, battery_pct=60, system_soc=60
+        )
+    now = BASE + 5 * 86400
+    weather = [{"ts": now + hour * 3600, "ghi_w_m2": 0} for hour in range(1, 3)]
+    result = forecaster.build_forecast(history, weather, 94, CAPACITY, now_ts=now, pack_count=5)
+    assert result["drain_calibration"]["source"] == "validated_system_residual"
+    assert result["pack_baseline_applied_w"] == 300
+    assert result["forecast"][0]["drain_baseline_applied_w"] >= 300
+
+
 def calibrated_hours(hours):
     return [
         {
@@ -123,3 +137,91 @@ def test_extra_load_without_floor_still_falls_back_when_leaving_calibrated_range
     assert result[0]["load_w"] == 850
     assert result[0]["extra_load_w_applied"] == 1000
     assert result[0]["predicted_soc"] < 40
+
+
+def test_calibration_can_correct_net_discharging_twilight_not_solar_charging():
+    band = [{"min_soc": 40, "max_soc": 60, "baseline_w": 100}]
+    hours = calibrated_hours(1)
+    hours[0]["solar_w"] = 200
+    result = forecaster.simulate_soc(50, CAPACITY, hours, drain_calibration_bands=band)
+    assert result[0]["load_w"] == 600
+    assert result[0]["predicted_soc"] < 50
+
+
+def test_pooled_calibration_cannot_extrapolate_or_override_specific_soc_evidence():
+    pooled = {"min_soc": 45, "max_soc": 85, "baseline_w": 100, "source": "pooled_discharge"}
+    specific = {"min_soc": 40, "max_soc": 60, "baseline_w": 200}
+    assert (
+        forecaster.simulate_soc(
+            94,
+            CAPACITY,
+            calibrated_hours(1),
+            drain_calibration_bands=[pooled],
+        )[0]["load_w"]
+        == 850
+    )
+    assert (
+        forecaster.simulate_soc(
+            46,
+            CAPACITY,
+            calibrated_hours(1),
+            drain_calibration_bands=[pooled],
+        )[0]["load_w"]
+        == 850
+    )
+    assert (
+        forecaster.simulate_soc(
+            50,
+            CAPACITY,
+            calibrated_hours(1),
+            drain_calibration_bands=[specific, pooled],
+        )[0]["load_w"]
+        == 700
+    )
+
+
+def test_pooled_calibration_cannot_bypass_a_specific_band_exit():
+    specific = {"min_soc": 40, "max_soc": 60, "baseline_w": 200}
+    pooled = {"min_soc": 30, "max_soc": 85, "baseline_w": 0, "source": "pooled_discharge"}
+    result = forecaster.simulate_soc(
+        41,
+        CAPACITY,
+        calibrated_hours(1),
+        drain_calibration_bands=[specific, pooled],
+    )
+    assert result[0]["load_w"] == 850
+
+
+@pytest.mark.parametrize("net_w", [0, 600, -100])
+def test_charge_ceiling_cannot_destroy_soc_already_in_the_battery(net_w):
+    hours = [{"ts": 3600, "solar_w": max(0, net_w), "load_w": max(0, -net_w)}]
+    result = forecaster.simulate_soc(94, CAPACITY, hours, soc_ceiling_pct=90)
+    expected = 94 + min(0, net_w) / CAPACITY * 100
+    assert result[0]["predicted_soc"] == pytest.approx(round(expected, 1))
+
+
+def test_charge_ceiling_does_not_stay_raised_after_real_discharge():
+    hours = [
+        {"ts": 3600, "solar_w": 0, "load_w": 3024},
+        {"ts": 7200, "solar_w": 10000, "load_w": 0},
+    ]
+    result = forecaster.simulate_soc(94, CAPACITY, hours, soc_ceiling_pct=90)
+    assert result[0]["predicted_soc"] == 84
+    assert result[1]["predicted_soc"] == 90
+
+
+def test_diversion_lookahead_cannot_spend_energy_that_a_charge_ceiling_curtails():
+    hours = [
+        {"ts": 3600, "solar_w": 0, "load_w": 0},
+        {"ts": 7200, "solar_w": 40000, "load_w": 0},
+        {"ts": 10800, "solar_w": 0, "load_w": CAPACITY * 0.7},
+    ]
+    result = forecaster.simulate_soc(
+        90,
+        CAPACITY,
+        hours,
+        soc_ceiling_pct=90,
+        extra_load_w=3024,
+        extra_load_floor_pct=25,
+    )
+    assert all(hour["extra_load_w_applied"] == 0 for hour in result)
