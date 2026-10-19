@@ -35,7 +35,10 @@ are not equivalent evidence and must not be indiscriminately deleted.
    energy integrator and invalidate affected dashboard/history/fit caches after
    exclusion so recovery does not integrate across the unknown gap.
 6. Provide selective, transactional restoration with collision and overlapping-
-   incident guards. Never restore an entire old database over newer observations.
+   incident guards. Check forecast/actual windows against other incidents too:
+   adjacent intervals can share a forecast hour or observation window. Validate
+   archive device/key bindings before any restoration. Never restore an entire
+   old database over newer observations.
 
 This explicitly supersedes ADR 0003's **“Do not retrospectively rewrite historical
 telemetry”** decision: active analytics now exclude confirmed freeze lead-up,

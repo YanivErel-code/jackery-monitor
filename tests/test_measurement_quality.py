@@ -130,6 +130,41 @@ def test_restore_does_not_bypass_an_overlapping_incident(quality_db):
         quality_db.restore_measurements("MAIN", 600)
 
 
+def test_restore_does_not_reinsert_a_forecast_covered_by_an_adjacent_incident(quality_db):
+    quality_db.record_forecast("MAIN", 0, [{"ts": 3600, "predicted_soc": 30}])
+    quality_db.quarantine_measurements("MAIN", 600, 720, reason="first")
+    quality_db.quarantine_measurements("MAIN", 720, 780, reason="second")
+    with pytest.raises(ValueError, match="another quarantine"):
+        quality_db.restore_measurements("MAIN", 600)
+    assert quality_db.totals("MAIN")["lifetime"]["output_wh"] == 8
+
+
+def test_restore_does_not_reinsert_an_actual_covered_by_an_adjacent_incident(quality_db):
+    with quality_db._conn() as connection:
+        connection.execute(
+            "INSERT INTO daily_solar_summary(date,device_sn,sunrise_ts,actual_sunrise_soc_pct,updated_at) "
+            "VALUES(?,?,?,?,?)", ("2026-10-18", "MAIN", 650, 50, 680),
+        )
+    quality_db.quarantine_measurements("MAIN", 600, 720, reason="first")
+    quality_db.quarantine_measurements("MAIN", 720, 780, reason="second")
+    with pytest.raises(ValueError, match="another quarantine"):
+        quality_db.restore_measurements("MAIN", 600)
+
+
+def test_restore_rejects_archive_rows_bound_to_a_different_device(quality_db):
+    quality_db.quarantine_measurements("MAIN", 600, 720, reason="test")
+    with quality_db._conn() as connection:
+        row = connection.execute(
+            "SELECT row_key,row_json FROM measurement_quarantine WHERE table_name='samples' LIMIT 1"
+        ).fetchone()
+        original = json.loads(row[1])
+        original["device_sn"] = "UNRELATED"
+        connection.execute("UPDATE measurement_quarantine SET row_json=? WHERE row_key=?",
+                           (json.dumps(original), row[0]))
+    with pytest.raises(ValueError, match="archive key/device"):
+        quality_db.restore_measurements("MAIN", 600)
+
+
 def test_sql_failure_rolls_back_incident_archive_and_already_deleted_rows(quality_db):
     with quality_db._conn() as connection:
         connection.execute("CREATE TRIGGER fail_delete BEFORE DELETE ON battery_packs "

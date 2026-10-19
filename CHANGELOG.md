@@ -9,6 +9,8 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Keep selective restores from reintroducing forecast/actual windows covered by
+  another incident, including adjacent intervals; validate archive device/key bindings.
 - Persist frozen-measurement evidence across bridge restarts, stop pack-history
   persistence and independent SOC rules from using flagged readings, and
   reversibly quarantine the detection lead-up. Preserve original rows and
