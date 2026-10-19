@@ -44,6 +44,11 @@ SUMMARY_FIELDS = frozenset({
     "predicted_sunset_soc_pct", "predicted_sunrise_soc_pct", "sunset_forecast_soc_pct",
     "sunset_forecast_made_at",
 })
+ACTUAL_TARGETS = {
+    "actual_sunset_soc_pct": "sunset_ts",
+    "actual_sunrise_soc_pct": "sunrise_ts",
+    "sunset_forecast_actual_soc_pct": "sunset_forecast_sunrise_ts",
+}
 QUARANTINE_QUERIES = {
     "samples": (
         "SELECT * FROM samples WHERE device_sn=? AND bucket>=? AND bucket<?",
@@ -89,10 +94,12 @@ class QualityHost(Protocol):
     _last: dict[str, tuple[float, ...]]
 
 
-def overlaps(connection: sqlite3.Connection, device_sn: str, start: float, end: float) -> bool:
+def overlaps(connection: sqlite3.Connection, device_sn: str, start: float, end: float,
+             *, exclude_start: int | None = None) -> bool:
     return connection.execute(
         "SELECT 1 FROM measurement_incidents WHERE device_sn=? AND status='quarantined' "
-        "AND start_ts<? AND end_ts>? LIMIT 1", (device_sn, end, start),
+        "AND start_ts<? AND end_ts>? AND (? IS NULL OR start_ts<>?) LIMIT 1",
+        (device_sn, end, start, exclude_start, exclude_start),
     ).fetchone() is not None
 
 
@@ -127,10 +134,7 @@ def _archive(connection: sqlite3.Connection, device_sn: str, start: int,
 
 def _summary_patch(row: sqlite3.Row, start: int, end: int) -> dict[str, object]:
     patch: dict[str, object] = {}
-    for field, target in (
-        ("actual_sunset_soc_pct", "sunset_ts"), ("actual_sunrise_soc_pct", "sunrise_ts"),
-        ("sunset_forecast_actual_soc_pct", "sunset_forecast_sunrise_ts"),
-    ):
+    for field, target in ACTUAL_TARGETS.items():
         timestamp = row[target]
         if timestamp is not None and timestamp + 1800 > start and timestamp - 1800 < end:
             if row[field] is not None:
@@ -230,11 +234,26 @@ class MeasurementQualityMixin:
                     raise ValueError("invalid quarantine table")
                 original = json.loads(original_json)
                 key_values = json.loads(key_json)
+                parent_column = "parent_sn" if table == "battery_packs" else "device_sn"
+                if (original.get(parent_column) != device_sn
+                        or key_values != [original[column] for column in TABLE_KEYS[table]]):
+                    raise ValueError("archive key/device mismatch; refusing restore")
+                if table == "forecast_predictions" and (
+                        overlaps(connection, device_sn, original["made_at"], original["made_at"] + 3600,
+                                 exclude_start=start_ts)
+                        or overlaps(connection, device_sn, original["target"] - 1800, original["target"] + 1800,
+                                    exclude_start=start_ts)):
+                    raise ValueError("another quarantine covers this forecast window")
                 current = connection.execute(RESTORE_QUERIES[table], key_values).fetchone()
                 if patch_json is not None:
                     patch = json.loads(patch_json)
                     if table != "daily_solar_summary" or not patch.keys() <= SUMMARY_FIELDS or current is None:
                         raise ValueError("invalid or missing summary quarantine row")
+                    for field, target_column in ACTUAL_TARGETS.items():
+                        target = original.get(target_column)
+                        if field in patch and target is not None and overlaps(
+                                connection, device_sn, target - 1800, target + 1800, exclude_start=start_ts):
+                            raise ValueError("another quarantine covers this actual observation window")
                     if any(current[column] is not None and current[column] != value for column, value in patch.items()):
                         raise ValueError("summary changed; refusing restore")
                     for column, value in patch.items():
