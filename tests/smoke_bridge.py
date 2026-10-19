@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -35,6 +36,8 @@ os.environ["BRIDGE_HOST"] = "127.0.0.1"
 os.environ["BRIDGE_PORT"] = str(BRIDGE_PORT)
 os.environ["BLE_POLL_INTERVAL_S"] = "5"
 os.environ["CLOUD_POLL_INTERVAL_S"] = "5"
+_state_directory = tempfile.TemporaryDirectory(prefix="jackery-bridge-smoke-")
+os.environ["JACKERY_CREDS_FILE"] = str(Path(_state_directory.name) / "credentials.json")
 
 import smoke_cloud  # spins fake jackery server, patches cloud_client
 import cloud_client as cc
