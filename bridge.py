@@ -59,6 +59,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from Crypto.Cipher import AES
 
@@ -550,7 +551,8 @@ class State:
         self.soc_source_ts_by_sn: dict[str, float] = {}
         self.soc_source_by_sn: dict[str, str] = {}
         self.soc_revision_by_sn: dict[str, int] = {}
-        self.frozen_telemetry = FrozenTelemetryDetector()
+        self.frozen_telemetry = FrozenTelemetryDetector(
+            state_path=Path(_creds_file_path()).with_name("measurement-health.json"))
         self.cache_generation = 0
         # Per-expansion-battery state, keyed by parent (host) device SN.
         # Updated in real-time from MQTT SubDevicePropertyChange pushes.
@@ -823,9 +825,10 @@ def _cache_pack_snapshot(device_sn: str, packs: list[dict], *, source: str,
     _observe_cloud_measurements(device_sn)
 
 
-def _clear_device_caches(device_sn: str | None = None) -> None:
+def _clear_device_caches(device_sn: str | None = None, *, forget_measurements: bool = True) -> None:
     """Forget telemetry and provenance together on account/device reset."""
-    state.frozen_telemetry.forget(device_sn)
+    if forget_measurements:
+        state.frozen_telemetry.forget(device_sn)
     state.cache_generation += 1
     maps = [state.props_raw_by_sn, state.telemetry_by_sn, state.ts_by_sn,
             state.soc_source_ts_by_sn, state.soc_source_by_sn, state.soc_revision_by_sn,
@@ -909,14 +912,18 @@ async def _get_battery_packs(device_sn: str, *, force_refresh: bool = False) -> 
             await _annotate_pack_upgrades(device_sn, packs)
         # Annotation can await HTTP too: report the latest snapshot if a
         # pack push arrived in the meantime.
+        suspect = state.frozen_telemetry.health(device_sn, time.time())["suspect"]
         result = {
-            "ok": not _packs_stale(device_sn), "device_sn": device_sn,
+            "ok": not _packs_stale(device_sn) and not suspect, "device_sn": device_sn,
             "packs": state.battery_packs_by_sn.get(device_sn, []),
             "fetched_at": state.packs_ts_by_sn.get(device_sn, 0.0),
             "source": state.packs_source_by_sn.get(device_sn),
-            "stale": _packs_stale(device_sn),
+            "stale": _packs_stale(device_sn) or suspect,
+            "measurement_suspect": suspect,
         }
-        if result["stale"]:
+        if suspect:
+            result["error"] = "Frozen cloud measurements; retaining last-known packs"
+        elif result["stale"]:
             result["error"] = state.packs_refresh_error_by_sn.get(
                 device_sn, "pack telemetry is stale")
         return result
@@ -1513,7 +1520,7 @@ async def handle(method: str, params: dict) -> dict:
             state.cloud_telemetry = None
             state.cloud_props_raw = {}
             state.cloud_ts = None
-            _clear_device_caches(match["device_sn"])
+            _clear_device_caches(match["device_sn"], forget_measurements=False)
             log.info("force_repoll set by: select_device RPC")
             state.cloud_force_repoll.set()
         return {"ok": True, "device_id": device_id, "name": match["name"]}
@@ -1759,6 +1766,7 @@ async def main() -> None:
             await stop.wait()
         finally:
             log.info("Shutting down bridge...")
+            state.frozen_telemetry.flush()
             for t in bg:
                 t.cancel()
             if state.cloud_client:

@@ -9,6 +9,11 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Persist frozen-measurement evidence across bridge restarts, stop pack-history
+  persistence and independent SOC rules from using flagged readings, and
+  reversibly quarantine the detection lead-up. Preserve original rows and
+  controller audit events; prevent late samples, forecasts and actual backfills
+  from reintroducing excluded data. Keep missing energy and sunrise SOC unknown.
 - Detect per-device frozen discharge measurements even when cached HTTP
   responses keep arriving. Reconnect the cloud session with bounded backoff,
   keep unresolved readings visibly suspect, and exclude them from new energy
