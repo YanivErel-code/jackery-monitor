@@ -42,20 +42,26 @@ class ForecastTablesMixin:
         if not rows:
             return 0
         with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
             # A dashboard worker can wait for the writer lock while the
             # cloud account changes. Recheck after obtaining the connection.
             if should_record is not None and not should_record():
                 return 0
-            c.executemany(
+            written = c.executemany(
                 """INSERT OR REPLACE INTO forecast_predictions
                        (device_sn, made_at, target, predicted_soc)
-                   VALUES (?, ?, ?, ?)""",
-                rows,
+                   SELECT ?, ?, ?, ? WHERE NOT EXISTS (
+                       SELECT 1 FROM measurement_incidents
+                        WHERE device_sn=? AND status='quarantined'
+                          AND ((start_ts<? AND end_ts>?)
+                            OR (start_ts<? AND end_ts>?)))""",
+                [(*row, device_sn, row[1] + 3600, row[1], row[2] + 1800, row[2] - 1800)
+                 for row in rows],
             )
             if should_record is not None and not should_record():
                 c.rollback()
                 return 0
-        return len(rows)
+        return max(0, written.rowcount)
 
     def prediction_accuracy(self, device_sn: str,
                             max_age_days: int = 14,
@@ -99,6 +105,11 @@ class ForecastTablesMixin:
                     WHERE p.device_sn = ?
                       AND p.target <= ?
                       AND p.made_at >= ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM measurement_incidents i
+                           WHERE i.device_sn=p.device_sn AND i.status='quarantined'
+                             AND ((i.start_ts<p.made_at+3600 AND i.end_ts>p.made_at)
+                               OR (i.start_ts<p.target+1800 AND i.end_ts>p.target-1800)))
                     ORDER BY p.target DESC
                     LIMIT ?""",
                 (device_sn, now, cutoff_low, int(limit)),

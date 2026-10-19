@@ -30,6 +30,8 @@ from typing import Any, TypedDict
 
 from automation_tables import AutomationTablesMixin
 from forecast_tables import ForecastTablesMixin
+from measurement_quality import SCHEMA as QUALITY_SCHEMA
+from measurement_quality import MeasurementQualityMixin, overlaps
 
 
 class EnergyWindow(TypedDict):
@@ -354,7 +356,7 @@ DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
 }
 
 
-class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
+class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMixin):
     """Top-level energy DB.
 
     The bulk of read/write methods are direct members below
@@ -372,7 +374,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         # per-device last-reading state for trapezoidal integration
-        self._last: dict[str, tuple[float, float, float, float, float]] = {}
+        self._last: dict[str, tuple[float, ...]] = {}
         # ^ device_sn -> (ts, input_w, output_w, solar_w, ac_input_w)
         self._init()
         log.info("Energy DB at %s", path)
@@ -422,6 +424,7 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
     def _init(self) -> None:
         with self._conn() as c:
             c.executescript(SCHEMA)
+            c.executescript(QUALITY_SCHEMA)
             # Backfill columns added after the original schema ship — pre-v0.1.0
             # databases won't have solar_wh / last_solar_w; ALTER TABLE adds them
             # with DEFAULT so existing rows are valid.
@@ -558,6 +561,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         plug isn't part of the Jackery output chain."""
         if not device_sn:
             return
+        if self.measurement_quarantined(device_sn, ts):
+            self._last.pop(device_sn, None)
+            return
         prev = self._last.get(device_sn)
         self._last[device_sn] = (ts, float(input_w), float(output_w),
                                   float(solar_w), float(ac_input_w),
@@ -595,6 +601,10 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         bucket = int(ts // BUCKET_S) * BUCKET_S
 
         with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if overlaps(c, device_sn, bucket, bucket + BUCKET_S):
+                self._last.pop(device_sn, None)
+                return
             c.execute(
                 """INSERT INTO samples
                        (device_sn, bucket, input_wh, output_wh, solar_wh, ac_input_wh,
@@ -917,6 +927,9 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         if not prepared:
             return 0
         with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if overlaps(c, parent_sn, ts, ts + 1):
+                return 0
             c.executemany(
                 """INSERT OR REPLACE INTO battery_packs
                        (ts, parent_sn, pack_sn, device_order,
@@ -1030,6 +1043,11 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             return
         now = int(time.time())
         with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            writing_predictions = (predicted_sunset_soc_pct is not None
+                                   or predicted_sunrise_soc_pct is not None)
+            if writing_predictions and overlaps(c, device_sn, now, now + 1):
+                return
             existing = c.execute(
                 """SELECT sunset_ts, sunrise_ts,
                           predicted_sunset_soc_pct, actual_sunset_soc_pct,
@@ -1044,6 +1062,12 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
             # predicted_* and shouldn't make stale rows look fresh.
             writing_predictions = (predicted_sunset_soc_pct is not None
                                    or predicted_sunrise_soc_pct is not None)
+            sunset_target = sunset_ts if sunset_ts is not None else existing[0] if existing else None
+            sunrise_target = sunrise_ts if sunrise_ts is not None else existing[1] if existing else None
+            if sunset_target is not None and overlaps(c, device_sn, sunset_target - 1800, sunset_target + 1800):
+                actual_sunset_soc_pct = None
+            if sunrise_target is not None and overlaps(c, device_sn, sunrise_target - 1800, sunrise_target + 1800):
+                actual_sunrise_soc_pct = None
             if existing:
                 merged = (
                     sunset_ts if sunset_ts is not None else existing[0],
@@ -1185,8 +1209,13 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
                                   SET sunset_forecast_actual_soc_pct = ?, updated_at = ?
                                 WHERE date = ? AND device_sn = ?
                                   AND sunset_forecast_sunrise_ts = ?
-                                  AND sunset_forecast_actual_soc_pct IS NULL""",
-                            (actual, now, date, device_sn, snapshot_target),
+                                  AND sunset_forecast_actual_soc_pct IS NULL
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM measurement_incidents
+                                       WHERE device_sn=? AND status='quarantined'
+                                         AND start_ts<? AND end_ts>?)""",
+                            (actual, now, date, device_sn, snapshot_target,
+                             device_sn, snapshot_target + 1800, snapshot_target - 1800),
                         )
                         filled += result.rowcount
         return filled
@@ -1243,6 +1272,8 @@ class EnergyDB(ForecastTablesMixin, AutomationTablesMixin):
         matches the predicted (which is system-weighted). Kept as a
         primitive: `system_soc_at()` calls it internally."""
         with self._conn() as c:
+            if overlaps(c, device_sn, ts - window_s, ts + window_s):
+                return None
             row = c.execute(
                 """SELECT AVG(last_battery_pct)
                      FROM samples
