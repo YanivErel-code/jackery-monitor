@@ -101,6 +101,23 @@ async def test_stale_pack_snapshot_skips_forecast_and_plug(monitor):
     monitor.toggle.assert_not_awaited()
 
 
+async def test_frozen_measurements_skip_forecast_and_charging_despite_fresh_receipts(monitor):
+    monitor.state.last_status["measurement_suspect"] = True
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "skip"
+    assert "frozen" in plan.reason.lower()
+    assert not monitor.forecast_calls
+    monitor.toggle.assert_not_awaited()
+
+
+async def test_frozen_measurements_do_not_produce_a_new_ready_forecast(monitor):
+    monitor.state.last_status["measurement_suspect"] = True
+    result = await monitor._build_and_record_forecast("MAIN")
+    assert result["ready"] is False
+    assert "frozen" in result["error"].lower()
+    assert not monitor.forecast_calls
+
+
 async def test_missing_pack_soc_does_not_count_as_empty_energy(monitor):
     monitor.state.battery_packs_by_sn["MAIN"][0]["rb"] = None
     plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
