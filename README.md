@@ -666,14 +666,39 @@ persists and retries back off from 30 minutes to at most one per four hours;
 HTTP 200 alone never clears it. Intentional pauses and session-contention
 cooldowns remain respected. Real measurement progress clears the warning.
 The dashboard marks affected readings as an error, and the monitor stops
-recording new energy/chart samples or generating forecasts and charging
-decisions from those suspect values. Existing historical rows are not rewritten.
+recording new energy/chart samples, pack snapshots, or generating forecasts and
+smart/solar/independent SOC-rule decisions from those suspect values. Existing
+plug states are not blindly toggled merely because measurements are suspect.
+
+On confirmation, the monitor also quarantines the detection lead-up: affected
+minute readings, pack snapshots, and hour-rounded forecast/actual windows are
+removed from active analytics in one transaction. Their original rows remain
+in `measurement_quarantine`; persistent `measurement_incidents` record the
+device, interval and reason. Invalid sunrise/sunset actuals stay unknown,
+not zero or interpolated. Valid earlier sunset forecasts and all controller
+audit events remain intact. Totals across a gap represent **partial observed
+energy**, not a reconstructed full day. Late writes and actual backfills cannot
+silently repopulate an excluded interval. A selective, conflict-checking
+`EnergyDB.restore_measurements(device_sn, start_ts)` is available for an
+explicitly reviewed rollback; do not replace the live database with an old backup.
+
+Measurement-health evidence is saved atomically next to the cloud credential
+file in `measurement-health.json` (mode 0600). Confirmed suspicion and reconnect
+backoff survive restarts; unconfirmed observations cannot accumulate through
+unobserved gaps. Corrupt state is warned about and remains suspect until
+measurement progress, rather than silently reporting a healthy connection.
+An explicit account reset clears its evidence.
 
 Per-device `cloud.devices_telemetry[*].measurement_health` reports the unchanged
 duration, reported-power discharge budget, suspicion flag, and recovery attempts.
+It also reports `unchanged_since`, the conservative start used for quarantine.
 `cloud.frozen_devices` identifies affected devices independently of HTTP receipt
 age. At 551 W on a 30,240 Wh system, unchanged readings cross the energy guard
 after about 66 minutes, rather than remaining silently "connected" overnight.
+Until confirmation, these readings are provisional and can still appear in the
+dashboard. This guard is not a general detector for changing-power faults,
+charging plateaus, or BMS SOC recalibration; SOC-only discontinuities must not
+be used to erase otherwise credible measured power.
 
 - **Per-input solar (HPV vs LPV) isn't in the Jackery cloud API.** Only the
   total solar input (`ip - acip - cip`) is exposed. Confirmed empirically

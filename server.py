@@ -348,6 +348,7 @@ async def poll_loop() -> None:
                 state.last_cloud_meta = cloud_meta
                 state.last_status = status_dict
                 state.last_update_ts = ts
+                _sync_measurement_quality(ts)
 
                 # Cloud-stall alerting: two distinct conditions, both
                 # surfaced as one-shot banner alerts so the user notices.
@@ -466,7 +467,7 @@ async def poll_loop() -> None:
                          getattr(dev, "model_code", None), ts)
                     )
                 for sn, t, name, model_code, frame_ts in samples_to_write:
-                    if t.get("measurement_suspect"):
+                    if t.get("measurement_suspect") or _measurement_suspect(sn):
                         continue
                     state.energy.upsert_device(sn, name, model_code, None)
                     # Home REST powers describe grid/load boundaries, not battery
@@ -536,7 +537,8 @@ async def poll_loop() -> None:
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
                 # is independent and faster).
-                if (not status_dict.get("measurement_suspect") and not _is_home_device(dev_sn)
+                if (not status_dict.get("measurement_suspect") and not _measurement_suspect(dev_sn)
+                        and not _is_home_device(dev_sn)
                         and ts - state.last_history_ts >= LIVE_CHART_INTERVAL_S):
                     state.history.append({
                         "ts": ts,
@@ -558,7 +560,8 @@ async def poll_loop() -> None:
                 # unchanged on single-unit devices.
                 active_sn = state.device.device_sn if state.device else None
                 active_model_code = getattr(state.device, "model_code", None) if state.device else None
-                bp_system = _system_soc_pct(float(bp), active_sn, active_model_code) if bp is not None else None
+                bp_system = (_system_soc_pct(float(bp), active_sn, active_model_code)
+                             if bp is not None and not _measurement_suspect(active_sn) else None)
                 if bp_system is not None and bp_system <= threshold and not state.low_battery_alerted:
                     state.low_battery_alerted = True
                     await broadcast({
@@ -595,7 +598,7 @@ async def poll_loop() -> None:
                 for sn, entry in devs_telemetry.items():
                     t = (entry or {}).get("telemetry") or {}
                     bp_dev = t.get("battery_percent")
-                    if bp_dev is not None and not _is_home_device(sn):
+                    if bp_dev is not None and not _is_home_device(sn) and not _measurement_suspect(sn):
                         soc_by_sn[sn] = _system_soc_pct(
                             float(bp_dev), sn, model_code_by_sn.get(str(sn)),
                         )
@@ -603,7 +606,8 @@ async def poll_loop() -> None:
                 # without an explicit jackery_device_sn). active_sn /
                 # active_model_code already computed in the low-battery
                 # alert block above; reuse.
-                if active_sn and bp is not None and active_sn not in soc_by_sn and not _is_home_device(active_sn):
+                if (active_sn and bp is not None and active_sn not in soc_by_sn
+                        and not _is_home_device(active_sn) and not _measurement_suspect(active_sn)):
                     soc_by_sn[active_sn] = _system_soc_pct(
                         float(bp), active_sn, active_model_code,
                     )
@@ -643,7 +647,7 @@ async def poll_loop() -> None:
                     if _is_home_device(r_sn):
                         continue
                     r_t = (r_entry or {}).get("telemetry") or {}
-                    if r_t.get("measurement_suspect"):
+                    if r_t.get("measurement_suspect") or _measurement_suspect(r_sn):
                         continue
                     r_st = state.rescue_by_sn.setdefault(
                         r_sn, rescue.RescueState())
@@ -740,6 +744,40 @@ def _sync_cloud_metadata() -> None:
     cloud = snapshot.get("cloud")
     if isinstance(cloud, dict):
         state.last_cloud_meta = cloud
+
+
+def _measurement_suspect(device_sn: str | None) -> bool:
+    if not device_sn:
+        return False
+    cloud = state.last_cloud_meta or {}
+    entry = (cloud.get("devices_telemetry") or {}).get(device_sn) or {}
+    return bool((entry.get("telemetry") or {}).get("measurement_suspect")
+                or (entry.get("measurement_health") or {}).get("suspect")
+                or device_sn in (cloud.get("frozen_devices") or [])
+                or (state.device and state.device.device_sn == device_sn
+                    and (state.last_status or {}).get("measurement_suspect")))
+
+
+def _sync_measurement_quality(now: float) -> None:
+    entries = (state.last_cloud_meta or {}).get("devices_telemetry") or {}
+    for device_sn, entry in entries.items():
+        if not _measurement_suspect(device_sn) or _is_home_device(device_sn):
+            continue
+        start = (entry.get("measurement_health") or {}).get("unchanged_since")
+        if (not isinstance(start, (int, float)) or isinstance(start, bool)
+                or not isfinite(start) or not 0 <= start <= now):
+            start = now
+        end = (int(now) // 60 + 1) * 60
+        result = state.energy.quarantine_measurements(
+            device_sn, start, end, reason="Confirmed frozen cloud measurements")
+        if result["archived_rows"]:
+            state.dashboard_cache.clear()
+            state.view_history_cache.clear()
+            _param_fit_cache.pop((device_sn, "_history"), None)
+            if state.device and state.device.device_sn == device_sn:
+                state.reset_live_history()
+            log.warning("Quarantined frozen measurements: start=%d end=%d rows=%d",
+                        result["start_ts"], result["end_ts"], result["archived_rows"])
 
 
 def _portable_control_ready(device_sn: str | None) -> bool:
@@ -1038,6 +1076,10 @@ async def _refresh_packs_unlocked(device_sn: str, ts: float, *,
     per-SN by BATTERY_PACK_REFRESH_S; on failure we deliberately do
     NOT advance the per-device timestamp so the next tick retries
     immediately rather than waiting a full refresh window."""
+    if _measurement_suspect(device_sn):
+        state.battery_pack_meta_by_sn.setdefault(device_sn, {}).update(
+            stale=True, observed_at=ts, error="Frozen cloud measurements; retaining last-known packs")
+        return
     last_ts = state.last_packs_ts_by_sn.get(device_sn, 0.0)
     if not force_refresh and ts - last_ts < BATTERY_PACK_REFRESH_S:
         return
@@ -1055,6 +1097,10 @@ async def _refresh_packs_unlocked(device_sn: str, ts: float, *,
         meta = state.battery_pack_meta_by_sn.setdefault(device_sn, {})
         meta.update(stale=True, error=str(e), observed_at=ts)
         log.warning("battery_packs refresh failed for %s: %s", device_sn, e)
+        return
+    if _measurement_suspect(device_sn) or (result or {}).get("measurement_suspect"):
+        state.battery_pack_meta_by_sn.setdefault(device_sn, {}).update(
+            stale=True, observed_at=ts, error="Frozen cloud measurements; retaining last-known packs")
         return
     err = (result or {}).get("error")
     packs = (result or {}).get("packs") or []
@@ -1941,7 +1987,7 @@ def _smart_charge_inputs(device_sn: str, now: float) -> tuple[dict, str | None]:
         "pack_source": source(pack_meta.get("source")),
         "capacity_wh": None, "system_soc_pct": None,
     }
-    if telemetry.get("measurement_suspect"):
+    if telemetry.get("measurement_suspect") or _measurement_suspect(device_sn):
         return inputs, "awaiting live SOC: frozen cloud measurements detected"
     if not known_model(model):
         inputs["model_code"] = None
@@ -2601,7 +2647,7 @@ async def _solar_charge_evaluate(record: bool = True,
     if device_sn == active_sn:
         model_code = getattr(state.device, "model_code", None)
         status = state.last_status or {}
-        if status.get("measurement_suspect"):
+        if status.get("measurement_suspect") or _measurement_suspect(device_sn):
             return None
         main_soc = float(status.get("battery_percent") or 50)
         solar_w = float(status.get("solar_input_w") or 0)
@@ -2622,7 +2668,7 @@ async def _solar_charge_evaluate(record: bool = True,
         devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
         entry = devs_t.get(device_sn) or {}
         t = entry.get("telemetry") or {}
-        if t.get("measurement_suspect"):
+        if t.get("measurement_suspect") or _measurement_suspect(device_sn):
             return None
         main_soc = float(t.get("battery_percent") or 50)
         solar_w = float(t.get("solar_input_w") or 0)
@@ -3680,7 +3726,7 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
     entry = ((state.last_cloud_meta or {}).get("devices_telemetry") or {}).get(device_sn) or {}
     telemetry = entry.get("telemetry") or (
         state.last_status if state.device and state.device.device_sn == device_sn else {}) or {}
-    if telemetry.get("measurement_suspect"):
+    if telemetry.get("measurement_suspect") or _measurement_suspect(device_sn):
         return {"configured": True, "ready": False,
                 "error": "Frozen cloud measurements; awaiting live data after reconnection"}
 
