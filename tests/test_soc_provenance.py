@@ -89,6 +89,14 @@ def monitor(isolated_data, monkeypatch):
     return module
 
 
+def test_frozen_measurements_render_as_an_error_not_a_healthy_connection(monitor):
+    monitor.state.connection_status = "connected"
+    monitor.state.last_status = {"battery_percent": 88, "measurement_suspect": True}
+    status = monitor.serialize_status()
+    assert status["connection_status"] == "error"
+    assert "frozen" in status["connection_error"].lower()
+
+
 async def test_repeated_pack_cache_is_not_a_new_snapshot(monitor, monkeypatch):
     async def rpc(method, **kwargs):
         return {"packs": [{"deviceSn": "PACK", "rb": 20}],

@@ -651,6 +651,30 @@ Advisor sample queries expose SOC receipt-time ranges for each aggregate bucket.
 These fields diagnose delivery delays; they cannot prove battery calibration
 or physical energy loss without device-side measurements.
 
+The bridge also watches for **frozen measurements despite successful HTTP
+replies**. For known portable models, unchanged main SOC/input/output and all
+known expansion-pack SOCs become suspect only after at least 30 minutes of
+continuous observations and reported net discharge exceeding 2% of the
+catalog system capacity. Idle or charging plateaus do not trigger it. Missing
+pack state, invalid readings, and observation gaps do not accumulate evidence.
+This is an anomaly heuristic, not proof that the battery or Wi-Fi has failed.
+
+The cloud watchdog then closes the existing HTTP/MQTT client and establishes
+a new cloud session without sending battery-output commands. A healthy second
+device cannot mask the frozen one. If replies remain unchanged, the warning
+persists and retries back off from 30 minutes to at most one per four hours;
+HTTP 200 alone never clears it. Intentional pauses and session-contention
+cooldowns remain respected. Real measurement progress clears the warning.
+The dashboard marks affected readings as an error, and the monitor stops
+recording new energy/chart samples or generating forecasts and charging
+decisions from those suspect values. Existing historical rows are not rewritten.
+
+Per-device `cloud.devices_telemetry[*].measurement_health` reports the unchanged
+duration, reported-power discharge budget, suspicion flag, and recovery attempts.
+`cloud.frozen_devices` identifies affected devices independently of HTTP receipt
+age. At 551 W on a 30,240 Wh system, unchanged readings cross the energy guard
+after about 66 minutes, rather than remaining silently "connected" overnight.
+
 - **Per-input solar (HPV vs LPV) isn't in the Jackery cloud API.** Only the
   total solar input (`ip - acip - cip`) is exposed. Confirmed empirically
   on a real device and across multiple independent reverse-engineering

@@ -62,6 +62,8 @@ import time
 
 from Crypto.Cipher import AES
 
+from frozen_telemetry import FrozenTelemetryDetector
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s bridge: %(message)s",
@@ -548,6 +550,7 @@ class State:
         self.soc_source_ts_by_sn: dict[str, float] = {}
         self.soc_source_by_sn: dict[str, str] = {}
         self.soc_revision_by_sn: dict[str, int] = {}
+        self.frozen_telemetry = FrozenTelemetryDetector()
         self.cache_generation = 0
         # Per-expansion-battery state, keyed by parent (host) device SN.
         # Updated in real-time from MQTT SubDevicePropertyChange pushes.
@@ -756,7 +759,52 @@ def _merge_cloud_properties(device_sn: str, props: dict, *, source: str,
     telemetry["soc_source"] = state.soc_source_by_sn.get(device_sn)
     state.telemetry_by_sn[device_sn] = telemetry
     state.ts_by_sn[device_sn] = received_at
+    _observe_cloud_measurements(device_sn)
     return raw
+
+
+def _observe_cloud_measurements(device_sn: str) -> None:
+    if _cloud_capabilities()["api_family"] != "portable":
+        return
+    from forecaster import BATTERY_CAPACITY_WH, expansion_pack_capacity_wh
+
+    device = next((entry for entry in state.cloud_devices
+                   if entry.get("device_sn") == device_sn), {})
+    main_capacity = BATTERY_CAPACITY_WH.get(device.get("model_code"))
+    telemetry = state.telemetry_by_sn.get(device_sn) or {}
+    packs = state.battery_packs_by_sn.get(device_sn) or []
+    now = time.time()
+    values = [telemetry.get(key) for key in
+              ("battery_percent", "input_power_w", "output_power_w")]
+    if (not main_capacity or any(
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) for value in values)):
+        state.frozen_telemetry.interrupt(device_sn)
+        return
+    if (device.get("model_code") in (13, 22)
+            and device_sn not in state.packs_ts_by_sn):
+        return
+    if packs and now - state.packs_ts_by_sn.get(device_sn, 0) > PACK_CACHE_TTL_S + 60:
+        state.frozen_telemetry.interrupt(device_sn)
+        return
+    signature = list(values)
+    for pack in sorted(packs, key=lambda entry: str(entry.get("deviceSn") or "")):
+        pack_soc = pack.get("rb")
+        pack_sn = pack.get("deviceSn")
+        if (not pack_sn or not isinstance(pack_soc, (int, float))
+                or isinstance(pack_soc, bool) or not math.isfinite(pack_soc)
+                or not 0 <= pack_soc <= 100):
+            state.frozen_telemetry.interrupt(device_sn)
+            return
+        signature.extend((str(pack_sn), float(pack_soc)))
+    if not 0 <= values[0] <= 100 or values[1] < 0 or values[2] < 0:
+        state.frozen_telemetry.interrupt(device_sn)
+        return
+    capacity = main_capacity + len(packs) * expansion_pack_capacity_wh(device.get("model_code"))
+    state.frozen_telemetry.observe(
+        device_sn, signature=tuple(signature), discharge_w=values[2] - values[1],
+        capacity_wh=capacity, now=now,
+    )
 
 
 def _cache_pack_snapshot(device_sn: str, packs: list[dict], *, source: str,
@@ -772,10 +820,12 @@ def _cache_pack_snapshot(device_sn: str, packs: list[dict], *, source: str,
         state.cloud_client.pack_cache_source_by_sn[device_sn] = source
         revisions = state.cloud_client.pack_cache_revision_by_sn
         revisions[device_sn] = revisions.get(device_sn, 0) + 1
+    _observe_cloud_measurements(device_sn)
 
 
 def _clear_device_caches(device_sn: str | None = None) -> None:
     """Forget telemetry and provenance together on account/device reset."""
+    state.frozen_telemetry.forget(device_sn)
     state.cache_generation += 1
     maps = [state.props_raw_by_sn, state.telemetry_by_sn, state.ts_by_sn,
             state.soc_source_ts_by_sn, state.soc_source_by_sn, state.soc_revision_by_sn,
@@ -1213,7 +1263,8 @@ async def cloud_watchdog_loop() -> None:
                 continue
             cloud_ts = state.cloud_ts or 0
             age = now - cloud_ts if cloud_ts else float("inf")
-            if age < WATCHDOG_STALE_S:
+            frozen = state.frozen_telemetry.recovery_due(now)
+            if age < WATCHDOG_STALE_S and not frozen:
                 continue
             # Throttle restarts to avoid a thrash loop when upstream is
             # genuinely down.
@@ -1224,12 +1275,19 @@ async def cloud_watchdog_loop() -> None:
             # prominently and downstream alerting hooks fire. Telemetry
             # being stale for 10+ minutes IS a real problem the user
             # should know about, even if the auto-restart recovers it.
-            event(
-                "error", "watchdog",
-                f"Cloud telemetry stale {age:.0f}s in state={state.cloud_state}; "
-                "restarting cloud_loop",
-                age_s=round(age, 1), state=state.cloud_state,
-            )
+            if frozen:
+                state.frozen_telemetry.mark_recovery(frozen, now)
+                event("error", "watchdog",
+                      "Frozen battery measurements despite successful cloud replies; "
+                      "restarting cloud session",
+                      device_suffixes=[device_sn[-6:] for device_sn in frozen])
+            else:
+                event(
+                    "error", "watchdog",
+                    f"Cloud telemetry stale {age:.0f}s in state={state.cloud_state}; "
+                    "restarting cloud_loop",
+                    age_s=round(age, 1), state=state.cloud_state,
+                )
             # Cancel + recreate. Drop the client too so the next login()
             # starts with a fresh httpx connection pool — important if a
             # half-open TCP socket is what hung us.
@@ -1271,8 +1329,15 @@ def merged_poll() -> dict:
     cloud_age = (now - state.cloud_ts) if state.cloud_ts else None
 
     src = "cloud" if state.cloud_telemetry is not None else None
-    tele = state.cloud_telemetry
     device = state.cloud_device
+    active_sn = (device or {}).get("device_sn")
+
+    frozen_devices = [device_sn for device_sn in state.telemetry_by_sn
+                      if state.frozen_telemetry.health(device_sn, now)["suspect"]]
+    frozen_active = active_sn in frozen_devices
+    tele = state.cloud_telemetry
+    if tele and frozen_active:
+        tele = {**tele, "measurement_suspect": True}
 
     pause_remaining = max(0.0, state.pause_until - now) if state.pause_until else 0.0
     contested_remaining = max(0.0, state.contested_until - now) if state.contested_until else 0.0
@@ -1280,7 +1345,9 @@ def merged_poll() -> dict:
     # rules against any device, not just the active one.
     devices_telemetry = {
         sn: {
-            "telemetry": state.telemetry_by_sn.get(sn),
+            "telemetry": ({**state.telemetry_by_sn[sn], "measurement_suspect": True}
+                          if sn in frozen_devices else state.telemetry_by_sn.get(sn)),
+            "measurement_health": state.frozen_telemetry.health(sn, now),
             "ts": state.ts_by_sn.get(sn),
             "soc_source_ts": state.soc_source_ts_by_sn.get(sn),
             "soc_source": state.soc_source_by_sn.get(sn),
@@ -1294,10 +1361,13 @@ def merged_poll() -> dict:
         "device": device,
         "cloud": {
             **_cloud_capabilities(),
-            "state": state.cloud_state,
+            "state": "stale" if frozen_active and state.cloud_state == "connected" else state.cloud_state,
             "ts": state.cloud_ts,
             "age_s": round(cloud_age, 1) if cloud_age is not None else None,
-            "error": state.cloud_error,
+            "error": state.cloud_error or (
+                "Frozen battery measurements; cloud reconnection has not restored live data"
+                if frozen_active else None),
+            "frozen_devices": frozen_devices,
             "device": state.cloud_device,
             "devices": list(state.cloud_devices),
             "devices_telemetry": devices_telemetry,
