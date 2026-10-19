@@ -371,7 +371,7 @@ async def poll_loop() -> None:
                                         or 0)
                     paused = cloud_state == "paused"
                     persistent_contention = contested_count >= 3
-                    is_stale = (cloud_age is not None
+                    is_stale = bool(cloud_meta.get("frozen_devices")) or (cloud_age is not None
                                 and cloud_age >= CLOUD_STALL_ALERT_S
                                 and not paused
                                 and cloud_state != "contested")
@@ -389,13 +389,15 @@ async def poll_loop() -> None:
                             log.error("persistent contention alert: "
                                        "consecutive=%d", contested_count)
                         else:
-                            msg = (
+                            msg = ("Frozen battery measurements detected; automatically "
+                                   "reconnecting the cloud session. Cached HTTP replies "
+                                   "are not proof of recovery." if cloud_meta.get("frozen_devices") else (
                                 f"Cloud telemetry stalled "
                                 f"({int((cloud_age or 0) // 60)}m old, "
                                 f"state={cloud_state}). Bridge watchdog "
                                 "will auto-restart at 10m; you may also "
                                 "hit /api/resume_polling."
-                            )
+                            ))
                             log.warning(
                                 "cloud-stall alert: age=%.0fs state=%s",
                                 cloud_age or 0, cloud_state,
@@ -464,6 +466,8 @@ async def poll_loop() -> None:
                          getattr(dev, "model_code", None), ts)
                     )
                 for sn, t, name, model_code, frame_ts in samples_to_write:
+                    if t.get("measurement_suspect"):
+                        continue
                     state.energy.upsert_device(sn, name, model_code, None)
                     # Home REST powers describe grid/load boundaries, not battery
                     # input/output. Never integrate unknowns as portable zero W.
@@ -532,7 +536,8 @@ async def poll_loop() -> None:
                 # Append a live sample once per LIVE_CHART_INTERVAL_S so the
                 # chart's x-axis spacing is stable (the bridge poll cadence
                 # is independent and faster).
-                if not _is_home_device(dev_sn) and ts - state.last_history_ts >= LIVE_CHART_INTERVAL_S:
+                if (not status_dict.get("measurement_suspect") and not _is_home_device(dev_sn)
+                        and ts - state.last_history_ts >= LIVE_CHART_INTERVAL_S):
                     state.history.append({
                         "ts": ts,
                         "battery_percent": status_dict["battery_percent"],
@@ -638,6 +643,8 @@ async def poll_loop() -> None:
                     if _is_home_device(r_sn):
                         continue
                     r_t = (r_entry or {}).get("telemetry") or {}
+                    if r_t.get("measurement_suspect"):
+                        continue
                     r_st = state.rescue_by_sn.setdefault(
                         r_sn, rescue.RescueState())
                     r_why = rescue.decide(
@@ -1287,6 +1294,9 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
         "energy": energy,
         "inverter_watchdog": watchdog_state,
     }
+    if telemetry and telemetry.get("measurement_suspect"):
+        result.update(connection_status="error",
+                      connection_error="Frozen cloud measurements; automatic reconnection pending")
     # A worker may have waited on history while the cloud account changed.
     # Never combine the previous account's readings with new Home metadata.
     # The next live tick will populate the new account's complete snapshot.
@@ -1931,6 +1941,8 @@ def _smart_charge_inputs(device_sn: str, now: float) -> tuple[dict, str | None]:
         "pack_source": source(pack_meta.get("source")),
         "capacity_wh": None, "system_soc_pct": None,
     }
+    if telemetry.get("measurement_suspect"):
+        return inputs, "awaiting live SOC: frozen cloud measurements detected"
     if not known_model(model):
         inputs["model_code"] = None
         return inputs, "awaiting known device model and capacity"
@@ -2589,6 +2601,8 @@ async def _solar_charge_evaluate(record: bool = True,
     if device_sn == active_sn:
         model_code = getattr(state.device, "model_code", None)
         status = state.last_status or {}
+        if status.get("measurement_suspect"):
+            return None
         main_soc = float(status.get("battery_percent") or 50)
         solar_w = float(status.get("solar_input_w") or 0)
         load_w = float(status.get("output_power_w") or 0)
@@ -2608,6 +2622,8 @@ async def _solar_charge_evaluate(record: bool = True,
         devs_t = (cloud.get("devices_telemetry") or {}) if isinstance(cloud, dict) else {}
         entry = devs_t.get(device_sn) or {}
         t = entry.get("telemetry") or {}
+        if t.get("measurement_suspect"):
+            return None
         main_soc = float(t.get("battery_percent") or 50)
         solar_w = float(t.get("solar_input_w") or 0)
         load_w = float(t.get("output_power_w") or 0)
@@ -3661,6 +3677,12 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         device_sn = state.device.device_sn if state.device else None
     if not device_sn:
         return {"error": "no active device", "configured": True}
+    entry = ((state.last_cloud_meta or {}).get("devices_telemetry") or {}).get(device_sn) or {}
+    telemetry = entry.get("telemetry") or (
+        state.last_status if state.device and state.device.device_sn == device_sn else {}) or {}
+    if telemetry.get("measurement_suspect"):
+        return {"configured": True, "ready": False,
+                "error": "Frozen cloud measurements; awaiting live data after reconnection"}
 
     # Resolve model_code + current SOC from the *requested* device's
     # cloud_meta entry, not from `state.device` — otherwise asking

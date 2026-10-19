@@ -9,6 +9,10 @@ Pre-1.0 means breaking changes can land in any minor.
 ## [Unreleased]
 
 ### Fixed
+- Detect per-device frozen discharge measurements even when cached HTTP
+  responses keep arriving. Reconnect the cloud session with bounded backoff,
+  keep unresolved readings visibly suspect, and exclude them from new energy
+  samples, forecasts, and smart/solar charge decisions.
 - Avoid losing consistent discharge evidence at arbitrary SOC-bin edges by
   adding a five-night, observed-range-bounded pooled fallback. Preserve
   specific-band, source-quality, freshness, and higher-drain-regime guards;
