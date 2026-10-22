@@ -1015,8 +1015,8 @@
             <div id="sc-lg-devices" class="lg-device-list" role="group" aria-label="Appliances connected to this Jackery" aria-describedby="sc-lg-help"><span class="hint">No LG devices loaded.</span></div>
             <label class="keep-awake-row"><input id="sc-lg-hold" type="checkbox" /> Reserve 240 V availability (manual hold)</label>
             <p class="hint">Protection is live even in Off/Test mode and also blocks this charging plug's manual, automation and rescue ON commands. It overrides low-SOC rescue charging.</p>
-            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest selected finish plus 5 minutes, rounded up to an hourly slot. Paused, unknown or untimed activity has no assumed release time. Charging still requires every selected appliance to report OFF, even after its timer ends.</p>
-            <p class="hint">With protection enabled, active, disconnected, unfamiliar or stale states hold charging OFF. Only a recently confirmed OFF state releases the hold. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
+            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest selected finish plus 5 minutes, rounded up to an hourly slot. Paused, unknown or untimed activity has no assumed release time. An elapsed timer alone never releases the hold: every selected appliance still needs a fresh OFF or LG-disconnected report.</p>
+            <p class="hint">A fresh LG device-disconnected response is treated as OFF, for appliances whose Wi-Fi turns off with their power. The UI labels this as assumed OFF, not a measured power state. Active, unfamiliar or stale readings, token errors and failed requests still hold charging OFF. A real Wi-Fi outage can therefore allow charging while an appliance is running. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
           </fieldset>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
             <button class="btn btn-primary" type="submit">Save</button>
@@ -1511,7 +1511,7 @@
         </form>
         <p id="lg-message" class="hint" role="status"></p>
         <div id="lg-appliances" class="lg-device-list"></div>
-        <p class="hint">Status is read from LG's cloud every 30 seconds for mapped appliances; some older models update more slowly. This is a best-effort software guard, not a hardware safety interlock. Unknown states are never treated as OFF. Removing the token does not disable configured protection.</p>
+        <p class="hint">Status is read from LG's cloud every 30 seconds for mapped appliances; some older models update more slowly. A fresh LG device-disconnected response is treated as assumed OFF; network failures, token errors and expired readings are not. This policy cannot distinguish power-off from a real appliance Wi-Fi outage. This is a best-effort software guard, not a hardware safety interlock. Removing the token does not disable configured protection.</p>
       </section>
       </div><!-- /data-settings-group=general -->
 

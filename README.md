@@ -390,13 +390,24 @@ Last updated: 2026-10-22.
    Jackery's 220/240 V output**. Save the configuration for each Jackery separately.
    No appliance is selected automatically, and voltage/wiring is never inferred
    from the device type. Unselected appliances do not affect charging.
-3. Enable protection and save. Any selected appliance that is active, disconnected,
+3. Enable protection and save. Any selected appliance that is active,
    unsupported, missing or stale holds that Jackery's configured charging plug
-   **OFF**. Only an explicit, recently received `OFF`/`POWER_OFF` status from
-   **every** selected appliance releases the hold; an empty selection also blocks.
+   **OFF**. A fresh `OFF`/`POWER_OFF` status or LG's explicit device-disconnected
+   response (`1222`) from **every** selected appliance releases the hold; an empty
+   selection also blocks.
 
-This supports generic LG appliance discovery, not just dryers. Status schemas
-that cannot positively establish OFF remain unknown rather than being guessed.
+For appliances whose Wi-Fi shuts down with their power, a fresh LG
+device-disconnected response is treated as **assumed OFF**, not proof of power
+state. The UI shows “offline — treated as OFF” and decision inputs record that
+assumption. A genuine appliance Wi-Fi outage can therefore allow grid charging
+while an appliance is running. This exception applies only to the device-status
+endpoint's explicit `1222` response: token/permission errors, timeouts, missing
+devices, device-list failures and stale cached responses still block charging.
+The assumption expires after 75 seconds unless LG reports it again, and every
+pre-charge check re-reads the selected appliances as usual.
+
+This supports generic LG appliance discovery, not just dryers. Other unrecognized
+status schemas remain unknown rather than being guessed.
 For running devices with valid remaining-time reports, smart charging excludes
 windows before the **latest selected appliance's estimated finish plus five
 minutes**, rounding future starts up to its hourly scheduling grid. It also
@@ -406,7 +417,8 @@ LG power draw is not invented or double-counted on top of the household load.
 Paused, unsupported, stale or untimed activity and manual holds have no reliable
 release time, so no future charging window is assumed until status changes.
 An elapsed timer never releases the real interlock: every selected appliance
-still needs a fresh, explicit OFF status before charging can actually start.
+still needs a fresh OFF or explicit LG-disconnected report before charging can
+actually start.
 Reported state/timer changes wake the smart charger to recalculate immediately
 after the next LG poll rather than waiting for its normal five-minute tick.
 Every protected plug ON attempt also performs a fresh cloud status read; a

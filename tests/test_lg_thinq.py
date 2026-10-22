@@ -375,6 +375,141 @@ async def test_sdk_requests_are_read_only_and_errors_are_sanitized(lg, monkeypat
     assert not [call for call in api.mock_calls if "post" in str(call) or "control(" in str(call)]
 
 
+@pytest.mark.parametrize("device_type", ["DEVICE_DRYER", "DEVICE_OVEN", "DEVICE_AIR_CONDITIONER"])
+async def test_fresh_lg_disconnected_response_is_assumed_off_for_any_appliance(
+    lg, monkeypatch, device_type
+):
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    credentials = lg.save_credentials("thinqpat_" + "synthetic-offline" * 3, "US")
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [
+        {"deviceId": "appliance", "deviceInfo": {"deviceType": device_type}}
+    ]
+    api.async_get_device_status.side_effect = ThinQAPIException(
+        "1222", "Disconnected", {"Authorization": credentials["token"]}
+    )
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    await lg.monitor.refresh()
+    device = lg.monitor.public_status()["devices"][0]
+    assert device["fresh"] and device["activity"] == "off"
+    assert device["assumed_off"] and device["disconnected"]
+    assert device["states"] == ["DISCONNECTED"]
+    assert device["remaining_minutes"] is None
+    assert credentials["token"] not in json.dumps(device)
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]}
+    assert lg.block_reason(config) is None
+    context = lg.planning_context(config, now_ts=1000)
+    assert not context["blocked_now"] and not context["timing_uncertain"]
+    assert context["appliances"][0]["assumed_off"]
+    assert lg.block_reason({**config, "lg_manual_hold": True})
+    monkeypatch.setattr(lg.time, "time", lambda: 1076)
+    assert lg.block_reason(config)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "1103", "1305", "1306", "impostor"])
+async def test_unavailable_requests_never_reuse_an_offline_assumption(lg, monkeypatch, failure):
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    lg.save_credentials("thinqpat_" + "synthetic-offline" * 3, "US")
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [{"deviceId": "appliance", "deviceInfo": {}}]
+    api.async_get_device_status.side_effect = ThinQAPIException("1222", "Disconnected", {})
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    await lg.monitor.refresh()
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]}
+    assert lg.block_reason(config) is None
+    if failure == "timeout":
+        error = TimeoutError()
+    elif failure == "impostor":
+        error = RuntimeError()
+        error.code = "1222"
+    else:
+        error = ThinQAPIException(failure, "Unavailable", {})
+    api.async_get_device_status.side_effect = error
+    await lg.monitor.refresh()
+    device = lg.monitor.public_status()["devices"][0]
+    assert device["activity"] == "unknown" and not device["fresh"]
+    assert not device["assumed_off"] and not device["disconnected"]
+    assert lg.block_reason(config)
+
+
+async def test_offline_appliance_becoming_active_blocks_fresh_pre_charge_check(lg, monkeypatch):
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    import kasa_client
+    import smart_charge
+
+    lg.save_credentials("thinqpat_" + "synthetic-offline" * 3, "US")
+    smart_charge.set_config(
+        {
+            "lg_interlock_enabled": True,
+            "lg_device_ids": ["appliance"],
+            "kasa_device_host": "charge-plug",
+        },
+        "MAIN",
+    )
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [{"deviceId": "appliance", "deviceInfo": {}}]
+    api.async_get_device_status.side_effect = [
+        ThinQAPIException("1222", "Disconnected", {}),
+        {"runState": {"currentState": "RUNNING"}, "timer": {"remainHour": 0, "remainMinute": 20}},
+    ]
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    await lg.monitor.refresh()
+    assert lg.block_reason_for_host("charge-plug") is None
+    device = AsyncMock()
+    monkeypatch.setattr(kasa_client, "_connect", AsyncMock(return_value=device))
+    with pytest.raises(lg.InterlockBlocked):
+        await kasa_client.set_state("charge-plug", True)
+    device.turn_on.assert_not_awaited()
+    record = lg.monitor.public_status()["devices"][0]
+    assert record["activity"] == "active" and not record["assumed_off"]
+
+
+async def test_device_list_failure_is_not_an_offline_assumption(lg, monkeypatch):
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    lg.save_credentials("thinqpat_" + "synthetic-offline" * 3, "US")
+    api = AsyncMock()
+    api.async_get_device_list.side_effect = ThinQAPIException("1222", "Disconnected", {})
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    await lg.monitor.refresh()
+    assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]})
+
+
+async def test_reported_offline_appliance_allows_charging_after_another_fresh_check(
+    lg, monkeypatch
+):
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    import kasa_client
+    import smart_charge
+
+    lg.save_credentials("thinqpat_" + "synthetic-offline" * 3, "US")
+    smart_charge.set_config(
+        {
+            "lg_interlock_enabled": True,
+            "lg_device_ids": ["appliance"],
+            "kasa_device_host": "charge-plug",
+        },
+        "MAIN",
+    )
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [{"deviceId": "appliance", "deviceInfo": {}}]
+    api.async_get_device_status.side_effect = ThinQAPIException("1222", "Disconnected", {})
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    await lg.monitor.refresh()
+    device = AsyncMock()
+    monkeypatch.setattr(kasa_client, "_connect", AsyncMock(return_value=device))
+    monkeypatch.setattr(kasa_client, "_describe", lambda *args: {"is_on": True})
+    result = await kasa_client.set_state("charge-plug", True)
+    assert result["is_on"] is True
+    device.turn_on.assert_awaited_once()
+    assert api.async_get_device_status.await_count == 2
+
+
 async def test_rotation_during_refresh_discards_old_account_results(lg, monkeypatch):
     lg.save_credentials("thinqpat_" + "old-account" * 5, "US")
     api = AsyncMock()
