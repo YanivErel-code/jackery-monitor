@@ -26,6 +26,12 @@ API responses or included in exception messages. Removing the token leaves
 configured charging protection fail-closed until explicitly disabled or
 reconnected. Appliance mappings are non-secret configuration in `smart_charge.json`.
 
+The requested operational policy treats only a fresh LG device-status error
+`1222` (disconnected) as assumed OFF. Network/token errors and expired readings
+remain unknown and block charging. An appliance Wi-Fi outage is indistinguishable
+from power-off under this policy and can allow charging while it is running;
+this is not a hardware safety interlock.
+
 All share the same key file at `/data/.jackery-creds.key` (mode 0600),
 generated on first use. **The key is co-located with the ciphertext** —
 encryption-at-rest here protects against image leaks and casual
