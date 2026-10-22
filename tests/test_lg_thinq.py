@@ -19,11 +19,11 @@ def lg(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "state", ["RUNNING", "DRYING", "COOLING", "PAUSE", "WRINKLE_PREVENT", "DELAYED_START"]
+    "state", ["INITIAL", "RUNNING", "DRYING", "COOLING", "PAUSE", "WRINKLE_PREVENT", "DELAYED_START"]
 )
 def test_active_appliance_phases_never_release_interlock(lg, state):
     result = lg.classify_state({"runState": {"currentState": state}})
-    assert result["activity"] != "off"
+    assert result["activity"] == "active"
 
 
 @pytest.mark.parametrize("state", ["OFF", "POWER_OFF"])
@@ -130,7 +130,9 @@ def test_planning_waits_for_latest_selected_finish_and_keeps_real_interlock(lg, 
     assert lg.planning_context(config, now_ts=1000)["timing_uncertain"]
     lg.monitor.devices["ac"]["states"] = ["RUNNING"]
     lg.monitor.devices["ac"]["observed_at"] = 900
-    assert lg.planning_context(config, now_ts=1000)["expected_finish_ts"] is None
+    context = lg.planning_context(config, now_ts=1000)
+    assert context["expected_finish_ts"] == 2200
+    assert context["warnings"]
     config["lg_manual_hold"] = True
     assert lg.planning_context(config, now_ts=1000)["timing_uncertain"]
 
@@ -193,10 +195,117 @@ def test_untimed_running_compartment_cannot_borrow_another_compartments_timer(lg
     assert state["remaining_minutes"] is None
 
 
-def test_enabled_guard_fails_closed_without_configuration_or_cloud(lg):
+@pytest.mark.parametrize(
+    "failure", ["missing_token", "api_error", "device_error", "stale", "missing_device", "unknown", "no_selection"]
+)
+def test_monitoring_failures_warn_without_blocking_charging(lg, monkeypatch, failure):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "synthetic-degraded" * 3, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    lg.monitor.devices = {
+        "oven": {"device_id": "oven", "alias": "Oven", "activity": "off", "observed_at": 999}
+    }
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["oven"]}
+    if failure == "missing_token":
+        lg.clear_credentials()
+    elif failure == "api_error":
+        lg.monitor.error = "LG token is invalid or expired"
+    elif failure == "device_error":
+        lg.monitor.devices["oven"].update(observed_at=0, error="LG API rate limit reached")
+    elif failure == "stale":
+        lg.monitor.devices["oven"]["observed_at"] = 900
+    elif failure == "missing_device":
+        config["lg_device_ids"] = ["missing"]
+    elif failure == "unknown":
+        lg.monitor.devices["oven"]["activity"] = "unknown"
+    else:
+        config["lg_device_ids"] = []
+    assert lg.block_reason(config) is None
+    context = lg.planning_context(config, now_ts=1000)
+    assert context["warnings"] and context["monitoring_degraded"]
+    assert not context["blocked_now"] and not context["timing_uncertain"]
+    assert context["charge_not_before_ts"] is None
+    assert lg.block_reason({**config, "lg_manual_hold": True})
+
+
+def test_known_active_appliance_still_blocks_despite_another_appliance_error(lg, monkeypatch):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "synthetic-degraded" * 3, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    lg.monitor.devices = {
+        "oven": {"device_id": "oven", "alias": "Oven", "activity": "active", "observed_at": 1000,
+                 "states": ["COOKING"], "remaining_minutes": 20},
+        "dryer": {"device_id": "dryer", "alias": "Dryer", "activity": "unknown", "observed_at": 0,
+                  "error": "LG connection unavailable"},
+    }
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["dryer", "oven"]}
+    assert "Oven" in lg.block_reason(config)
+    context = lg.planning_context(config, now_ts=1000)
+    assert context["warnings"] and context["blocked_now"]
+    assert not context["timing_uncertain"]
+    assert context["charge_not_before_ts"] == 2500
+
+
+async def test_unexpected_pre_charge_lg_error_warns_and_allows_mocked_plug_on(lg, monkeypatch):
+    import kasa_client
+    import smart_charge
+
+    smart_charge.set_config(
+        {"lg_interlock_enabled": True, "lg_device_ids": ["oven"], "kasa_device_host": "charge-plug"},
+        "MAIN",
+    )
+    refresh = AsyncMock(side_effect=RuntimeError("private-token-must-not-appear"))
+    monkeypatch.setattr(lg.monitor, "refresh", refresh)
+    device = AsyncMock()
+    monkeypatch.setattr(kasa_client, "_connect", AsyncMock(return_value=device))
+    monkeypatch.setattr(kasa_client, "_describe", lambda *args: {"is_on": True})
+    result = await kasa_client.set_state("charge-plug", True)
+    assert result["is_on"] is True
+    refresh.assert_awaited_once_with({"oven"})
+    device.turn_on.assert_awaited_once()
+    assert lg.monitor.public_status()["warnings"]
+    assert "private-token-must-not-appear" not in json.dumps(lg.monitor.public_status())
+
+
+@pytest.mark.parametrize("failure", ["1103", "1305", "1306", "timeout", "device_list"])
+async def test_lg_read_errors_allow_mocked_charging_without_watchdog_off(lg, monkeypatch, failure):
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    import kasa_client
+    import smart_charge
+
+    lg.save_credentials("thinqpat_" + "synthetic-degraded" * 3, "US")
+    smart_charge.set_config(
+        {"lg_interlock_enabled": True, "lg_device_ids": ["oven"], "kasa_device_host": "charge-plug"},
+        "MAIN",
+    )
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [{"deviceId": "oven", "deviceInfo": {"alias": "Oven"}}]
+    if failure == "device_list":
+        api.async_get_device_list.side_effect = ThinQAPIException("1103", "Invalid token", {})
+    else:
+        api.async_get_device_status.side_effect = (
+            TimeoutError() if failure == "timeout" else ThinQAPIException(failure, "Unavailable", {})
+        )
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    await lg.monitor.refresh()
+    device = AsyncMock()
+    monkeypatch.setattr(kasa_client, "_connect", AsyncMock(return_value=device))
+    monkeypatch.setattr(kasa_client, "_describe", lambda *args: {"is_on": True})
+    result = await kasa_client.set_state("charge-plug", True)
+    assert result["is_on"] is True
+    device.turn_on.assert_awaited_once()
+    await lg.enforce_once(lambda serial: True, {})
+    device.turn_off.assert_not_awaited()
+    assert lg.monitor.public_status()["warnings"]
+    if failure in {"1103", "device_list"}:
+        assert "invalid or expired" in " ".join(lg.monitor.public_status()["warnings"])
+
+
+def test_enabled_guard_without_configuration_or_cloud_is_non_blocking(lg):
     assert lg.block_reason({}) is None
-    assert lg.block_reason({"lg_interlock_enabled": True})
-    assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["oven"]})
+    assert lg.block_reason({"lg_interlock_enabled": True}) is None
+    assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["oven"]}) is None
 
 
 def test_multiple_selected_appliances_stale_states_and_manual_hold(lg, monkeypatch):
@@ -217,7 +326,8 @@ def test_multiple_selected_appliances_stale_states_and_manual_hold(lg, monkeypat
     lg.monitor.devices["ac"]["activity"] = "off"
     assert lg.block_reason(config) is None
     lg.monitor.devices["ac"]["observed_at"] = 900
-    assert lg.block_reason(config)
+    assert lg.block_reason(config) is None
+    assert lg.protection_warnings(config)
     config["lg_manual_hold"] = True
     assert "manual" in lg.block_reason(config).lower()
 
@@ -229,6 +339,7 @@ async def test_central_kasa_guard_blocks_all_on_paths_but_never_off(lg, monkeypa
     smart_charge.set_config(
         {
             "lg_interlock_enabled": True,
+            "lg_manual_hold": True,
             "lg_device_ids": ["oven"],
             "kasa_device_host": "charge-plug",
         },
@@ -451,7 +562,9 @@ async def test_fresh_lg_disconnected_response_is_assumed_off_for_any_appliance(
     assert context["appliances"][0]["assumed_off"]
     assert lg.block_reason({**config, "lg_manual_hold": True})
     monkeypatch.setattr(lg.time, "time", lambda: 1076)
-    assert lg.block_reason(config)
+    assert lg.block_reason(config) is None
+    assert lg.protection_warnings(config)
+    assert lg.monitor.public_status()["devices"][0]["activity"] == "unknown"
 
 
 @pytest.mark.parametrize("failure", ["timeout", "1103", "1305", "1306", "impostor"])
@@ -478,10 +591,12 @@ async def test_unavailable_requests_never_reuse_an_offline_assumption(lg, monkey
     device = lg.monitor.public_status()["devices"][0]
     assert device["activity"] == "unknown" and not device["fresh"]
     assert not device["assumed_off"] and not device["disconnected"]
-    assert lg.block_reason(config)
+    assert lg.block_reason(config) is None
+    assert lg.protection_warnings(config)
 
 
-async def test_offline_appliance_becoming_active_blocks_fresh_pre_charge_check(lg, monkeypatch):
+@pytest.mark.parametrize("state", ["RUNNING", "INITIAL"])
+async def test_offline_appliance_becoming_active_blocks_fresh_pre_charge_check(lg, monkeypatch, state):
     from thinqconnect.thinq_api import ThinQAPIException
 
     import kasa_client
@@ -500,7 +615,7 @@ async def test_offline_appliance_becoming_active_blocks_fresh_pre_charge_check(l
     api.async_get_device_list.return_value = [{"deviceId": "appliance", "deviceInfo": {}}]
     api.async_get_device_status.side_effect = [
         ThinQAPIException("1222", "Disconnected", {}),
-        {"runState": {"currentState": "RUNNING"}, "timer": {"remainHour": 0, "remainMinute": 20}},
+        {"runState": {"currentState": state}, "timer": {"remainHour": 0, "remainMinute": 20}},
     ]
     monkeypatch.setattr(lg, "make_api", lambda *args: api)
     await lg.monitor.refresh()
@@ -522,7 +637,9 @@ async def test_device_list_failure_is_not_an_offline_assumption(lg, monkeypatch)
     api.async_get_device_list.side_effect = ThinQAPIException("1222", "Disconnected", {})
     monkeypatch.setattr(lg, "make_api", lambda *args: api)
     await lg.monitor.refresh()
-    assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]})
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]}
+    assert lg.block_reason(config) is None
+    assert lg.protection_warnings(config)
 
 
 async def test_reported_offline_appliance_allows_charging_after_another_fresh_check(
@@ -595,7 +712,8 @@ async def test_independent_guard_switches_only_eligible_charging_plug_off(lg, mo
 
     for serial, host in (("MAIN", "charge-plug"), ("HOME", "home-plug")):
         smart_charge.set_config(
-            {"kasa_device_host": host, "lg_interlock_enabled": True, "lg_device_ids": ["oven"]},
+            {"kasa_device_host": host, "lg_interlock_enabled": True, "lg_device_ids": ["oven"],
+             "lg_manual_hold": True},
             serial,
         )
     toggle = AsyncMock()
@@ -612,7 +730,7 @@ async def test_failed_off_command_is_retried(lg, monkeypatch):
     import smart_charge
 
     smart_charge.set_config(
-        {"kasa_device_host": "charge-plug", "lg_interlock_enabled": True}, "MAIN"
+        {"kasa_device_host": "charge-plug", "lg_interlock_enabled": True, "lg_manual_hold": True}, "MAIN"
     )
     toggle = AsyncMock(side_effect=[RuntimeError("Unavailable"), {"is_on": False}])
     monkeypatch.setattr(kasa_client, "set_state", toggle)

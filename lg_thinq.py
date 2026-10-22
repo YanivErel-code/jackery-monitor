@@ -26,6 +26,7 @@ ACTIVE_STATES = frozenset(
     {
         "ON",
         "POWER_ON",
+        "INITIAL",
         "RUNNING",
         "DRYING",
         "COOLING",
@@ -201,7 +202,7 @@ def safe_error(error: Exception) -> str:
     code = getattr(error, "code", None)
     if isinstance(code, str) and re.fullmatch(r"\d{4}", code):
         return {
-            "1103": "LG token is invalid",
+            "1103": "LG token is invalid or expired",
             "1302": "LG token was not found",
             "1305": "LG token lacks the required read permissions",
             "1306": "LG API rate limit reached",
@@ -317,10 +318,27 @@ class ThinQMonitor:
             if not record["fresh"]:
                 record["activity"] = "unknown"
             devices.append(record)
+        warnings = []
+        if not credentials:
+            warnings.append("LG token is missing or unreadable; reconnect LG ThinQ in Settings")
+        elif self.error:
+            warnings.append(self.error)
+        elif not devices:
+            warnings.append("LG appliance status is unavailable; no appliances were returned")
+        else:
+            for device in devices:
+                label = device.get("alias") or "LG appliance"
+                if device.get("error"):
+                    warnings.append(label + ": " + device["error"])
+                elif not device["fresh"]:
+                    warnings.append(label + ": status is stale or unavailable")
+                elif device.get("activity") == "unknown":
+                    warnings.append(label + ": appliance state is not recognized")
         return {
             "configured": bool(credentials),
             "country_code": (credentials or {}).get("country_code", "US"),
             "error": self.error,
+            "warnings": warnings,
             "devices": devices,
             "poll_seconds": POLL_SECONDS,
             "max_status_age_seconds": MAX_STATUS_AGE,
@@ -330,24 +348,35 @@ class ThinQMonitor:
 monitor = ThinQMonitor()
 
 
-def block_reason(config: dict) -> str | None:
+def protection_warnings(config: dict, *, status: dict | None = None) -> list[str]:
+    if not config.get("lg_interlock_enabled"):
+        return []
+    status = monitor.public_status() if status is None else status
+    warnings = list(status["warnings"])
+    selected = config.get("lg_device_ids") or []
+    if not selected:
+        warnings.append("No LG appliances are selected for this Jackery")
+    elif status["configured"] and not status["error"]:
+        known = {device["device_id"] for device in status["devices"]}
+        if set(selected) - known:
+            warnings.append("A selected LG appliance is missing from the LG device list")
+    return list(dict.fromkeys(warnings))
+
+
+def block_reason(config: dict, *, status: dict | None = None) -> str | None:
     if not config.get("lg_interlock_enabled"):
         return None
     prefix = "LG 240 V interlock: "
     if config.get("lg_manual_hold"):
         return prefix + "manual reservation keeps 240 V available"
     selected = config.get("lg_device_ids") or []
-    if not selected:
-        return prefix + "no protected appliances selected"
-    status = monitor.public_status()
-    if not status["configured"] or status["error"]:
-        return prefix + "LG connection unavailable; charging held OFF"
+    status = monitor.public_status() if status is None else status
     devices = {device["device_id"]: device for device in status["devices"]}
     for device_id in selected:
         device = devices.get(device_id)
-        if not device or not device.get("fresh") or device.get("activity") != "off":
-            label = device.get("alias", "Selected appliance") if device else "Selected appliance"
-            return prefix + label + " active, stale or not verified OFF"
+        if device and device.get("fresh") and device.get("activity") == "active":
+            label = device.get("alias") or "Selected appliance"
+            return prefix + label + " reports active"
     return None
 
 
@@ -365,10 +394,14 @@ def block_reason_for_host(host: str) -> str | None:
 def planning_context(config: dict, *, now_ts: float) -> dict | None:
     if not config.get("lg_interlock_enabled"):
         return None
-    reason = block_reason(config)
+    status = monitor.public_status()
+    reason = block_reason(config, status=status)
+    warnings = protection_warnings(config, status=status)
     context = {
         "blocked_now": bool(reason),
         "reason": reason,
+        "warnings": warnings,
+        "monitoring_degraded": bool(warnings),
         "expected_finish_ts": None,
         "charge_not_before_ts": None,
         "timing_uncertain": bool(reason),
@@ -376,7 +409,6 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
         "soc_at_finish_pct": None,
         "appliances": [],
     }
-    status = monitor.public_status()
     selected = set(config.get("lg_device_ids") or [])
     devices = {device["device_id"]: device for device in status["devices"]}
     context["appliances"] = [
@@ -391,6 +423,7 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
                 "states",
                 "disconnected",
                 "assumed_off",
+                "error",
             )
         }
         for device_id in sorted(selected)
@@ -405,9 +438,7 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
     permitted_states = timed_states | OFF_STATES | {"ON", "POWER_ON"}
     for device_id in selected:
         device = devices.get(device_id)
-        if not device or not device.get("fresh"):
-            return context
-        if device.get("activity") == "off":
+        if not device or not device.get("fresh") or device.get("activity") != "active":
             continue
         remaining = device.get("remaining_minutes")
         states = set(device.get("states") or [])
@@ -468,7 +499,6 @@ async def refresh_for_host(host: str):
         await monitor.refresh(selected)
     except Exception:
         monitor.error = "LG pre-charge status recheck unavailable"
-        raise InterlockBlocked(monitor.error) from None
 
 
 async def poll_loop(on_update=None):
@@ -504,6 +534,7 @@ async def poll_loop(on_update=None):
                         "remaining_minutes",
                         "disconnected",
                         "assumed_off",
+                        "error",
                     )
                 }
                 remaining = device.get("remaining_minutes")

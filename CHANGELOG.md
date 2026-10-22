@@ -11,22 +11,32 @@ Pre-1.0 means breaking changes can land in any minor.
 ### Added
 - Add encrypted, UI-configurable, read-only LG ThinQ connections for generic LG
   appliances. Map selected appliances to each Jackery's 220/240 V charging
-  interlock; active, unknown or stale states hold grid charging OFF. Fresh LG
+  interlock; fresh active states and manual reservations hold grid charging OFF. Fresh LG
   device-disconnected responses are treated as assumed OFF as described below.
   Recheck all Kasa ON paths, enforce an independent OFF watchdog and preserve
-  a manual 240 V reservation. Protection is opt-in; unsupported states fail closed.
+  a manual 240 V reservation. Protection is opt-in; unavailable states warn without
+  blocking charging, as described below.
   Use the latest selected appliance's estimated finish plus a five-minute margin
   to constrain charging windows, estimate SOC at finish and audit the timing
   inputs; a timer alone never overrides status-based charging eligibility.
 
 ### Fixed
+- Show persistent LG monitoring warnings across the Automation tab for expired
+  or missing tokens, API/network failures and stale/unknown/missing appliances.
+  Add a separate red Automation-tab dot, updated from other tabs and cleared
+  with the warning on recovery; leave the existing AI-insights indicator alone.
+  Per the requested availability policy, these failures no longer block charging;
+  fresh active states and manual reservations still block. Record degraded LG
+  monitoring separately in decision inputs and clear the banner after recovery.
+  Recognize the dryer's observed powered-on `INITIAL` state as active.
 - Refresh every discovered LG appliance, not just mapped ones, so offline-as-OFF
   readings remain current across the appliance list. Charging protection and
   recalculation still depend only on each Jackery's selected appliances.
 - Treat a fresh, explicit LG device-disconnected response as assumed OFF for
   appliances whose Wi-Fi powers off with them. Label and audit the assumption;
-  still block on authentication/API failures, missing devices and expired data,
-  and recheck before charging. An appliance Wi-Fi outage can also permit charging.
+  keep authentication/API failures, missing devices and expired data unknown,
+  and recheck before charging. These failures warn rather than block as described
+  above. An appliance Wi-Fi outage can also permit charging.
 - Keep selective restores from reintroducing forecast/actual windows covered by
   another incident, including adjacent intervals; validate archive device/key bindings.
 - Persist frozen-measurement evidence across bridge restarts, stop pack-history
