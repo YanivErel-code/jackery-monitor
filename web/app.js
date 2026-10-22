@@ -3176,6 +3176,7 @@ async function loadSmartCharge() {
     // Hydrate the form fields. Defaults match smart_charge.DEFAULT_CONFIG.
     $('sc-mode').value = cfg.mode || 'off';
     $('sc-target-soc').value = cfg.target_sunrise_soc_pct ?? 25;
+    if ($('sc-reserve-soc')) $('sc-reserve-soc').value = cfg.reserve_soc_pct ?? 10;
     // Prefer a saved value; if unsaved AND the server has observed a
     // charging rate from this device's own samples, prefill that
     // instead of the population fallback.
@@ -3575,7 +3576,15 @@ function renderSmartChargePlan(plan, narration) {
   // as two distinct ON blocks. Falls back to legacy window_start/end
   // on older decision rows that don't carry planned_hours.
   let scheduleStr = '—';
-  if (Array.isArray(plan.planned_hours) && plan.planned_hours.length) {
+  if (Array.isArray(plan.planned_intervals) && plan.planned_intervals.length) {
+    const segments = [];
+    for (const interval of [...plan.planned_intervals].sort((left, right) => left.start - right.start)) {
+      const previous = segments[segments.length - 1];
+      if (previous && previous.end === interval.start) previous.end = interval.end;
+      else segments.push({ start: interval.start, end: interval.end });
+    }
+    scheduleStr = segments.map(interval => `${fmtHour(interval.start)}–${fmtHour(interval.end)}`).join(', ');
+  } else if (Array.isArray(plan.planned_hours) && plan.planned_hours.length) {
     const hrs = [...plan.planned_hours].sort((a, b) => a - b);
     const segments = [];
     let segStart = hrs[0];
@@ -3625,7 +3634,11 @@ function renderSmartChargePlan(plan, narration) {
     </div>
     <div class="sc-plan-grid">
       <div><span class="sc-lbl">Current SOC</span><span>${plan.current_soc_pct != null ? Math.round(plan.current_soc_pct) + '%' : '—'}</span></div>
-      <div><span class="sc-lbl">Predicted at sunrise</span><span>${plan.predicted_sunrise_soc_pct != null ? Math.round(plan.predicted_sunrise_soc_pct) + '%' : '—'}</span></div>
+      <div><span class="sc-lbl">Sunrise without grid</span><span>${plan.predicted_sunrise_soc_pct != null ? Math.round(plan.predicted_sunrise_soc_pct) + '%' : '—'}</span></div>
+      ${plan.scheduled_sunrise_soc_pct != null ? `<div><span class="sc-lbl">With planned charging</span><span>${plan.scheduled_sunrise_soc_pct.toFixed(1)}%</span></div>
+      <div><span class="sc-lbl">Minimum planned SOC</span><span>${plan.scheduled_min_soc_pct != null ? plan.scheduled_min_soc_pct.toFixed(1) + '%' : '—'}</span></div>
+      <div><span class="sc-lbl">Reserve goal</span><span>${plan.reserve_soc_pct}%</span></div>` : ''}
+      ${plan.warnings?.length ? `<div role="alert"><span class="sc-lbl">Planning warning</span><span>${escapeHtml(plan.warnings.join('; '))}</span></div>` : ''}
       ${baselineLine}
       <div><span class="sc-lbl">Target</span><span>${Math.round(plan.target_sunrise_soc_pct)}%</span></div>
       <div><span class="sc-lbl">Deficit</span><span>${plan.deficit_kwh != null ? plan.deficit_kwh.toFixed(2) + ' kWh' : '—'}</span></div>
@@ -3848,6 +3861,7 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
     mode: $('sc-mode').value,
     kasa_device_host: $('sc-kasa-host').value || null,
     target_sunrise_soc_pct: parseInt($('sc-target-soc').value, 10) || 25,
+    reserve_soc_pct: Number($('sc-reserve-soc')?.value ?? 10),
     max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 800,
     max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
     claude_enabled: $('sc-claude-toggle').checked,

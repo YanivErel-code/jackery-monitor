@@ -1,0 +1,358 @@
+{
+  "now_ts": 1792707342.415318,
+  "current_soc_pct": 16.000000000000004,
+  "capacity_wh": 30240,
+  "tz_offset_seconds": -25200,
+  "config": {
+    "mode": "active",
+    "target_sunrise_soc_pct": 30,
+    "max_charge_w": 1100,
+    "max_on_duration_minutes": 480
+  },
+  "cost_plan": {
+    "type": "tou",
+    "rate_per_kwh": null,
+    "tou_rates": [
+      {
+        "start_hour": 16,
+        "end_hour": 21,
+        "rate": 0.56,
+        "months": [
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "start_hour": 15,
+        "end_hour": 16,
+        "rate": 0.45,
+        "months": [
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "start_hour": 21,
+        "end_hour": 24,
+        "rate": 0.45,
+        "months": [
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "start_hour": 0,
+        "end_hour": 15,
+        "rate": 0.25,
+        "months": [
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "start_hour": 16,
+        "end_hour": 21,
+        "rate": 0.43,
+        "months": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          10,
+          11,
+          12
+        ]
+      },
+      {
+        "start_hour": 15,
+        "end_hour": 16,
+        "rate": 0.41,
+        "months": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          10,
+          11,
+          12
+        ]
+      },
+      {
+        "start_hour": 21,
+        "end_hour": 24,
+        "rate": 0.41,
+        "months": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          10,
+          11,
+          12
+        ]
+      },
+      {
+        "start_hour": 0,
+        "end_hour": 15,
+        "rate": 0.25,
+        "months": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          10,
+          11,
+          12
+        ]
+      }
+    ]
+  },
+  "forecast": {
+    "charge_efficiency": 0.87,
+    "charge_ceiling_pct": null,
+    "drain_calibration": {
+      "soc_bands": [
+        {
+          "min_soc": 60,
+          "max_soc": 80,
+          "baseline_w": 96.03334863429149
+        }
+      ]
+    },
+    "forecast": [
+      {
+        "ts": 1792710000,
+        "duration_h": 0.738333,
+        "solar_w": 390.6,
+        "load_w": 778.2,
+        "predicted_soc": 15.1,
+        "net_w": -387.6,
+        "load_without_baseline_w": 478.2,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792713600,
+        "duration_h": 1,
+        "solar_w": 399.6,
+        "load_w": 790.1,
+        "predicted_soc": 13.8,
+        "net_w": -390.5,
+        "load_without_baseline_w": 490.1,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792717200,
+        "duration_h": 1,
+        "solar_w": 92.4,
+        "load_w": 798.3,
+        "predicted_soc": 11.4,
+        "net_w": -705.9,
+        "load_without_baseline_w": 498.3,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792720800,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 798.3,
+        "predicted_soc": 8.8,
+        "net_w": -798.3,
+        "load_without_baseline_w": 498.3,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792724400,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 813.7,
+        "predicted_soc": 6.1,
+        "net_w": -813.7,
+        "load_without_baseline_w": 513.7,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792728000,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 825.8,
+        "predicted_soc": 3.4,
+        "net_w": -825.8,
+        "load_without_baseline_w": 525.8,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792731600,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 807.1,
+        "predicted_soc": 0.7,
+        "net_w": -807.1,
+        "load_without_baseline_w": 507.1,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792735200,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 813.7,
+        "predicted_soc": 0,
+        "net_w": -813.7,
+        "load_without_baseline_w": 513.7,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792738800,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 807.1,
+        "predicted_soc": 0,
+        "net_w": -807.1,
+        "load_without_baseline_w": 507.1,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792742400,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 713.4,
+        "predicted_soc": 0,
+        "net_w": -713.4,
+        "load_without_baseline_w": 413.4,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792746000,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 711.2,
+        "predicted_soc": 0,
+        "net_w": -711.2,
+        "load_without_baseline_w": 411.2,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792749600,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 705.9,
+        "predicted_soc": 0,
+        "net_w": -705.9,
+        "load_without_baseline_w": 405.9,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792753200,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 709.2,
+        "predicted_soc": 0,
+        "net_w": -709.2,
+        "load_without_baseline_w": 409.2,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792756800,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 799.4,
+        "predicted_soc": 0,
+        "net_w": -799.4,
+        "load_without_baseline_w": 499.4,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792760400,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 810.4,
+        "predicted_soc": 0,
+        "net_w": -810.4,
+        "load_without_baseline_w": 510.4,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792764000,
+        "duration_h": 1,
+        "solar_w": 0,
+        "load_w": 713.6,
+        "predicted_soc": 0,
+        "net_w": -713.6,
+        "load_without_baseline_w": 413.6,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      },
+      {
+        "ts": 1792767600,
+        "duration_h": 1,
+        "solar_w": 30.8,
+        "load_w": 801.6,
+        "predicted_soc": 0,
+        "net_w": -770.8,
+        "load_without_baseline_w": 501.6,
+        "drain_baseline_prior_w": 300,
+        "drain_baseline_applied_w": 300
+      }
+    ]
+  },
+  "original_action": "off",
+  "original_window_start": 1792728000,
+  "command_history": [
+    {
+      "decided_at": 1792677393,
+      "mode": "active",
+      "action": "off",
+      "executed": 1
+    },
+    {
+      "decided_at": 1792702932,
+      "mode": "active",
+      "action": "on",
+      "executed": 1
+    },
+    {
+      "decided_at": 1792703843,
+      "mode": "active",
+      "action": "off",
+      "executed": 1
+    },
+    {
+      "decided_at": 1792703971,
+      "mode": "active",
+      "action": "on",
+      "executed": 1
+    },
+    {
+      "decided_at": 1792706506,
+      "mode": "active",
+      "action": "off",
+      "executed": 1
+    }
+  ]
+}
