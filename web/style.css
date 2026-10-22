@@ -2724,3 +2724,6 @@ body.home-monitoring footer { display: none !important; }
 .lg-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .lg-protection { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; margin-top: 16px; min-width: 0; }
 .lg-protection legend { padding: 0 6px; font-weight: 600; }
+.lg-monitoring-warning { grid-column: 1 / -1; border: 1px solid #b78024; background: rgba(245, 158, 11, .1); color: var(--text); border-radius: var(--radius-sm); padding: 14px; overflow-wrap: anywhere; }
+.lg-monitoring-warning p { margin: 8px 0 0; font-size: 13px; line-height: 1.5; }
+.tab-dot.lg-alert-dot { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .15); }

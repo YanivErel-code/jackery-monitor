@@ -22,15 +22,19 @@ I'll acknowledge within a few days. This is a personal-scale project so
 7. **LG ThinQ personal access token** (`/data/lg-thinq-creds.json`, mode 0600)
 
 LG uses read-only device-list/status requests. Its token is never returned in
-API responses or included in exception messages. Removing the token leaves
-configured charging protection fail-closed until explicitly disabled or
-reconnected. Appliance mappings are non-secret configuration in `smart_charge.json`.
+API responses or included in exception messages. Removing the token disables
+automatic LG checks with an Automation warning, but does not block charging;
+manual reservations remain enforced. Appliance mappings are non-secret
+configuration in `smart_charge.json`.
 
 The requested operational policy treats only a fresh LG device-status error
 `1222` (disconnected) as assumed OFF. Network/token errors and expired readings
-remain unknown and block charging. An appliance Wi-Fi outage is indistinguishable
-from power-off under this policy and can allow charging while it is running;
-this is not a hardware safety interlock.
+remain unknown and warn without blocking charging. Only fresh active readings
+and manual reservations block. An appliance Wi-Fi or monitoring outage can allow
+charging while it is running; this is not a hardware safety interlock. This is an
+explicit availability trade-off, not a relaxation of dashboard authentication,
+LG token validation or other inverter safeguards. See
+[`docs/adr/0005-lg-monitoring-availability.md`](docs/adr/0005-lg-monitoring-availability.md).
 
 All share the same key file at `/data/.jackery-creds.key` (mode 0600),
 generated on first use. **The key is co-located with the ciphertext** —

@@ -54,6 +54,25 @@ async def test_connection_status_never_returns_token_and_invalid_replacement_pre
         assert deleted.json()["configured"] is False
 
 
+async def test_status_exposes_configured_protection_and_warnings_without_token(app, monkeypatch, tmp_path):
+    application, lg = app
+    import smart_charge
+
+    monkeypatch.setenv("JACKERY_SMART_CHARGE_FILE", str(tmp_path / "smart.json"))
+    importlib.reload(smart_charge)
+    smart_charge.set_config({"lg_interlock_enabled": True, "lg_device_ids": ["dryer"]}, "MAIN")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/lg_thinq/status")
+    assert response.status_code == 200
+    status = response.json()
+    assert status["protection_enabled"] and not status["configured"]
+    assert status["warnings"]
+    assert "token" not in status
+    assert lg.block_reason(smart_charge.get_config("MAIN")) is None
+
+
 @pytest.mark.parametrize(
     "body",
     [
