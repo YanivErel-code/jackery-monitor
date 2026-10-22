@@ -230,14 +230,16 @@ test('switching Jackery cannot save the previous devices appliance settings whil
   };
   element('sc-form').dataset.loadedDeviceSn = 'FIRST';
   const calls = [];
-  const context = vm.createContext({ document: { getElementById: element }, $: element,
+  const context = vm.createContext({ $: element,
     activeJackeryDevice: () => ({ device_sn: 'SECOND' }), window: {},
+    isHomeMonitoring: () => false,
+    _controllerNumericFields: { sc: { reserve_soc_pct: 'sc-reserve-soc' } },
     fetch: async (...args) => { calls.push(args); throw new Error('must not send'); },
   });
-  const start = appSource.indexOf("document.getElementById('sc-form')?.addEventListener('submit'");
-  const end = appSource.indexOf('\n});', start) + 4;
+  const start = appSource.indexOf('function handleControllerEdit(');
+  const end = appSource.indexOf('\n}', start) + 2;
   vm.runInContext(appSource.slice(start, end), context);
-  await element('sc-form').listeners.submit({ preventDefault() {} });
+  await context.handleControllerEdit('sc', { type: 'change', target: { id: 'sc-reserve-soc' } });
   assert.equal(calls.length, 0);
-  assert.match(element('sc-status').textContent, /load/i);
+  assert.match(element('sc-save-status').textContent, /load/i);
 });

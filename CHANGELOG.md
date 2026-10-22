@@ -21,6 +21,11 @@ limitations still apply; a major version is not a hardware safety guarantee.
   enforced, and incomplete/unvalidated trajectories cannot execute live commands.
 
 ### Changed
+- Auto-save the entire Automation → Controllers tab: Smart charge, LG appliance
+  protection/mappings/manual hold and Excess diversion. Remove those two Save
+  buttons; keep Evaluate/Backtest and other tabs' explicit actions. Validate
+  edits, debounce numeric typing, serialize per-device writes, preserve newer
+  drafts during reloads and show saved/error feedback with explicit retry.
 - Replace editable Max charge W with an automatic per-device sustained-input
   estimate: 1,000 W until six consecutive reliable charging minutes are available,
   then adapt to the latest stable window. Legacy manual values no longer override

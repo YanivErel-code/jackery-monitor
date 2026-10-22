@@ -24,8 +24,8 @@ function render(rate) {
 test('charge power has no editable field and is not submitted', () => {
   assert.doesNotMatch(html, /id="sc-max-charge-w"/);
   assert.doesNotMatch(source, /\$\('sc-max-charge-w'\)/);
-  const start = source.indexOf("document.getElementById('sc-form')?.addEventListener('submit'");
-  const end = source.indexOf("document.getElementById('sc-evaluate')", start);
+  const start = source.indexOf('const _controllerNumericFields =');
+  const end = source.indexOf('function showControllerSaveStatus(', start);
   assert.doesNotMatch(source.slice(start, end), /max_charge_w:/);
   assert.match(html, /<output id="sc-charge-rate"/);
 });
@@ -34,7 +34,7 @@ test('reserve remains an editable labelled field with range and save payload', (
   assert.match(html, /for="sc-reserve-soc"/);
   assert.match(html, /id="sc-reserve-soc" type="number" min="0" max="95"/);
   assert.match(html, /aria-describedby="sc-reserve-help"/);
-  assert.match(source, /reserve_soc_pct: Number\(\$\('sc-reserve-soc'\)/);
+  assert.match(source, /reserve_soc_pct: 'sc-reserve-soc'/);
 });
 
 test('read-only rate distinguishes learned values and the 1000 W default', () => {
