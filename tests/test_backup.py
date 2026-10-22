@@ -289,6 +289,27 @@ def test_restore_selective_only_named_files(backup_env, tmp_path, monkeypatch):
     assert (data_dir / "settings.json").exists()
 
 
+def test_lg_credentials_and_mappings_survive_backup_restore(backup_env, tmp_path, monkeypatch):
+    data_dir, _, bk, _ = backup_env
+    monkeypatch.setenv("JACKERY_LG_THINQ_CREDS_FILE", str(data_dir / "lg-thinq-creds.json"))
+    import lg_thinq
+    token = "thinqpat_" + "backup-test" * 5
+    lg_thinq.save_credentials(token, "US")
+    mapping = {"by_device": {"MAIN": {"lg_interlock_enabled": True, "lg_device_ids": ["oven"]}}}
+    (data_dir / "smart_charge.json").write_text(json.dumps(mapping))
+    _patch_smb(monkeypatch, bk, tmp_path / "fake-nas")
+    assert bk.run_backup().ok
+    for name in ("lg-thinq-creds.json", "smart_charge.json"):
+        (data_dir / name).unlink()
+    snapshot = bk.list_remote_snapshots()[0]["dir"]
+    result = bk.run_restore(snapshot_dir_name=snapshot, scope={"full": True})
+    assert result["ok"]
+    assert lg_thinq.load_credentials()["token"] == token
+    assert token not in (data_dir / "lg-thinq-creds.json").read_text()
+    assert (data_dir / "lg-thinq-creds.json").stat().st_mode & 0o777 == 0o600
+    assert json.loads((data_dir / "smart_charge.json").read_text()) == mapping
+
+
 def test_prune_keeps_only_newest_n(backup_env, tmp_path, monkeypatch):
     """Direct test of prune_old_snapshots: seed five timestamped dirs,
     keep_count=2 should leave the two newest and rmtree the three

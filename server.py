@@ -51,6 +51,8 @@ import forecaster
 import inverter_watchdog
 import kasa_client
 import kasa_creds
+import lg_thinq
+import lg_thinq_routes
 import location as device_location
 import rescue
 import settings as user_settings
@@ -141,6 +143,7 @@ VIEW_DEVICE_COOKIE_TTL_S = 365 * 24 * 3600
 class AppState:
     def __init__(self) -> None:
         self.client: DeviceClient = make_client()
+        self.smart_charge_wake = asyncio.Event()
         self.device: DeviceInfo | None = None
         self.energy = EnergyDB()
         self.dashboard_cache = DashboardCache()
@@ -2038,6 +2041,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
         "baseline_forecast": [{k: h.get(k) for k in forecast_keys if k in h}
                               for h in forecast.get("forecast") or [] if start <= h["ts"] <= end],
         "planned_hours": plan.planned_hours, "extension_active": plan.extension_active,
+        "lg_protection": plan.lg_protection,
     }
 
 
@@ -2152,6 +2156,11 @@ async def _smart_charge_evaluate(record: bool = True,
         except Exception as e:
             log.debug("forecast persist (smart_charge) failed: %s", e)
     cost_plan = cost_module.get_plan()
+    lg_context = lg_thinq.planning_context(cfg, now_ts=now)
+    if lg_context and lg_context["expected_finish_ts"]:
+        lg_context["soc_at_finish_pct"] = lg_thinq.soc_at_finish(
+            baseline_fcast, starting_soc, now_ts=now,
+            finish_ts=lg_context["expected_finish_ts"])
     plan = smart_charge.compute_plan(
         config=cfg, current_soc_pct=starting_soc,
         forecast=fcast, baseline_forecast=baseline_fcast,
@@ -2159,7 +2168,13 @@ async def _smart_charge_evaluate(record: bool = True,
         capacity_wh=capacity,
         tz_offset_seconds=tz_off,
         now_ts=now,
+        charge_not_before_ts=(lg_context or {}).get("charge_not_before_ts"),
+        charging_unavailable=(lg_context or {}).get("timing_uncertain", False),
     )
+    plan.lg_protection = lg_context
+    if reason := lg_thinq.block_reason(cfg):
+        plan.action = "off"
+        plan.reason = reason
     input_snapshot = _smart_charge_input_snapshot(inputs, cfg, cost_plan, weather, baseline_fcast, plan)
 
     # Always update the daily sunset/sunrise summary regardless of mode —
@@ -2180,6 +2195,15 @@ async def _smart_charge_evaluate(record: bool = True,
             try:
                 await kasa_client.set_state(host, plan.action == "on")
                 executed = True
+            except lg_thinq.InterlockBlocked as error:
+                plan.action = "off"
+                plan.reason = str(error)
+                plan.planned_hours = []
+                plan.window_start = plan.window_end = None
+                plan.lg_protection = lg_thinq.planning_context(cfg, now_ts=time.time())
+                input_snapshot["lg_protection"] = plan.lg_protection
+                input_snapshot["planned_hours"] = []
+                state.smart_charge_wake.set()
             except Exception as e:
                 log.warning("smart_charge Kasa toggle failed: %s", e)
 
@@ -2228,9 +2252,10 @@ async def _smart_charge_narrate(plan) -> str:
 
 async def smart_charge_loop():
     """Periodic tick — every 5 minutes, run the smart-charge evaluator
-    for every device that has a per-device config saved (mode != off)."""
+    for every configured device (mode != off); LG updates wake it earlier."""
     bo = _backoff.LoopBackoff(max_s=30 * 60)
     while True:
+        state.smart_charge_wake.clear()
         try:
             configs = smart_charge.get_all_configs()
             # Fall back to evaluating just the active device when no
@@ -2248,7 +2273,10 @@ async def smart_charge_loop():
         except Exception as e:
             bo.record_failure()
             log.warning("smart_charge loop iteration failed: %s", e)
-        await asyncio.sleep(bo.next_sleep(5 * 60))
+        try:
+            await asyncio.wait_for(state.smart_charge_wake.wait(), timeout=bo.next_sleep(5 * 60))
+        except TimeoutError:
+            pass
 
 
 # ---------- Inverter recovery watchdog (AC-port auto-restart) ----------
@@ -3343,6 +3371,8 @@ async def lifespan(app: FastAPI):
     # per-device opt-in checkbox.
     state.kasa_reconciler_task = asyncio.create_task(kasa_reconciler_loop())
     state.forecast_recorder_task = asyncio.create_task(forecast_recorder_loop())
+    lg_tasks = [asyncio.create_task(lg_thinq.poll_loop(state.smart_charge_wake.set)),
+                asyncio.create_task(lg_thinq.enforce_loop(_portable_control_ready))]
     # Backup runs daily at the user-configured local time. The schedule
     # callback re-reads settings on every iteration so the user can
     # change the time at runtime without an app restart.
@@ -3353,6 +3383,9 @@ async def lifespan(app: FastAPI):
         ),
     )
     yield
+    for task in lg_tasks:
+        task.cancel()
+    await asyncio.gather(*lg_tasks, return_exceptions=True)
     if state.poll_task:
         state.poll_task.cancel()
     if getattr(state, "smart_charge_task", None):
@@ -3372,6 +3405,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Jackery 5000 Plus Monitor", lifespan=lifespan)
+app.include_router(lg_thinq_routes.router)
 
 
 @app.middleware("http")
@@ -4331,10 +4365,24 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
     if not device_sn:
         raise HTTPException(status_code=400,
                             detail="no active device — pass device_sn explicitly")
-    if isinstance(body, dict) and body.get("mode") not in (None, "off"):
+    if isinstance(body, dict):
+        for key in ("lg_interlock_enabled", "lg_manual_hold"):
+            if key in body and not isinstance(body[key], bool):
+                raise HTTPException(400, "LG protection flags must be true or false")
+        if "lg_device_ids" in body and (not isinstance(body["lg_device_ids"], list)
+                or len(body["lg_device_ids"]) > 32
+                or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value)
+                       for value in body["lg_device_ids"])):
+            raise HTTPException(400, "Select valid LG appliance IDs (maximum 32)")
+    if isinstance(body, dict) and (body.get("mode") not in (None, "off") or body.get("lg_interlock_enabled")):
         _require_portable_device(device_sn)
+    if isinstance(body, dict) and body.get("lg_interlock_enabled") and not body.get("kasa_device_host"):
+        raise HTTPException(400, "Select the Kasa plug controlling this Jackery's AC charging")
     saved = smart_charge.set_config(body if isinstance(body, dict) else {},
                                     device_sn=device_sn)
+    if saved.get("lg_interlock_enabled") or (isinstance(body, dict) and any(
+            key in body for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold"))):
+        state.smart_charge_wake.set()
     return {
         "device_sn": device_sn,
         "config": saved,
