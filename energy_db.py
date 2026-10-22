@@ -329,9 +329,9 @@ DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
         "description": "Total system capacity used by the SOC simulator.",
     },
     "max_charge_w": {
-        "label": "Max AC charge rate",
+        "label": "Learned AC charge rate",
         "unit": "W",
-        "description": "Peak wattage the device pulls from the wall when smart-charge engages.",
+        "description": "Automatically learned sustained AC input. Uses 1,000 W until enough reliable minute readings exist; not a device power command.",
     },
     "inverter_overhead_pct": {
         "label": "Inverter overhead",

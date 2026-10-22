@@ -101,8 +101,16 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   Prefers finishing one hour before sunrise, using the final hour when needed.
   Shows baseline versus scheduled sunrise SOC, minimum planned SOC and warnings
   when the proposed plan cannot satisfy the reserve or target within its limits.
-  Configured charging power is an assumption, not a guarantee or a new device
-  charging command; unrealistic values still reduce forecast accuracy.
+  Charging power is learned automatically per device, using **1,000 W until
+  enough reliable history exists**. The newest stable six-minute charging
+  window supplies a median sustained rate, not an hourly average or historic
+  peak. Filters reject incomplete/stale readings, solar, isolated spikes and
+  high-SOC tapering. Unclassified input requires known local night hours.
+  Learning looks back 14 days and refreshes within a minute when requested;
+  normal controller replanning is every five minutes. The Automation tab shows
+  a read-only estimate and source; old manual charging-rate settings no longer
+  override learning. This is a forecast assumption, not a device power command.
+  Change **Minimum system SOC reserve** in Automation → Smart charge, then Save.
   The duration budget counts successful active ON/OFF commands in the 24h cycle
   preceding forecast sunrise, including commands before a process restart.
   It conservatively estimates commanded time, not metered charging time, and
@@ -110,8 +118,9 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   boundaries as well as every five minutes and on LG/config updates. Network
   latency and failures still prevent this from being a hardware safety cutoff.
   LG/manual holds remain higher priority; neither a reserve deficit nor an
-  infeasible target overrides them. Targets and power/duration settings are not
-  silently increased. See [scheduler design and limits](docs/adr/0002-reserve-aware-smart-charge.md).
+  infeasible target overrides them. Targets and duration limits are not silently
+  increased. See [scheduler design and limits](docs/adr/0002-reserve-aware-smart-charge.md)
+  and [automatic charge-rate learning](docs/adr/0003-automatic-charge-rate.md).
   Missing or stale battery readings skip control instead of
   substituting 50% SOC or a generic battery capacity. Device metadata
   can fall back to the same device's persisted catalog model. All decisions
@@ -521,7 +530,7 @@ forecast misses or recommending changes. It treats unresolved SOC/power
 discontinuities separately from model bias and avoids tuning drain from them.
 
 …and proposes specific config tweaks bound to a whitelist of safe
-parameters (`max_charge_w`, `target_sunrise_soc_pct`,
+parameters (`target_sunrise_soc_pct`,
 `max_on_duration_minutes`). Each suggestion has an old → new value diff,
 Claude's reasoning, and a confidence label. **Nothing applies
 automatically** — the user clicks Apply or Dismiss. Hard safety floors

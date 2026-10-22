@@ -21,6 +21,10 @@ limitations still apply; a major version is not a hardware safety guarantee.
   enforced, and incomplete/unvalidated trajectories cannot execute live commands.
 
 ### Changed
+- Replace editable Max charge W with an automatic per-device sustained-input
+  estimate: 1,000 W until six consecutive reliable charging minutes are available,
+  then adapt to the latest stable window. Legacy manual values no longer override
+  learning. Show its source read-only and clarify the editable reserve control.
 - Clarify that the duration budget estimates commanded ON time in the 24h cycle
   preceding forecast sunrise, not metered energy or independent/manual charging.
   Planning is best effort, not a hardware interlock or a guarantee of SOC accuracy.
