@@ -40,7 +40,7 @@ function harness() {
   });
   vm.runInContext(source, context);
   const config = () => JSON.parse(JSON.stringify(context.window.LGThinQ.config()));
-  return { api: context.window.LGThinQ, element, requests, config };
+  return { api: context.window.LGThinQ, element, requests, config, snapshot };
 }
 
 test('LG mapping is explicit, generic and separate for each Jackery', async () => {
@@ -75,6 +75,17 @@ test('missing selected appliances stay mapped instead of silently releasing prot
   assert.match(missing.children[1].textContent, /unavailable/);
 });
 
+test('explicit offline assumptions are labelled without calling expired readings OFF', async () => {
+  const page = harness();
+  const dryer = page.snapshot.devices[2];
+  Object.assign(dryer, { activity: 'off', assumed_off: true, disconnected: true, fresh: true });
+  await page.api.load();
+  assert.match(page.element('sc-lg-devices').children[2].children[1].textContent, /offline.*treated as OFF/);
+  dryer.fresh = false;
+  await page.api.load();
+  assert.doesNotMatch(page.element('sc-lg-devices').children[2].children[1].textContent, /treated as OFF/);
+});
+
 test('LG finish estimate is included in the smart-charge decision display', () => {
   const appSource = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
   const start = appSource.indexOf('function renderSmartChargePlan(');
@@ -90,7 +101,7 @@ test('LG finish estimate is included in the smart-charge decision display', () =
       soc_at_finish_pct: 18, blocked_now: true } });
   assert.match(element.innerHTML, /LG estimated finish/);
   assert.match(element.innerHTML, /18%/);
-  assert.match(element.innerHTML, /confirmed OFF still required/);
+  assert.match(element.innerHTML, /fresh OFF or LG-disconnected status still required/);
   assert.doesNotMatch(element.innerHTML, /<img/);
 });
 

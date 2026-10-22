@@ -272,14 +272,26 @@ class ThinQMonitor:
                         try:
                             payload = await api.async_get_device_status(device_id, timeout=8)
                             device.update(
-                                classify_state(payload), observed_at=time.time(), error=None
+                                classify_state(payload),
+                                observed_at=time.time(),
+                                error=None,
+                                disconnected=False,
+                                assumed_off=False,
                             )
                         except Exception as error:
+                            from thinqconnect.thinq_api import ThinQAPIException
+
+                            disconnected = (
+                                isinstance(error, ThinQAPIException) and error.code == "1222"
+                            )
                             device.update(
-                                activity="unknown",
-                                observed_at=0,
-                                error=safe_error(error),
-                                states=[],
+                                activity="off" if disconnected else "unknown",
+                                observed_at=time.time() if disconnected else 0,
+                                error=None if disconnected else safe_error(error),
+                                states=["DISCONNECTED"] if disconnected else [],
+                                remaining_minutes=None,
+                                disconnected=disconnected,
+                                assumed_off=disconnected,
                             )
                     if credential_stamp(load_credentials()) != stamp:
                         return
@@ -377,6 +389,8 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
                 "observed_at",
                 "remaining_minutes",
                 "states",
+                "disconnected",
+                "assumed_off",
             )
         }
         for device_id in sorted(selected)
@@ -482,7 +496,15 @@ async def poll_loop(on_update=None):
                     continue
                 record = {
                     key: device.get(key)
-                    for key in ("device_id", "fresh", "activity", "states", "remaining_minutes")
+                    for key in (
+                        "device_id",
+                        "fresh",
+                        "activity",
+                        "states",
+                        "remaining_minutes",
+                        "disconnected",
+                        "assumed_off",
+                    )
                 }
                 remaining = device.get("remaining_minutes")
                 if device.get("activity") == "active" and remaining:

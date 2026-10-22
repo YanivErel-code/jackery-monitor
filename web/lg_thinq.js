@@ -6,11 +6,13 @@
   let loading = false;
 
   function describe(device) {
-    const activity = device.fresh ? device.activity : 'unknown / stale';
+    const activity = device.fresh
+      ? (device.assumed_off ? 'offline — treated as OFF' : device.activity)
+      : (device.error ? `unknown · ${device.error}` : 'unknown / stale');
     const remaining = !device.fresh || device.remaining_minutes == null ? '' : ` · ${device.remaining_minutes} min remaining`;
     const finish = device.fresh && device.remaining_minutes > 0 && device.observed_at
       ? ` · estimated finish ${new Date((device.observed_at + device.remaining_minutes * 60) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
-    const states = (device.states || []).join(', ');
+    const states = device.fresh && !device.assumed_off ? (device.states || []).join(', ') : '';
     return `${device.alias} · ${device.device_type || 'LG appliance'} · ${activity}${remaining}${finish}${states ? ` · ${states}` : ''}`;
   }
 
