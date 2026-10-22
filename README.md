@@ -423,12 +423,15 @@ Reported state/timer changes wake the smart charger to recalculate immediately
 after the next LG poll rather than waiting for its normal five-minute tick.
 Every protected plug ON attempt also performs a fresh cloud status read; a
 changed state blocks that attempt and wakes another calculation.
-Mapped devices are polled every 30 seconds; cached responses expire after 75
-seconds. A separate five-second worker enforces OFF without depending on the
-forecast, SOC freshness or smart-charge decision loop. The same plug's app-side
-manual, rescue and automation ON commands are blocked too. Protection is live
-even with smart charging in **Off/Test** mode; it takes priority over low-SOC
-rescue charging. It never turns the charging plug ON by itself.
+All discovered LG appliances are polled every 30 seconds, including appliances
+not mapped to a Jackery, so their displayed offline-as-OFF status stays current.
+Only mapped appliances affect charging protection or wake charging recalculation.
+Cached responses expire after 75 seconds. A separate five-second worker enforces
+OFF without depending on the forecast, SOC freshness or smart-charge decision
+loop. The same plug's app-side manual, rescue and automation ON commands are
+blocked too. Protection is live even with smart charging in **Off/Test** mode;
+it takes priority over low-SOC rescue charging. It never turns the charging plug
+ON by itself.
 
 Before starting a new 240 V appliance, enable **Reserve 240 V availability
 (manual hold)**, save, and verify that charging is actually OFF. Jackery disables
