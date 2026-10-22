@@ -3112,6 +3112,211 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
 // Load config + Kasa device list + recent decisions into the form.
 // Called on Settings tab activation; re-runs are cheap.
 let _chargeRateRefreshPending = false;
+const _controllerLoadIds = { sc: 0, solar: 0 };
+
+function createControllerAutosave({ save, notify, onSaved, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  const states = new Map();
+  function stateFor(deviceSn) {
+    if (!states.has(deviceSn)) states.set(deviceSn, {
+      revision: 0, acknowledged: 0, config: null, timer: null, saving: false,
+      failed: false, message: 'Changes save automatically.',
+    });
+    return states.get(deviceSn);
+  }
+  function cancelTimer(state) {
+    if (state.timer !== null) clearTimer(state.timer);
+    state.timer = null;
+  }
+  function show(deviceSn) {
+    const state = stateFor(deviceSn);
+    notify(deviceSn, state.message, state.failed);
+  }
+  async function run(deviceSn) {
+    const state = stateFor(deviceSn);
+    if (state.saving || !state.config || state.failed) return;
+    const revision = state.revision;
+    const config = state.config;
+    state.saving = true;
+    state.message = 'Saving…';
+    show(deviceSn);
+    try {
+      const result = await save(deviceSn, config);
+      if (revision === state.revision) onSaved(deviceSn, result, config);
+      state.acknowledged = revision;
+      if (revision === state.revision) {
+        state.config = null;
+        state.message = 'Saved automatically.';
+        show(deviceSn);
+      }
+    } catch (error) {
+      if (revision === state.revision) {
+        state.failed = true;
+        state.message = `Could not confirm changes: ${error.message || error}. Retry or edit the setting.`;
+        show(deviceSn);
+      }
+    } finally {
+      state.saving = false;
+      if (state.config && !state.failed && state.timer === null && revision !== state.revision) await run(deviceSn);
+    }
+  }
+  return {
+    update(deviceSn, config, { immediate = false } = {}) {
+      const state = stateFor(deviceSn);
+      cancelTimer(state);
+      state.revision++;
+      state.config = JSON.parse(JSON.stringify(config));
+      state.failed = false;
+      state.message = immediate ? 'Saving…' : 'Changes pending…';
+      show(deviceSn);
+      if (immediate) return run(deviceSn);
+      state.timer = setTimer(() => { state.timer = null; return run(deviceSn); }, 500);
+    },
+    invalidate(deviceSn, message) {
+      const state = stateFor(deviceSn);
+      cancelTimer(state);
+      state.revision++;
+      state.config = null;
+      state.failed = false;
+      state.message = message;
+      show(deviceSn);
+    },
+    retry(deviceSn) {
+      const state = stateFor(deviceSn);
+      cancelTimer(state);
+      state.failed = false;
+      return run(deviceSn);
+    },
+    revision: deviceSn => stateFor(deviceSn).revision,
+    draft: deviceSn => stateFor(deviceSn).config,
+    dirty: deviceSn => stateFor(deviceSn).revision !== stateFor(deviceSn).acknowledged,
+    pending: () => [...states.values()].some(state => state.revision !== state.acknowledged),
+    show,
+  };
+}
+
+const _controllerNumericFields = {
+  sc: { target_sunrise_soc_pct: 'sc-target-soc', reserve_soc_pct: 'sc-reserve-soc',
+    max_on_duration_minutes: 'sc-max-on-min' },
+  solar: { car_load_w: 'solar-car-load-w', comfort_high_pct: 'solar-comfort-high',
+    comfort_low_pct: 'solar-comfort-low', balance_spread_trigger_pp: 'solar-balance-spread',
+    balance_every_days: 'solar-balance-days', min_hold_s: 'solar-min-hold',
+    surplus_buffer_w: 'solar-surplus-buffer', on_hysteresis_pp: 'solar-on-hysteresis',
+    safety_margin_pp: 'solar-safety-margin', max_system_load_w: 'solar-max-system-load',
+    inverter_protect_load_w: 'solar-inverter-protect-load',
+    inverter_protect_cooldown_s: 'solar-inverter-protect-cooldown' },
+};
+
+function readControllerConfig(kind) {
+  const config = { mode: $(`${kind}-mode`).value, kasa_device_host: $(`${kind}-kasa-host`).value || null };
+  let invalid = false;
+  for (const [key, id] of Object.entries(_controllerNumericFields[kind])) {
+    const field = $(id);
+    const value = Number(field.value);
+    const valid = field.value.trim() !== '' && Number.isFinite(value) && field.checkValidity();
+    field.setAttribute('aria-invalid', String(!valid));
+    invalid ||= !valid;
+    config[key] = value;
+  }
+  if (invalid) throw new Error('Check the highlighted setting — changes are not saved.');
+  if (kind === 'solar' && config.comfort_low_pct >= config.comfort_high_pct) {
+    $('solar-comfort-low').setAttribute('aria-invalid', 'true');
+    $('solar-comfort-high').setAttribute('aria-invalid', 'true');
+    throw new Error('Hard SOC floor must be below restart SOC — changes are not saved.');
+  }
+  return kind === 'sc' ? { ...config, claude_enabled: $('sc-claude-toggle').checked,
+    ...(window.LGThinQ?.config() || {}) } : config;
+}
+
+function setControllerActionsEnabled(kind, enabled) {
+  for (const id of kind === 'sc' ? ['sc-evaluate', 'sc-backtest'] : ['solar-evaluate']) {
+    const button = $(id);
+    if (button) button.disabled = !enabled;
+  }
+}
+
+function showControllerSaveStatus(kind, deviceSn, message, failed) {
+  if (activeJackeryDevice()?.device_sn !== deviceSn || $(`${kind}-form`)?.dataset.loadedDeviceSn !== deviceSn) return;
+  setControllerActionsEnabled(kind, !_controllerAutosaves[kind].dirty(deviceSn));
+  const status = $(`${kind}-save-status`);
+  if (status) {
+    status.textContent = message;
+    status.dataset.kind = failed ? 'err' : '';
+  }
+  const retry = $(`${kind}-save-retry`);
+  if (retry) retry.hidden = !failed;
+}
+
+async function persistControllerConfig(kind, deviceSn, config) {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), 20000);
+  try {
+    const endpoint = kind === 'sc' ? 'smart_charge' : 'solar_charge';
+    const response = await fetch(`/api/${endpoint}/config?device_sn=${encodeURIComponent(deviceSn)}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(config), signal: abort.signal,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : `HTTP ${response.status}`);
+    if (!result.config || typeof result.config !== 'object' || Array.isArray(result.config)) throw new Error('Invalid settings response');
+    if (Object.entries(config).some(([key, value]) => JSON.stringify(result.config[key]) !== JSON.stringify(value))) {
+      throw new Error('The server did not retain every setting');
+    }
+    return result;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+const _controllerAutosaves = Object.fromEntries(['sc', 'solar'].map(kind => [kind,
+  createControllerAutosave({
+    save: (deviceSn, config) => persistControllerConfig(kind, deviceSn, config),
+    notify: (deviceSn, message, failed) => showControllerSaveStatus(kind, deviceSn, message, failed),
+    onSaved(deviceSn, result, config) {
+      if (activeJackeryDevice()?.device_sn !== deviceSn) return;
+      if (kind === 'sc') renderSmartChargeConflicts(result.conflicting_rules || [], result.config?.mode || config.mode);
+      invalidateForecastRequests();
+    },
+  }),
+]));
+
+function handleControllerEdit(kind, event) {
+  const field = event.target;
+  const numeric = Object.values(_controllerNumericFields[kind]).includes(field.id);
+  const known = numeric || field.id === `${kind}-mode` || field.id === `${kind}-kasa-host`
+    || (kind === 'sc' && (['sc-claude-toggle', 'sc-lg-enabled', 'sc-lg-hold'].includes(field.id)
+      || field.closest?.('#sc-lg-devices')));
+  if (!known || (event.type === 'input' && !numeric)) return;
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  const form = $(`${kind}-form`);
+  if (!deviceSn || isHomeMonitoring() || form.dataset.loadedDeviceSn !== deviceSn) {
+    $(`${kind}-save-status`).textContent = 'Wait for this Jackery’s settings to load before editing.';
+    return;
+  }
+  try {
+    const config = readControllerConfig(kind);
+    return _controllerAutosaves[kind].update(deviceSn, config, { immediate: event.type === 'change' });
+  } catch (error) {
+    _controllerAutosaves[kind].invalidate(deviceSn, error.message);
+  }
+}
+
+for (const kind of ['sc', 'solar']) {
+  const form = $(`${kind}-form`);
+  form?.addEventListener('input', event => handleControllerEdit(kind, event));
+  form?.addEventListener('change', event => handleControllerEdit(kind, event));
+  form?.addEventListener('submit', event => event.preventDefault());
+  $(`${kind}-save-retry`)?.addEventListener('click', () => {
+    const deviceSn = activeJackeryDevice()?.device_sn;
+    if (deviceSn && form?.dataset.loadedDeviceSn === deviceSn) _controllerAutosaves[kind].retry(deviceSn);
+  });
+}
+
+window.addEventListener?.('beforeunload', event => {
+  if (Object.values(_controllerAutosaves).some(controller => controller.pending())) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+});
 
 function renderSmartChargeRate(rate) {
   const output = $('sc-charge-rate');
@@ -3147,9 +3352,16 @@ async function refreshSmartChargeRate() {
 async function loadSmartCharge() {
   // Render only when the form actually exists in the DOM (Automation tab).
   if (!$('sc-form')) return;
-  $('sc-form').dataset.loadedDeviceSn = '';
+  const loadId = ++_controllerLoadIds.sc;
   const dev = activeJackeryDevice();
   const deviceSn = dev?.device_sn || '';
+  const revision = _controllerAutosaves.sc.revision(deviceSn);
+  if ($('sc-form').dataset.loadedDeviceSn !== deviceSn) {
+    $('sc-form').dataset.loadedDeviceSn = '';
+    setControllerActionsEnabled('sc', false);
+    $('sc-save-status').textContent = 'Loading settings…';
+    $('sc-save-retry').hidden = true;
+  }
   const lbl = $('sc-device-label');
   if (lbl) lbl.textContent = dev?.name ? `· ${dev.name}` : '';
   if (!deviceSn) {
@@ -3172,15 +3384,20 @@ async function loadSmartCharge() {
       fetch(`/api/smart_charge/analytics?days=14&device_sn=${encodeURIComponent(deviceSn)}`),
     ]);
     if (!cfgRes.ok) throw new Error('Smart-charge settings could not be loaded');
-    const cfgPayload = cfgRes.ok ? await cfgRes.json() : {};
-    const cfg = cfgPayload.config || {};
+    const cfgPayload = await cfgRes.json();
+    if (!cfgPayload.config || typeof cfgPayload.config !== 'object' || Array.isArray(cfgPayload.config)) throw new Error('Invalid smart-charge settings response');
+    const cfg = _controllerAutosaves.sc.draft(deviceSn) || cfgPayload.config;
     const conflicts = cfgPayload.conflicting_rules || [];
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
     const ana = anaRes.ok ? await anaRes.json() : { summary: {} };
-    if (activeJackeryDevice()?.device_sn !== deviceSn) return;
+    if (activeJackeryDevice()?.device_sn !== deviceSn || loadId !== _controllerLoadIds.sc
+      || revision !== _controllerAutosaves.sc.revision(deviceSn)) return;
+    if (_controllerAutosaves.sc.dirty(deviceSn) && $('sc-form').dataset.loadedDeviceSn === deviceSn) return;
+    for (const id of Object.values(_controllerNumericFields.sc)) $(id).setAttribute('aria-invalid', 'false');
     window.LGThinQ?.hydrate(cfg);
     $('sc-form').dataset.loadedDeviceSn = deviceSn;
+    _controllerAutosaves.sc.show(deviceSn);
 
     // Populate Kasa picker. Show alias + last 4 of host so dupes don't
     // collide. Preserve current selection if the host still exists.
@@ -3220,6 +3437,8 @@ async function loadSmartCharge() {
       const r = await fetch('/api/anthropic/key');
       _anthropicHasKey = r.ok ? !!(await r.json()).has_key : false;
     } catch { _anthropicHasKey = false; }
+    if (activeJackeryDevice()?.device_sn !== deviceSn || loadId !== _controllerLoadIds.sc
+      || revision !== _controllerAutosaves.sc.revision(deviceSn)) return;
     applyClaudeToggleGate();
 
     renderSmartChargeHistory(status.history || []);
@@ -3227,6 +3446,10 @@ async function loadSmartCharge() {
     renderSmartChargeConflicts(conflicts, cfg.mode);
   } catch (e) {
     console.warn('smart_charge load failed', e);
+    if (activeJackeryDevice()?.device_sn === deviceSn && loadId === _controllerLoadIds.sc
+      && $('sc-form').dataset.loadedDeviceSn !== deviceSn) {
+      $('sc-save-status').textContent = 'Settings could not be loaded. Reopen Controllers to retry; changes are not saved.';
+    }
   }
 }
 
@@ -3661,8 +3884,16 @@ function renderSmartChargePlan(plan, narration) {
 // ============================================================
 async function loadSolarCharge() {
   if (!document.getElementById('solar-form')) return;
+  const loadId = ++_controllerLoadIds.solar;
   const dev = activeJackeryDevice();
   const deviceSn = dev?.device_sn || '';
+  const revision = _controllerAutosaves.solar.revision(deviceSn);
+  if ($('solar-form').dataset.loadedDeviceSn !== deviceSn) {
+    $('solar-form').dataset.loadedDeviceSn = '';
+    setControllerActionsEnabled('solar', false);
+    $('solar-save-status').textContent = 'Loading settings…';
+    $('solar-save-retry').hidden = true;
+  }
   const lbl = document.getElementById('solar-device-label');
   if (lbl) lbl.textContent = dev?.name ? `· ${dev.name}` : '';
   const statusEl = document.getElementById('solar-status');
@@ -3683,11 +3914,19 @@ async function loadSolarCharge() {
       fetch(`/api/solar_charge/status${q}`),
       fetch(`/api/solar_charge/history${q}&hours=24&limit=50`),
     ]);
-    const cfgPayload = cfgRes.ok ? await cfgRes.json() : {};
-    const cfg = cfgPayload.config || {};
+    if (!cfgRes.ok) throw new Error('Excess-diversion settings could not be loaded');
+    const cfgPayload = await cfgRes.json();
+    if (!cfgPayload.config || typeof cfgPayload.config !== 'object' || Array.isArray(cfgPayload.config)) throw new Error('Invalid excess-diversion settings response');
+    const cfg = _controllerAutosaves.solar.draft(deviceSn) || cfgPayload.config;
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
     const hist = histRes.ok ? await histRes.json() : { decisions: [] };
+    if (activeJackeryDevice()?.device_sn !== deviceSn || loadId !== _controllerLoadIds.solar
+      || revision !== _controllerAutosaves.solar.revision(deviceSn)) return;
+    if (_controllerAutosaves.solar.dirty(deviceSn) && $('solar-form').dataset.loadedDeviceSn === deviceSn) return;
+    for (const id of Object.values(_controllerNumericFields.solar)) $(id).setAttribute('aria-invalid', 'false');
+    $('solar-form').dataset.loadedDeviceSn = deviceSn;
+    _controllerAutosaves.solar.show(deviceSn);
 
     // Kasa picker (same pattern as smart-charge).
     const sel = document.getElementById('solar-kasa-host');
@@ -3771,57 +4010,14 @@ async function loadSolarCharge() {
     }
   } catch (e) {
     console.error('loadSolarCharge', e);
+    if (activeJackeryDevice()?.device_sn !== deviceSn || loadId !== _controllerLoadIds.solar) return;
+    if ($('solar-form').dataset.loadedDeviceSn !== deviceSn) {
+      $('solar-save-status').textContent = 'Settings could not be loaded. Reopen Controllers to retry; changes are not saved.';
+    }
     const s = document.getElementById('solar-status');
     if (s) { s.hidden = false; s.textContent = `Load failed: ${e.message || e}`; }
   }
 }
-
-document.getElementById('solar-form')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const status = document.getElementById('solar-status');
-  const deviceSn = activeJackeryDevice()?.device_sn;
-  if (!deviceSn) {
-    status.hidden = false;
-    status.textContent = 'No active device — cannot save.';
-    return;
-  }
-  status.hidden = false;
-  status.textContent = 'Saving…';
-  const cfg = {
-    mode: document.getElementById('solar-mode').value,
-    kasa_device_host: document.getElementById('solar-kasa-host').value || null,
-    car_load_w: parseInt(document.getElementById('solar-car-load-w').value, 10) || 1400,
-    comfort_high_pct: parseInt(document.getElementById('solar-comfort-high').value, 10) || 70,
-    comfort_low_pct: parseInt(document.getElementById('solar-comfort-low').value, 10) || 30,
-    // 0 is a meaningful value (disables the trigger), so these cannot use
-    // the `|| default` idiom the older fields do.
-    balance_spread_trigger_pp: _intOr('solar-balance-spread', 25),
-    balance_every_days: _intOr('solar-balance-days', 30),
-    min_hold_s: parseInt(document.getElementById('solar-min-hold').value, 10) || 30,
-    surplus_buffer_w: parseInt(document.getElementById('solar-surplus-buffer').value, 10) || 100,
-    on_hysteresis_pp: parseInt(document.getElementById('solar-on-hysteresis').value, 10) || 3,
-    safety_margin_pp: parseInt(document.getElementById('solar-safety-margin').value, 10) || 5,
-    max_system_load_w: parseInt(document.getElementById('solar-max-system-load').value, 10) || 800,
-    inverter_protect_load_w: parseInt(document.getElementById('solar-inverter-protect-load').value, 10) || 2100,
-    inverter_protect_cooldown_s: parseInt(document.getElementById('solar-inverter-protect-cooldown').value, 10) || 1800,
-  };
-  try {
-    const r = await fetch(`/api/solar_charge/config?device_sn=${encodeURIComponent(deviceSn)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(cfg),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(j.detail || `HTTP ${r.status}`);
-    }
-    status.textContent = 'Saved.';
-    setTimeout(() => { status.hidden = true; }, 2500);
-    loadSolarCharge();  // refresh runtime panel
-  } catch (err) {
-    status.textContent = `Save failed: ${err.message || err}`;
-  }
-});
 
 document.getElementById('solar-evaluate')?.addEventListener('click', async () => {
   const status = document.getElementById('solar-status');
@@ -3841,54 +4037,6 @@ document.getElementById('solar-evaluate')?.addEventListener('click', async () =>
     }
   } catch (e) {
     status.textContent = `Evaluate failed: ${e.message || e}`;
-  }
-});
-
-document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const status = $('sc-status');
-  const deviceSn = activeJackeryDevice()?.device_sn;
-  if (!deviceSn) {
-    status.hidden = false;
-    status.textContent = 'No active device — cannot save.';
-    return;
-  }
-  if ($('sc-form').dataset.loadedDeviceSn !== deviceSn) {
-    status.hidden = false;
-    status.textContent = 'Wait for this Jackery’s settings to load before saving.';
-    return;
-  }
-  status.hidden = false;
-  status.textContent = 'Saving…';
-  const cfg = {
-    mode: $('sc-mode').value,
-    kasa_device_host: $('sc-kasa-host').value || null,
-    target_sunrise_soc_pct: parseInt($('sc-target-soc').value, 10) || 25,
-    reserve_soc_pct: Number($('sc-reserve-soc')?.value ?? 10),
-    max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
-    claude_enabled: $('sc-claude-toggle').checked,
-    ...(window.LGThinQ?.config() || {}),
-  };
-  try {
-    const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(cfg),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(j.detail || `HTTP ${r.status}`);
-    }
-    const saved = await r.json().catch(() => ({}));
-    status.textContent = 'Saved.';
-    // The POST response includes `conflicting_rules` keyed off the
-    // saved config — render it immediately so flipping mode → active
-    // surfaces the banner without a second round-trip.
-    renderSmartChargeConflicts(saved.conflicting_rules || [],
-                                saved.config?.mode || cfg.mode);
-    setTimeout(() => { status.hidden = true; }, 2500);
-  } catch (err) {
-    status.textContent = `Save failed: ${err.message || err}`;
   }
 });
 

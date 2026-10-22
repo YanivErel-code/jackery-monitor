@@ -110,7 +110,17 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   normal controller replanning is every five minutes. The Automation tab shows
   a read-only estimate and source; old manual charging-rate settings no longer
   override learning. This is a forecast assumption, not a device power command.
-  Change **Minimum system SOC reserve** in Automation → Smart charge, then Save.
+  Change **Minimum system SOC reserve** in Automation → Controllers → Smart charge;
+  it saves automatically. Both Controllers forms (Smart charge, including LG
+  protection/mappings/manual hold, and Excess diversion) auto-save valid settings:
+  selections/toggles immediately, numbers after a 500 ms typing pause or on blur.
+  Each form shows pending/saving/saved feedback. Invalid values are marked and
+  not sent; failed saves keep your draft with a **Retry** button. Stay on the page
+  until “Saved automatically” appears; leaving with unconfirmed edits prompts
+  a warning. Switching Jackery devices never redirects queued writes to the new
+  device. Other Automation sub-tabs and Settings retain their existing Save or
+  explicit action buttons; Evaluate and Backtest remain manual actions and wait
+  until edited settings are confirmed saved.
   The duration budget counts successful active ON/OFF commands in the 24h cycle
   preceding forecast sunrise, including commands before a process restart.
   It conservatively estimates commanded time, not metered charging time, and
@@ -416,10 +426,11 @@ Last updated: 2026-10-22.
    permissions are not needed. Connection is checked before replacing a saved token.
 2. Under **Automation → Smart grid charging → LG appliance 220/240 V protection**,
    select the LG appliances **actually connected to the currently selected
-   Jackery's 220/240 V output**. Save the configuration for each Jackery separately.
+   Jackery's 220/240 V output**. Selections save automatically for that Jackery.
    No appliance is selected automatically, and voltage/wiring is never inferred
    from the device type. Unselected appliances do not affect charging.
-3. Enable protection and save. A selected appliance with a fresh active state
+3. Enable protection; it saves automatically. Confirm “Saved automatically” before
+   relying on the change. A selected appliance with a fresh active state
    holds that Jackery's configured charging plug **OFF**. This includes `INITIAL`,
    the powered-on state observed from the dryer before starting its cycle.
    Manual 240 V reservations also hold charging OFF regardless of LG availability.
