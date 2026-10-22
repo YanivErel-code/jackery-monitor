@@ -10,6 +10,93 @@ import pytest
 NOW = 1_790_000_000
 
 
+def test_learning_ignores_legacy_manual_charge_rate(monitor):
+    monitor.state.energy.set_device_param("MAIN", "max_charge_w", 4000, source="user")
+    resolved = monitor.resolve_device_param("MAIN", "max_charge_w")
+    assert resolved["value"] == 1000
+    assert resolved["source"] == "default"
+
+
+def test_advisor_cannot_reintroduce_a_manual_charge_rate():
+    import claude_advisor
+    assert "smart_charge.max_charge_w" not in claude_advisor.ALLOWED_TARGETS
+
+
+def test_advisor_uses_the_same_effective_charge_rate_as_the_planner(monitor, monkeypatch):
+    monkeypatch.setattr(monitor, "_learned_charge_rate", lambda device_sn: {"value": 945})
+    assert monitor._advisor_helpers.smart_charge_config("MAIN")["max_charge_w"] == 945
+
+
+async def test_effective_learned_rate_reaches_planner_and_saved_snapshot(monitor, monkeypatch):
+    calls = []
+    monkeypatch.setattr(monitor, "_learned_charge_rate", lambda device_sn: {
+        "value": 950, "source": "fit", "n_samples": 6, "updated_at": NOW,
+        "last_sample_ts": NOW - 60, "note": "learned", "samples": []})
+
+    def compute(**kwargs):
+        calls.append(kwargs)
+        return monitor.smart_charge.Plan(action="off", reason="test", mode="active", decided_at=NOW)
+
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", compute)
+    await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert calls[0]["config"]["max_charge_w"] == 950
+    snapshot = monitor.state.energy.smart_charge_decision_inputs("MAIN", NOW)
+    assert snapshot["config"]["max_charge_w"] == 950
+    assert snapshot["charge_rate"]["source"] == "fit"
+
+
+def test_charge_rate_history_uses_completed_minutes_and_is_device_scoped(monitor, monkeypatch):
+    calls = []
+    monkeypatch.setattr(monitor.state.energy, "history", lambda *args, **kwargs: calls.append((args, kwargs)) or [])
+    monitor._learned_charge_rate("MAIN")
+    monitor._learned_charge_rate("OTHER")
+    assert [args[0] for args, _ in calls] == ["MAIN", "OTHER"]
+    assert all(kwargs["bucket_s"] == 60 and kwargs["until_ts"] == NOW // 60 * 60
+               for _, kwargs in calls)
+
+
+async def test_charge_rate_override_api_is_read_only(monitor):
+    from fastapi import HTTPException, Request
+    body = {"device_sn": "MAIN", "key": "max_charge_w", "value": 1800}
+    receive = AsyncMock(return_value={"type": "http.request", "body": json.dumps(body).encode()})
+    with pytest.raises(HTTPException) as error:
+        await monitor.api_devices_params_set(Request({"type": "http", "method": "POST", "headers": []}, receive))
+    assert error.value.status_code == 400
+
+
+async def test_saving_reserve_ignores_old_browser_charge_power_and_exposes_effective_rate(monitor):
+    from fastapi import Request
+    body = {"mode": "active", "reserve_soc_pct": 17, "max_charge_w": 4000}
+    receive = AsyncMock(return_value={"type": "http.request", "body": json.dumps(body).encode()})
+    response = await monitor.api_smart_charge_set(Request({"type": "http", "method": "POST", "headers": []}, receive), device_sn="MAIN")
+    assert response["config"]["max_charge_w"] == 1000
+    assert response["config"]["reserve_soc_pct"] == 17
+    assert monitor.api_smart_charge_get("MAIN")["config"]["max_charge_w"] == 1000
+    assert monitor.api_smart_charge_status("MAIN")["charge_rate"]["source"] == "default"
+    assert monitor.state.smart_charge_wake.is_set()
+
+
+def test_charge_rate_history_failure_uses_default_and_surfaces_explanation(monitor, monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("history unavailable")
+    monkeypatch.setattr(monitor.state.energy, "history", fail)
+    rate = monitor._learned_charge_rate("MAIN")
+    assert rate["value"] == 1000
+    assert rate["source"] == "default"
+    assert "unavailable" in rate["note"]
+
+
+def test_charge_rate_cache_expires_and_refits_on_new_measurements(monitor, monkeypatch):
+    calls = []
+    monkeypatch.setattr(monitor.state.energy, "history", lambda *args, **kwargs: calls.append(args) or [])
+    monitor._learned_charge_rate("MAIN")
+    monitor._learned_charge_rate("MAIN")
+    assert len(calls) == 1
+    monkeypatch.setattr(monitor.time, "time", lambda: NOW + 61)
+    monitor._learned_charge_rate("MAIN")
+    assert len(calls) == 2
+
+
 async def test_legacy_unvalidated_forecast_never_authorizes_live_control(monitor, monkeypatch):
     sunrise = NOW // 3600 * 3600 + 8 * 3600
     monkeypatch.setattr(monitor.forecaster, "build_forecast", lambda **kwargs: {

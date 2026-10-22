@@ -68,6 +68,8 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from charge_rate import DEFAULT_CHARGE_W
+
 log = logging.getLogger("smart_charge")
 
 CONFIG_PATH = os.environ.get("JACKERY_SMART_CHARGE_FILE", "/data/smart_charge.json")
@@ -77,14 +79,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "kasa_device_host": None,           # which saved Kasa plug = the grid input
     "target_sunrise_soc_pct": 25,        # SOC we want at sunrise
     "reserve_soc_pct": 10,
-    # AC charging rate the unit will pull from the wall while the plug
-    # is on. Per-model defaults live in models.json under
-    # default_max_charge_w (or per-entry charging_modes_w["fast"]); the
-    # server picks the right one when persisting a fresh config for a
-    # new device. The 800W here is just the cold-start fallback for
-    # users on a model the catalog doesn't know yet — they should tune
-    # it to whatever their unit actually pulls.
-    "max_charge_w": 800,
+    "max_charge_w": DEFAULT_CHARGE_W,
     "max_on_duration_minutes": 480,      # safety cap per dusk-dawn cycle
     "claude_enabled": False,             # optional decision narrator
     "lg_interlock_enabled": False,
@@ -123,7 +118,7 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         pass
     try:
-        v = int(cfg.get("max_charge_w") or 800)
+        v = int(cfg.get("max_charge_w") or DEFAULT_CHARGE_W)
         if 50 <= v <= 5000:
             out["max_charge_w"] = v
     except (TypeError, ValueError):
@@ -481,7 +476,7 @@ def _legacy_compute_plan(
     # would otherwise mask the need).
     deficit_pct = target - baseline_predicted
     deficit_kwh = round((deficit_pct / 100.0) * capacity_wh / 1000.0, 3)
-    max_charge_w = float(config.get("max_charge_w") or 800)
+    max_charge_w = float(config.get("max_charge_w") or DEFAULT_CHARGE_W)
     import math
     # `needed_hours` originally divided deficit_wh by raw max_charge_w —
     # i.e., assumed 100% of AC input ends up stored, with no inverter
@@ -760,7 +755,7 @@ def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
             capacity_wh=capacity_wh, now=int(now_ts or time.time()), sunrise=plan.sunrise_ts,
             target=plan.target_sunrise_soc_pct,
             reserve=float(_validate_config(config)["reserve_soc_pct"]),
-            power_w=float(config.get("max_charge_w") or 800), budget_seconds=budget,
+            power_w=float(config.get("max_charge_w") or DEFAULT_CHARGE_W), budget_seconds=budget,
             cost_plan=cost_plan, tz_offset_seconds=tz_offset_seconds,
             charge_not_before_ts=charge_not_before_ts, unavailable=charging_unavailable,
             margin_seconds=SUNRISE_MARGIN_S,
