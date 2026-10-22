@@ -93,13 +93,26 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   cleanly on no-pack devices.
 - **Smart charge** (per-device, in Automation tab) — every 5
   minutes, runs a counterfactual forecast (what would SOC do without
-  any AC charging?). If the predicted sunrise SOC falls below your
-  target, picks the cheapest TOU hours up to sunrise–1h margin, with
-  the deadline anchor mandatory. During the final hour, continues a
-  partial top-up while the forecast still predicts a sunrise deficit,
-  even if current SOC has reached the target. After sunrise, extends
-  only while current SOC remains below target. Re-enters on drift below
-  target. Missing or stale battery readings skip control instead of
+  any AC charging?). Validates the full proposed SOC path, protecting a
+  configurable **minimum system SOC reserve (default 10%)** before choosing
+  lower-cost windows. Simulates actual ON intervals, concurrent loads,
+  partial hours, efficiency, calibrated drain and charge ceilings; a baseline
+  clamped at 0% no longer hides remaining overnight energy demand.
+  Prefers finishing one hour before sunrise, using the final hour when needed.
+  Shows baseline versus scheduled sunrise SOC, minimum planned SOC and warnings
+  when the proposed plan cannot satisfy the reserve or target within its limits.
+  Configured charging power is an assumption, not a guarantee or a new device
+  charging command; unrealistic values still reduce forecast accuracy.
+  The duration budget counts successful active ON/OFF commands in the 24h cycle
+  preceding forecast sunrise, including commands before a process restart.
+  It conservatively estimates commanded time, not metered charging time, and
+  does not count independent/manual charging. The loop wakes at planned interval
+  boundaries as well as every five minutes and on LG/config updates. Network
+  latency and failures still prevent this from being a hardware safety cutoff.
+  LG/manual holds remain higher priority; neither a reserve deficit nor an
+  infeasible target overrides them. Targets and power/duration settings are not
+  silently increased. See [scheduler design and limits](docs/adr/0002-reserve-aware-smart-charge.md).
+  Missing or stale battery readings skip control instead of
   substituting 50% SOC or a generic battery capacity. Device metadata
   can fall back to the same device's persisted catalog model. All decisions
   are persisted with predicted-vs-actual analytics. **Backtest button** replays the last N days of
@@ -114,6 +127,9 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   30 days and available in decision details and the advisor's
   `query_decision_inputs` tool. Older decisions remain in history with
   unknown original inputs. Snapshots omit credentials and location coordinates.
+  New snapshots also preserve exact planned intervals, remaining duration budget,
+  and the schedule's reserve/target projection. Legacy snapshots without interval
+  durations remain readable but cannot authorize live charging decisions.
 - **AI advisor** (optional, daily Claude Opus) — diagnoses the residual
   errors in your forecast and smart-charge tracking, proposes config
   tweaks bounded to a safe whitelist, surfaces anomalies. Human approves
@@ -428,7 +444,7 @@ This supports generic LG appliance discovery, not just dryers. Other unrecognize
 status schemas remain unknown rather than being guessed.
 For running devices with valid remaining-time reports, smart charging excludes
 windows before the **latest selected appliance's estimated finish plus five
-minutes**, rounding future starts up to its hourly scheduling grid. It also
+minutes**, including eligible partial hours without starting before that bound. It also
 estimates SOC at that finish using the existing no-charging forecast and records
 the timing inputs with the decision. This is not extra appliance-wattage learning:
 LG power draw is not invented or double-counted on top of the household load.

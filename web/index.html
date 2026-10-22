@@ -978,10 +978,19 @@
           <div class="settings-row">
             <label class="settings-label" for="sc-target-soc">
               <span class="settings-label-text">Target SOC at sunrise</span>
-              <span class="settings-hint">Smart-charge schedules charging to land at this % by sunrise (1h margin). Overshoot is fine; undershoot means we extend charging past sunrise until we hit it. 25% is conservative; 15-20% is aggressive.</span>
+              <span class="settings-hint">Whole-system SOC goal at sunrise. The planner checks the complete charging path and prefers finishing 1h early. Infeasible targets are flagged; holds and the duration budget still apply.</span>
             </label>
             <div class="settings-control">
               <input id="sc-target-soc" type="number" min="5" max="95" step="1" value="25" /> <small>%</small>
+            </div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="sc-reserve-soc">
+              <span class="settings-label-text">Minimum system SOC reserve</span>
+              <span class="settings-hint">Default 10%. Protects the predicted SOC path before sunrise, not just its endpoint. Best effort when already low or charging is constrained; not a hardware safety guarantee.</span>
+            </label>
+            <div class="settings-control">
+              <input id="sc-reserve-soc" type="number" min="0" max="95" step="1" value="10" required /> <small>%</small>
             </div>
           </div>
           <div class="settings-row">
@@ -996,7 +1005,7 @@
           <div class="settings-row">
             <label class="settings-label" for="sc-max-on-min">
               <span class="settings-label-text">Max ON duration</span>
-              <span class="settings-hint">Safety cap per dusk-dawn cycle so a forecast bug can't leave the plug on indefinitely.</span>
+              <span class="settings-hint">Charging time budget in the 24h cycle preceding the forecast sunrise. Successful active ON/OFF decisions conservatively track commanded time across restarts. Independent/manual charging is not included; this is not a hardware cutoff.</span>
             </label>
             <div class="settings-control">
               <input id="sc-max-on-min" type="number" min="30" max="1440" step="30" value="480" /> <small>min</small>
@@ -1021,7 +1030,7 @@
             <div id="sc-lg-devices" class="lg-device-list" role="group" aria-label="Appliances connected to this Jackery" aria-describedby="sc-lg-help"><span class="hint">No LG devices loaded.</span></div>
             <label class="keep-awake-row"><input id="sc-lg-hold" type="checkbox" /> Reserve 240 V availability (manual hold)</label>
             <p class="hint">Protection is live even in Off/Test mode and also blocks this charging plug's manual, automation and rescue ON commands. It overrides low-SOC rescue charging.</p>
-            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest confirmed active appliance's finish plus 5 minutes, rounded up to an hourly slot. Confirmed paused or untimed activity has no assumed release time. An elapsed timer alone never releases a fresh active-state hold.</p>
+            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest confirmed active appliance's finish plus 5 minutes, including eligible partial hours without starting early. Confirmed paused or untimed activity has no assumed release time. An elapsed timer alone never releases a fresh active-state hold.</p>
             <p class="hint">A fresh LG device-disconnected response is treated as assumed OFF. Missing, unfamiliar or stale readings, missing/expired tokens and API failures instead show an Automation warning and do not block charging. Only a fresh active state or manual reservation holds charging OFF. A Wi-Fi or monitoring failure can therefore allow charging while an appliance is running. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
           </fieldset>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
