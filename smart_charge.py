@@ -1,6 +1,12 @@
 """
 Smart grid-charge controller.
 
+Live interval forecasts are projected through the complete proposed charge
+schedule. Reserve protection comes first, sunrise SOC second, and tariff
+preference third. Unmet constraints are reported rather than assumed feasible.
+Partial intervals, charging holds and the persisted commanded-time budget are
+included. Predictions remain conditional on measured inputs and configured power.
+
 Toggles a Kasa smart plug ON/OFF to grid-charge the Jackery only when the
 forecast says solar won't bridge to the next sunrise. Schedules charging
 during the cheapest TOU hours in the gap.
@@ -15,7 +21,7 @@ Decision policy is deterministic and rule-based, NOT machine-learned. The
 goal is simple: SOC at sunrise must be ≥ target_sunrise_soc_pct. Overshoot
 is fine; undershoot is failure.
 
-Algorithm:
+Compatibility algorithm (legacy start-stamped snapshots only):
   1. Pull the *baseline* (counterfactual) forecast — what SOC would do
      with NO AC charging. If predicted_sunrise_soc ≥ target, solar/coast
      will bridge it: action=off, done.
@@ -48,13 +54,14 @@ Algorithm:
 Safety:
   - Test mode lets the user observe a few days of decisions without any
     plug movement.
-  - The mandatory anchor hour means a forecast error can never let the
-    plug stay off through the whole night when target is at risk.
+  - Legacy compatibility plans are marked unvalidated and cannot authorize
+    live control in the server. The live scheduler validates the entire path.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -69,6 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "off",                       # off | test | active
     "kasa_device_host": None,           # which saved Kasa plug = the grid input
     "target_sunrise_soc_pct": 25,        # SOC we want at sunrise
+    "reserve_soc_pct": 10,
     # AC charging rate the unit will pull from the wall while the plug
     # is on. Per-model defaults live in models.json under
     # default_max_charge_w (or per-entry charging_modes_w["fast"]); the
@@ -119,6 +127,12 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         if 50 <= v <= 5000:
             out["max_charge_w"] = v
     except (TypeError, ValueError):
+        pass
+    try:
+        reserve = float(cfg.get("reserve_soc_pct", 10))
+        if not isinstance(cfg.get("reserve_soc_pct"), bool) and math.isfinite(reserve) and 0 <= reserve <= 95:
+            out["reserve_soc_pct"] = reserve
+    except (TypeError, ValueError, OverflowError):
         pass
     try:
         v = int(cfg.get("max_on_duration_minutes") or 480)
@@ -199,7 +213,7 @@ def set_config(cfg: dict[str, Any], device_sn: str | None = None) -> dict[str, A
         previous = ((existing.get("by_device", {}).get(device_sn) or {})
                     if _is_per_device_shape(existing) else existing)
         effective = dict(cfg) if isinstance(cfg, dict) else {}
-        for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold"):
+        for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold", "reserve_soc_pct"):
             if key not in effective and key in previous:
                 effective[key] = previous[key]
         validated = _validate_config(effective)
@@ -251,9 +265,9 @@ class Plan:
     The server caller turns `action` into a Kasa toggle in active mode or
     just logs it in test mode.
 
-    `predicted_sunrise_soc_pct` is the *display* prediction — the
-    smart-charge floor IS injected, so it shows what the user can
-    expect AT sunrise assuming the controller runs as planned.
+    `predicted_sunrise_soc_pct` is the no-intervention display forecast.
+    `scheduled_sunrise_soc_pct` is the conditional projection with the
+    actual proposed ON intervals; it is not substituted into the baseline.
     `baseline_predicted_sunrise_soc_pct` is the *counterfactual* —
     what SOC would be at sunrise if the AC stayed OFF from now on.
     The controller bases its deficit + needs-charge decision on the
@@ -284,6 +298,14 @@ class Plan:
     planned_hours: list[int] | None = None
     extension_active: bool = False
     lg_protection: dict[str, Any] | None = None
+    planned_intervals: list[dict[str, int]] | None = None
+    scheduled_sunrise_soc_pct: float | None = None
+    scheduled_min_soc_pct: float | None = None
+    reserve_soc_pct: float | None = None
+    plan_feasible: bool | None = None
+    warnings: list[str] | None = None
+    trajectory_validated: bool | None = None
+    remaining_charge_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -354,7 +376,7 @@ def _pick_planned_hours(candidates: list[tuple[int, float]],
     return sorted(c[0] for c in sorted_by_cost[:needed_hours])
 
 
-def compute_plan(
+def _legacy_compute_plan(
     *,
     config: dict[str, Any],
     current_soc_pct: float | None,
@@ -651,3 +673,108 @@ def compute_plan(
         sunrise_ts=sunrise_ts, cheapest_rate=cheapest_rate,
         planned_hours=planned_hours,
     )
+
+
+def commanded_on_seconds(decisions: list[dict], *, since: float, until: float) -> float:
+    """Conservatively integrate successful active-mode ON/OFF commands."""
+    total = 0.0
+    cursor = since
+    on = False
+    for decision in sorted(decisions, key=lambda row: row["decided_at"]):
+        stamp = float(decision["decided_at"])
+        if stamp > until:
+            break
+        if decision.get("mode") != "active" or not decision.get("executed"):
+            continue
+        if decision.get("action") not in ("on", "off"):
+            continue
+        if stamp >= since:
+            if on:
+                total += stamp - cursor
+            cursor = stamp
+        on = decision["action"] == "on"
+    if on:
+        total += until - cursor
+    return max(0, total)
+
+
+def next_check_delay(plans: list[Plan | None], *, now: float, default: float = 300) -> float:
+    deadlines = [now + default]
+    for plan in plans:
+        if plan is None:
+            continue
+        for interval in plan.planned_intervals or []:
+            deadlines.extend(value for value in (interval["start"], interval["end"]) if value > now)
+            if plan.action == "on" and interval["start"] <= plan.decided_at < interval["end"]:
+                deadlines.append(interval["end"])
+        if plan.action == "on" and plan.remaining_charge_seconds is not None:
+            deadlines.append(now + max(0, plan.remaining_charge_seconds))
+    return max(0.1, min(deadlines) - now)
+
+
+def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
+                 forecast: dict[str, Any], cost_plan: dict[str, Any], capacity_wh: int,
+                 baseline_forecast: dict[str, Any] | None = None,
+                 tz_offset_seconds: int = 0, now_ts: float | None = None,
+                 forecast_unavailable_reason: str | None = None,
+                 charge_not_before_ts: float | None = None, charging_unavailable: bool = False,
+                 elapsed_on_seconds: float = 0) -> Plan:
+    """Validate an interval-by-interval charge schedule before authorizing deferral.
+
+    Legacy start-stamped fixtures remain readable, but their unvalidated plans
+    cannot authorize live control in the server.
+    """
+    try:
+        plan = _legacy_compute_plan(
+            config=config, current_soc_pct=current_soc_pct, forecast=forecast,
+            cost_plan=cost_plan, capacity_wh=capacity_wh, baseline_forecast=baseline_forecast,
+            tz_offset_seconds=tz_offset_seconds, now_ts=now_ts,
+            forecast_unavailable_reason=forecast_unavailable_reason,
+            charge_not_before_ts=charge_not_before_ts, charging_unavailable=charging_unavailable,
+        )
+    except (ValueError, TypeError, OverflowError, KeyError):
+        return Plan(action="skip", reason="awaiting valid forecast inputs",
+                    mode=str(config.get("mode") or "off"), decided_at=int(now_ts or time.time()),
+                    trajectory_validated=False, plan_feasible=False,
+                    warnings=["Forecast inputs cannot be validated"])
+    if plan.mode == "off" or plan.sunrise_ts is None:
+        return plan
+    hours = (baseline_forecast or forecast).get("forecast") or []
+    if not any("duration_h" in hour for hour in hours):
+        plan.trajectory_validated = False
+        plan.warnings = ["Legacy forecast has no interval durations; live SOC-path validation is unavailable"]
+        return plan
+    budget = max(0.0, float(config.get("max_on_duration_minutes") or 480) * 60
+                 - max(0.0, elapsed_on_seconds))
+    plan.remaining_charge_seconds = budget
+    if int(now_ts or time.time()) >= plan.sunrise_ts:
+        if budget <= 0:
+            plan.action = "off"
+            plan.reason = "charging duration budget exhausted"
+            plan.extension_active = False
+        return plan
+    from smart_charge_schedule import build_schedule
+    try:
+        result = build_schedule(
+            forecast=baseline_forecast or forecast, current_soc_pct=current_soc_pct,
+            capacity_wh=capacity_wh, now=int(now_ts or time.time()), sunrise=plan.sunrise_ts,
+            target=plan.target_sunrise_soc_pct,
+            reserve=float(_validate_config(config)["reserve_soc_pct"]),
+            power_w=float(config.get("max_charge_w") or 800), budget_seconds=budget,
+            cost_plan=cost_plan, tz_offset_seconds=tz_offset_seconds,
+            charge_not_before_ts=charge_not_before_ts, unavailable=charging_unavailable,
+            margin_seconds=SUNRISE_MARGIN_S,
+        )
+    except (ValueError, TypeError, OverflowError) as error:
+        plan.action = "skip"
+        plan.reason = "awaiting a complete, valid SOC trajectory"
+        plan.trajectory_validated = False
+        plan.plan_feasible = False
+        plan.planned_hours = []
+        plan.planned_intervals = []
+        plan.window_start = plan.window_end = None
+        plan.warnings = [str(error)]
+        return plan
+    for key, value in result.items():
+        setattr(plan, key, value)
+    return plan

@@ -9,6 +9,22 @@ limitations still apply; a major version is not a hardware safety guarantee.
 
 ## [Unreleased]
 
+### Fixed
+- Validate the complete smart-charge SOC path before deferring to a later tariff
+  window. Account for unmet demand after a no-grid forecast reaches 0%, rather
+  than sizing charging from its clipped sunrise endpoint alone.
+- Add a configurable whole-system reserve (default 10%), exact partial charging
+  intervals, separate scheduled/minimum SOC projections and explicit infeasible-
+  plan warnings without changing the user's sunrise target or charging power.
+- Preserve the configured duration budget across replans/restarts using persisted
+  successful active commands; wake at interval boundaries. LG/manual holds remain
+  enforced, and incomplete/unvalidated trajectories cannot execute live commands.
+
+### Changed
+- Clarify that the duration budget estimates commanded ON time in the 24h cycle
+  preceding forecast sunrise, not metered energy or independent/manual charging.
+  Planning is best effort, not a hardware interlock or a guarantee of SOC accuracy.
+
 ## [1.0.0] - 2026-10-22
 
 First major release, rolling up 92 non-merge commits since the tree represented
