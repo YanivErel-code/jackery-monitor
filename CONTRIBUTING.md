@@ -61,6 +61,38 @@ code under test is fine.
 
 See [SECURITY.md](./SECURITY.md). Don't open a public issue for security bugs.
 
+## Cutting a release
+
+Release metadata and upgrade notes go through a PR first. Review the commits and
+tree diff from the previous release, update `CHANGELOG.md`, and add the version's
+guide under `docs/releases/`. Keep operational-policy changes and unsupported
+hardware limitations explicit; do not describe a major version as a safety or
+forecast-accuracy guarantee.
+
+After the release PR is merged, require both CI and the Docker build to succeed
+for that exact main commit. Cut the GitHub release from that reviewed SHA using
+the GitHub CLI and the committed notes, not a hand-created or moved local tag:
+
+```bash
+gh release create v1.0.0 --repo YanivErel-code/jackery-monitor \
+  --target <reviewed-main-commit> --title 'v1.0.0 — Forecasting, recovery and appliance-aware charging' \
+  --notes-file docs/releases/v1.0.0.md --latest
+```
+
+Use the next approved version and corresponding guide for future releases.
+The existing tag-triggered workflow publishes the versioned container image.
+Wait for that build, verify its revision/digest, and attach the generated SBOM,
+provenance and a checksum manifest to the GitHub release. BuildKit stores these
+attestations with the image; they are build evidence, not a signed security audit.
+Never overwrite an existing release tag or include runtime data/credentials in
+release assets. Synology deployment is a separate, explicit operation.
+
+The former "keep latest ten package versions" cleanup is removed: it could
+delete a still-published release image or its referenced attestation manifests.
+Registry storage can grow until a release-aware retention policy is implemented.
+Do not reinstate blanket tagged or untagged deletion without preserving the full
+manifest/attestation graph of every retained release.
+
 ## How to open a useful issue
 
 - Tell me what you tried and what happened (bridge log lines help a lot).
