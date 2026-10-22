@@ -107,3 +107,25 @@ test('LG token entry is cleared immediately and never rendered back into the for
   assert.equal(page.element('lg-token').value, '');
   assert.ok(!page.element('lg-message').textContent.includes(token));
 });
+
+test('switching Jackery cannot save the previous devices appliance settings while loading', async () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, { value: '', checked: false, dataset: {}, listeners: {},
+      addEventListener(name, listener) { this.listeners[name] = listener; } });
+    return elements.get(id);
+  };
+  element('sc-form').dataset.loadedDeviceSn = 'FIRST';
+  const calls = [];
+  const context = vm.createContext({ document: { getElementById: element }, $: element,
+    activeJackeryDevice: () => ({ device_sn: 'SECOND' }), window: {},
+    fetch: async (...args) => { calls.push(args); throw new Error('must not send'); },
+  });
+  const start = appSource.indexOf("document.getElementById('sc-form')?.addEventListener('submit'");
+  const end = appSource.indexOf('\n});', start) + 4;
+  vm.runInContext(appSource.slice(start, end), context);
+  await element('sc-form').listeners.submit({ preventDefault() {} });
+  assert.equal(calls.length, 0);
+  assert.match(element('sc-status').textContent, /load/i);
+});
