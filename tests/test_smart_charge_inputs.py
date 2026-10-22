@@ -10,6 +10,35 @@ import pytest
 NOW = 1_790_000_000
 
 
+async def test_legacy_unvalidated_forecast_never_authorizes_live_control(monitor, monkeypatch):
+    sunrise = NOW // 3600 * 3600 + 8 * 3600
+    monkeypatch.setattr(monitor.forecaster, "build_forecast", lambda **kwargs: {
+        "ready": True, "forecast": [
+            {"ts": sunrise - 3600, "solar_w": 0, "predicted_soc": 0},
+            {"ts": sunrise, "solar_w": 300, "predicted_soc": 1}]})
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "skip"
+    monitor.toggle.assert_not_awaited()
+
+
+def test_elapsed_charge_time_is_recovered_from_persisted_decisions(monitor):
+    monitor.state.energy.record_smart_charge_decision("MAIN", {
+        "decided_at": NOW - 1000, "mode": "active", "action": "on"}, executed=True)
+    monitor.state.energy.record_smart_charge_decision("MAIN", {
+        "decided_at": NOW - 500, "mode": "active", "action": "on"}, executed=True)
+    assert monitor._smart_charge_elapsed_on_seconds("MAIN", since=NOW - 2000, until=NOW) == 1000
+
+
+@pytest.mark.parametrize("value", [-1, 100, True, None, float("nan"), float("inf")])
+async def test_invalid_reserve_request_is_rejected(monitor, value):
+    from fastapi import HTTPException, Request
+    body = {"reserve_soc_pct": value}
+    receive = AsyncMock(return_value={"type": "http.request", "body": json.dumps(body).encode()})
+    with pytest.raises(HTTPException) as error:
+        await monitor.api_smart_charge_set(Request({"type": "http", "method": "POST", "headers": []}, receive), device_sn="MAIN")
+    assert error.value.status_code == 400
+
+
 @pytest.fixture()
 def monitor(isolated_data, monkeypatch):
     monkeypatch.setenv("BACKEND", "mock")

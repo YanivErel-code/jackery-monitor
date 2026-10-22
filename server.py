@@ -2027,7 +2027,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
                   "pack_baseline_applied_w")
     return {
         "version": 1, **inputs,
-        "config": {k: cfg.get(k) for k in ("mode", "target_sunrise_soc_pct",
+        "config": {k: cfg.get(k) for k in ("mode", "target_sunrise_soc_pct", "reserve_soc_pct",
                                            "max_charge_w", "max_on_duration_minutes")},
         "cost_plan": {"type": cost_plan.get("type"), "rate_per_kwh": cost_plan.get("rate_per_kwh"),
                       "tou_rates": [{k: rate.get(k) for k in ("start_hour", "end_hour", "rate", "months")
@@ -2041,8 +2041,28 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
         "baseline_forecast": [{k: h.get(k) for k in forecast_keys if k in h}
                               for h in forecast.get("forecast") or [] if start <= h["ts"] <= end],
         "planned_hours": plan.planned_hours, "extension_active": plan.extension_active,
+        "planned_intervals": plan.planned_intervals,
+        "schedule_projection": {key: getattr(plan, key) for key in (
+            "scheduled_sunrise_soc_pct", "scheduled_min_soc_pct", "reserve_soc_pct",
+            "plan_feasible", "warnings", "trajectory_validated", "remaining_charge_seconds")},
         "lg_protection": plan.lg_protection,
     }
+
+
+def _smart_charge_elapsed_on_seconds(device_sn: str, *, since: float, until: float) -> float:
+    with state.energy._conn() as connection:
+        previous = connection.execute(
+            """SELECT decided_at, mode, action, executed FROM smart_charge_decisions
+               WHERE device_sn=? AND decided_at<? AND mode='active' AND executed=1
+                 AND action IN ('on','off') ORDER BY decided_at DESC LIMIT 1""",
+            (device_sn, since)).fetchall()
+        current = connection.execute(
+            """SELECT decided_at, mode, action, executed FROM smart_charge_decisions
+               WHERE device_sn=? AND decided_at>=? AND decided_at<=?
+                 AND mode='active' AND executed=1 AND action IN ('on','off')
+               ORDER BY decided_at""", (device_sn, since, until)).fetchall()
+    return smart_charge.commanded_on_seconds([dict(row) for row in [*previous, *current]],
+                                            since=since, until=until)
 
 
 async def _smart_charge_evaluate(record: bool = True,
@@ -2156,6 +2176,15 @@ async def _smart_charge_evaluate(record: bool = True,
         except Exception as e:
             log.debug("forecast persist (smart_charge) failed: %s", e)
     cost_plan = cost_module.get_plan()
+    sunrise = smart_charge._find_next_sunrise(baseline_fcast.get("forecast") or [])
+    try:
+        elapsed_on_seconds = (_smart_charge_elapsed_on_seconds(
+            device_sn, since=sunrise - 86400, until=now) if sunrise else 0)
+    except Exception as error:
+        log.warning("smart_charge duration history unavailable; skipping control: %s", error)
+        return smart_charge.Plan(action="skip", reason="charging duration history unavailable",
+                                 mode=cfg["mode"], decided_at=int(now), plan_feasible=False,
+                                 warnings=["Charging duration history unavailable; no control command sent"])
     lg_context = lg_thinq.planning_context(cfg, now_ts=now)
     if lg_context and lg_context["expected_finish_ts"]:
         lg_context["soc_at_finish_pct"] = lg_thinq.soc_at_finish(
@@ -2170,7 +2199,11 @@ async def _smart_charge_evaluate(record: bool = True,
         now_ts=now,
         charge_not_before_ts=(lg_context or {}).get("charge_not_before_ts"),
         charging_unavailable=(lg_context or {}).get("timing_uncertain", False),
+        elapsed_on_seconds=elapsed_on_seconds,
     )
+    if plan.trajectory_validated is False:
+        plan.action = "skip"
+        plan.reason = "awaiting a complete, validated SOC trajectory"
     plan.lg_protection = lg_context
     if reason := lg_thinq.block_reason(cfg):
         plan.action = "off"
@@ -2199,10 +2232,18 @@ async def _smart_charge_evaluate(record: bool = True,
                 plan.action = "off"
                 plan.reason = str(error)
                 plan.planned_hours = []
+                plan.planned_intervals = []
                 plan.window_start = plan.window_end = None
+                plan.plan_feasible = False
+                plan.warnings = [str(error)]
+                plan.scheduled_sunrise_soc_pct = plan.baseline_predicted_sunrise_soc_pct
+                plan.scheduled_min_soc_pct = None
                 plan.lg_protection = lg_thinq.planning_context(cfg, now_ts=time.time())
                 input_snapshot["lg_protection"] = plan.lg_protection
                 input_snapshot["planned_hours"] = []
+                input_snapshot["planned_intervals"] = []
+                input_snapshot["schedule_projection"] = {key: getattr(plan, key) for key in (
+                    "scheduled_sunrise_soc_pct", "scheduled_min_soc_pct", "plan_feasible", "warnings")}
                 state.smart_charge_wake.set()
             except Exception as e:
                 log.warning("smart_charge Kasa toggle failed: %s", e)
@@ -2256,17 +2297,18 @@ async def smart_charge_loop():
     bo = _backoff.LoopBackoff(max_s=30 * 60)
     while True:
         state.smart_charge_wake.clear()
+        plans = []
         try:
             configs = smart_charge.get_all_configs()
             # Fall back to evaluating just the active device when no
             # per-device configs exist (legacy path).
             if not configs and state.device and state.device.device_sn:
-                await _smart_charge_evaluate(record=True)
+                plans.append(await _smart_charge_evaluate(record=True))
             for sn, cfg in configs.items():
                 if cfg.get("mode") == "off":
                     continue
                 try:
-                    await _smart_charge_evaluate(record=True, device_sn=sn)
+                    plans.append(await _smart_charge_evaluate(record=True, device_sn=sn))
                 except Exception as e:
                     log.warning("smart_charge tick failed for %s: %s", sn, e)
             bo.reset()
@@ -2274,7 +2316,8 @@ async def smart_charge_loop():
             bo.record_failure()
             log.warning("smart_charge loop iteration failed: %s", e)
         try:
-            await asyncio.wait_for(state.smart_charge_wake.wait(), timeout=bo.next_sleep(5 * 60))
+            delay = smart_charge.next_check_delay(plans, now=time.time(), default=bo.next_sleep(5 * 60))
+            await asyncio.wait_for(state.smart_charge_wake.wait(), timeout=delay)
         except TimeoutError:
             pass
 
@@ -4366,6 +4409,11 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
         raise HTTPException(status_code=400,
                             detail="no active device — pass device_sn explicitly")
     if isinstance(body, dict):
+        if "reserve_soc_pct" in body:
+            reserve = body["reserve_soc_pct"]
+            if (isinstance(reserve, bool) or not isinstance(reserve, (int, float))
+                    or not isfinite(reserve) or not 0 <= reserve <= 95):
+                raise HTTPException(400, "Minimum system SOC reserve must be between 0 and 95 percent")
         for key in ("lg_interlock_enabled", "lg_manual_hold"):
             if key in body and not isinstance(body[key], bool):
                 raise HTTPException(400, "LG protection flags must be true or false")
@@ -4380,9 +4428,7 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
         raise HTTPException(400, "Select the Kasa plug controlling this Jackery's AC charging")
     saved = smart_charge.set_config(body if isinstance(body, dict) else {},
                                     device_sn=device_sn)
-    if saved.get("lg_interlock_enabled") or (isinstance(body, dict) and any(
-            key in body for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold"))):
-        state.smart_charge_wake.set()
+    state.smart_charge_wake.set()
     return {
         "device_sn": device_sn,
         "config": saved,
