@@ -57,6 +57,7 @@ class AdvisorHelpers:
     capacity_hints: Callable[[str | None], tuple[int | None, int | None]]
     system_soc_pct: Callable[[float, str | None, int | None], float]
     is_read_only: Callable[[str | None], bool] = _default_read_only
+    smart_charge_config: Callable[[str], dict] = smart_charge.get_config
 
 
 def _require_advisor_support(helpers: AdvisorHelpers, device_sn: str | None) -> None:
@@ -97,7 +98,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
     except Exception:
         pack_count = len(state.battery_packs_by_sn.get(device_sn, []))
 
-    cfg = smart_charge.get_config(device_sn)
+    cfg = helpers.smart_charge_config(device_sn)
 
     # Per-device fitted drain coefficients — let Claude see what the
     # simulator is actually using. Hybrid model:
