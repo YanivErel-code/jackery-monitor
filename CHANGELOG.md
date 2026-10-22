@@ -27,6 +27,9 @@ by v0.3.0. See the [release and upgrade guide](docs/releases/v1.0.0.md).
 - Container builds publish SBOM and maximum-detail build provenance attestations.
 
 ### Changed
+- Remove blanket GHCR version pruning so release image pins and associated
+  attestations remain available. Registry storage can grow until a release-aware
+  retention policy is implemented.
 - Fresh mapped active states (including the dryer's powered-on `INITIAL`) and
   manual reservations block charging. Fresh LG disconnected reports are assumed
   OFF. LG token/API failures and unknown/stale/missing states warn but do not
