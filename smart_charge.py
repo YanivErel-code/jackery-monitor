@@ -79,6 +79,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_charge_w": 800,
     "max_on_duration_minutes": 480,      # safety cap per dusk-dawn cycle
     "claude_enabled": False,             # optional decision narrator
+    "lg_interlock_enabled": False,
+    "lg_device_ids": [],
+    "lg_manual_hold": False,
 }
 
 # Decisions are persisted to energy_db.smart_charge_decisions by the server,
@@ -124,6 +127,13 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         pass
     out["claude_enabled"] = bool(cfg.get("claude_enabled"))
+    out["lg_interlock_enabled"] = cfg.get("lg_interlock_enabled") is True
+    out["lg_manual_hold"] = cfg.get("lg_manual_hold") is True
+    selected = cfg.get("lg_device_ids")
+    if isinstance(selected, list) and len(selected) <= 32:
+        out["lg_device_ids"] = list(dict.fromkeys(
+            value for value in selected if isinstance(value, str)
+            and 1 <= len(value) <= 256 and all(character.isalnum() or character in "_-" for character in value)))
     return out
 
 
@@ -184,9 +194,15 @@ def get_config(device_sn: str | None = None) -> dict[str, Any]:
 def set_config(cfg: dict[str, Any], device_sn: str | None = None) -> dict[str, Any]:
     """Validate + persist + return the saved config for a device. With
     no device_sn, writes in legacy single-config shape (back-compat)."""
-    validated = _validate_config(cfg)
     with _config_lock:
         existing = _load_raw()
+        previous = ((existing.get("by_device", {}).get(device_sn) or {})
+                    if _is_per_device_shape(existing) else existing)
+        effective = dict(cfg) if isinstance(cfg, dict) else {}
+        for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold"):
+            if key not in effective and key in previous:
+                effective[key] = previous[key]
+        validated = _validate_config(effective)
         if device_sn:
             # Migrate legacy single-config to per-device on first write
             # by stuffing the old config into the by_device map under
@@ -267,6 +283,7 @@ class Plan:
     cheapest_rate: float | None = None         # $/kWh in the chosen window
     planned_hours: list[int] | None = None
     extension_active: bool = False
+    lg_protection: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -348,6 +365,8 @@ def compute_plan(
     tz_offset_seconds: int = 0,
     now_ts: float | None = None,
     forecast_unavailable_reason: str | None = None,
+    charge_not_before_ts: float | None = None,
+    charging_unavailable: bool = False,
 ) -> Plan:
     """Pure function: given inputs, decide what to do. No side effects.
 
@@ -367,6 +386,10 @@ def compute_plan(
     couldn't supply a forecast — e.g. "calibrating: 8 of 24h captured" —
     so the decision row carries useful context instead of a generic
     error. Falls back to a "set location first" hint when not provided.
+
+    `charge_not_before_ts` excludes earlier charging slots and extensions;
+    `charging_unavailable` removes all slots when a hold has no reliable end.
+    These planning constraints never authorize a physical plug ON command.
     """
     now = int(now_ts or time.time())
     mode = str(config.get("mode") or "off")
@@ -491,7 +514,8 @@ def compute_plan(
     candidates: list[tuple[int, float]] = []
     cur = (now // 3600) * 3600
     while cur < margin_end_ts:
-        candidates.append((cur, rate_at(cost_plan, cur, tz_offset_seconds)))
+        if not charging_unavailable and (charge_not_before_ts is None or cur >= charge_not_before_ts):
+            candidates.append((cur, rate_at(cost_plan, cur, tz_offset_seconds)))
         cur += 3600
 
     soc_now = float(current_soc_pct) if current_soc_pct is not None else 0.0
@@ -500,7 +524,9 @@ def compute_plan(
     # Baseline >= target already returned above. After sunrise preserve
     # the existing current-SOC extension rule instead of chasing a past
     # forecast deficit.
-    extension_active = now >= margin_end_ts and (now < sunrise_ts or soc_now < target)
+    extension_active = (not charging_unavailable
+                        and (charge_not_before_ts is None or now >= charge_not_before_ts)
+                        and now >= margin_end_ts and (now < sunrise_ts or soc_now < target))
 
     if not candidates and not extension_active:
         return Plan(action="off", reason="not enough time before sunrise",

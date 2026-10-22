@@ -550,7 +550,7 @@ function switchTab(name, opts = {}) {
   if (name === 'live')     { drawLiveChart(lastStatus); renderBatteryPacks(); fetchEodForecast(); fetchBatteryPacks(); }
   if (name === 'energy')   { fetchEnergyHistory(); fetchEnergyAllDevices(); fetchEnergyDaily(); }
   if (name === 'forecast') { fetchForecast(); }
-  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadAIProvider(); loadOpenAIKeyStatus(); loadOpenAIModelPickers(); loadBackupAll(); restoreSettingsSubtab(); }
+  if (name === 'settings') { loadSettings(); loadCostPlan(); initKeepAwakeToggle(); loadAnthropicKeyStatus(); loadAnthropicModelPickers(); loadAIProvider(); loadOpenAIKeyStatus(); loadOpenAIModelPickers(); loadBackupAll(); restoreSettingsSubtab(); window.LGThinQ?.load(); }
   if (name === 'logs')     { loadLogs(); }
   if (name === 'automation') {
     restoreAutomationSubtab();
@@ -3139,6 +3139,8 @@ async function loadSmartCharge() {
     ]);
     const cfgPayload = cfgRes.ok ? await cfgRes.json() : {};
     const cfg = cfgPayload.config || {};
+    if (activeJackeryDevice()?.device_sn !== deviceSn) return;
+    window.LGThinQ?.hydrate(cfg);
     const conflicts = cfgPayload.conflicting_rules || [];
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
@@ -3616,7 +3618,7 @@ function renderSmartChargePlan(plan, narration) {
     <div class="sc-plan-header">
       <span class="sc-action ${actionCls}">${(plan.action || '?').toUpperCase()}</span>
       <span class="sc-mode">[${plan.mode || '?'}]</span>${extensionBadge}
-      <span class="sc-reason">${plan.reason || ''}</span>
+      <span class="sc-reason">${escapeHtml(plan.reason || '')}</span>
     </div>
     <div class="sc-plan-grid">
       <div><span class="sc-lbl">Current SOC</span><span>${plan.current_soc_pct != null ? Math.round(plan.current_soc_pct) + '%' : '—'}</span></div>
@@ -3627,6 +3629,9 @@ function renderSmartChargePlan(plan, narration) {
       <div><span class="sc-lbl">Charge schedule</span><span>${scheduleStr}</span></div>
       <div><span class="sc-lbl">Sunrise</span><span>${sunrise}</span></div>
       <div><span class="sc-lbl">Cheapest rate</span><span>${rate}</span></div>
+      ${plan.lg_protection ? `<div><span class="sc-lbl">LG estimated finish</span><span>${plan.lg_protection.expected_finish_ts ? fmtHour(plan.lg_protection.expected_finish_ts) : (plan.lg_protection.blocked_now ? 'Unknown — charging held OFF' : 'All selected appliances OFF')}</span></div>
+      <div><span class="sc-lbl">Estimated SOC at finish</span><span>${plan.lg_protection.soc_at_finish_pct != null ? Math.round(plan.lg_protection.soc_at_finish_pct) + '%' : '—'}</span></div>
+      <div><span class="sc-lbl">LG planning constraint</span><span>${plan.lg_protection.charge_not_before_ts ? 'After ' + fmtHour(plan.lg_protection.charge_not_before_ts) + '; confirmed OFF still required' : (plan.lg_protection.blocked_now ? 'No charging assumed until a reliable finish estimate or OFF status' : 'No hold')}</span></div>` : ''}
     </div>${narrationLine}`;
   el.hidden = false;
 }
@@ -3837,6 +3842,7 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
     max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 800,
     max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
     claude_enabled: $('sc-claude-toggle').checked,
+    ...(window.LGThinQ?.config() || {}),
   };
   try {
     const r = await fetch(`/api/smart_charge/config?device_sn=${encodeURIComponent(deviceSn)}`, {

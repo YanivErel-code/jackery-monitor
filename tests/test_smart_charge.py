@@ -59,6 +59,31 @@ def test_config_round_trip(tmp_path, monkeypatch):
     assert sc.get_config()["mode"] == "test"
 
 
+def test_appliance_finish_restricts_planned_hours_and_never_starts_early(tmp_path, monkeypatch):
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 // 3600 * 3600
+    forecast = _build_forecast(now_ts=base, sunset_h=0, night_h=8, night_predicted_soc=0)
+    plan = sc.compute_plan(config={"mode": "active", "max_charge_w": 800}, current_soc_pct=10,
+                           forecast=forecast, cost_plan=_flat_plan(), capacity_wh=30240, now_ts=base,
+                           charge_not_before_ts=base + 2 * 3600 + 1800)
+    assert plan.action == "off"
+    assert plan.planned_hours
+    assert min(plan.planned_hours) >= base + 3 * 3600
+
+
+@pytest.mark.parametrize("unavailable,after", [(True, None), (False, 1_700_000_000 + 20 * 3600)])
+def test_unknown_or_late_appliance_finish_cannot_use_extension(tmp_path, monkeypatch, unavailable, after):
+    sc = _fresh(monkeypatch, tmp_path)
+    base = 1_700_000_000 // 3600 * 3600
+    forecast = _build_forecast(now_ts=base, sunset_h=0, night_h=8, night_predicted_soc=0)
+    plan = sc.compute_plan(config={"mode": "active"}, current_soc_pct=1, forecast=forecast,
+                           cost_plan=_flat_plan(), capacity_wh=30240, now_ts=base + 7 * 3600 + 100,
+                           charge_not_before_ts=after, charging_unavailable=unavailable)
+    assert plan.action == "off"
+    assert not plan.planned_hours
+    assert not plan.extension_active
+
+
 def test_config_clamps_invalid(tmp_path, monkeypatch):
     sc = _fresh(monkeypatch, tmp_path)
     saved = sc.set_config({"mode": "wat", "target_sunrise_soc_pct": 999})
