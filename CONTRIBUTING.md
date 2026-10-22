@@ -87,6 +87,12 @@ attestations with the image; they are build evidence, not a signed security audi
 Never overwrite an existing release tag or include runtime data/credentials in
 release assets. Synology deployment is a separate, explicit operation.
 
+The former "keep latest ten package versions" cleanup is removed: it could
+delete a still-published release image or its referenced attestation manifests.
+Registry storage can grow until a release-aware retention policy is implemented.
+Do not reinstate blanket tagged or untagged deletion without preserving the full
+manifest/attestation graph of every retained release.
+
 ## How to open a useful issue
 
 - Tell me what you tried and what happened (bridge log lines help a lot).
