@@ -284,10 +284,12 @@ test('page forecast invalidation prevents old in-flight results from painting', 
 
 test('page boot opens WS and installs recovery while bridge auth is still pending', async () => {
   const calls = [];
+  const intervals = [];
   const context = vm.createContext({
     applyHeroOrder() {}, isKeepAwakeOn: () => false, connectWs: () => calls.push('ws'),
     checkAuth: () => new Promise(() => {}), initHeroSortable() {},
-    setInterval: () => calls.push('interval'), refreshAutomationDot() {},
+    setInterval: (callback, delay) => { calls.push('interval'); intervals.push({ callback, delay }); },
+    refreshAutomationDot() {}, refreshSmartChargeRate() {},
     fetchEodForecast() {}, fetchBatteryPacks() {}, fetchEnergyHistory() {},
   });
   const boot = appSource.match(/\(async function boot\(\) \{[\s\S]*?\n\}\)\(\);/);
@@ -295,4 +297,5 @@ test('page boot opens WS and installs recovery while bridge auth is still pendin
   await vm.runInContext(boot[0], context);
   assert.equal(calls[0], 'ws');
   assert.ok(calls.includes('interval'));
+  assert.ok(intervals.some(({ callback, delay }) => callback === context.refreshSmartChargeRate && delay === 60000));
 });

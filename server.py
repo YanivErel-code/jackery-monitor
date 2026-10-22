@@ -45,6 +45,7 @@ import backoff as _backoff
 import backup
 import backup_creds
 import backup_discover
+import charge_rate
 import cost as cost_module
 import energy_db
 import forecaster
@@ -777,6 +778,7 @@ def _sync_measurement_quality(now: float) -> None:
             state.dashboard_cache.clear()
             state.view_history_cache.clear()
             _param_fit_cache.pop((device_sn, "_history"), None)
+            _charge_rate_cache.pop((state.account_generation, device_sn), None)
             if state.device and state.device.device_sn == device_sn:
                 state.reset_live_history()
             log.warning("Quarantined frozen measurements: start=%d end=%d rows=%d",
@@ -1649,6 +1651,7 @@ def _flag_unknown_models(cloud_meta: dict | None) -> None:
 # hit on every API call without re-doing the math each time.
 _param_fit_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _PARAM_FIT_CACHE_TTL_S = 60.0
+_charge_rate_cache: dict[tuple[int, str], tuple[float, charge_rate.ChargeRate]] = {}
 
 
 def _resolved_capacity_wh(device_sn: str | None) -> int:
@@ -1698,6 +1701,28 @@ def _cached_history(device_sn: str) -> list[dict]:
     return h
 
 
+def _learned_charge_rate(device_sn: str) -> charge_rate.ChargeRate:
+    now = time.time()
+    cache_key = (state.account_generation, device_sn)
+    cached = _charge_rate_cache.get(cache_key)
+    if cached and 0 <= now - cached[0] < 60:
+        return cached[1]
+    try:
+        history = state.energy.history(device_sn, hours=charge_rate.LOOKBACK_DAYS * 24,
+                                       bucket_s=60, until_ts=int(now // 60) * 60)
+        rate = charge_rate.learn_charge_rate(
+            history, now_ts=now, tz_offset_seconds=device_location.get_tz_offset())
+    except Exception:
+        log.warning("AC charge-rate history unavailable; using default", exc_info=True)
+        rate = charge_rate.learn_charge_rate([], now_ts=now)
+        rate["note"] = "Charge-rate history unavailable; using 1,000 W"
+    state.energy.set_device_param(device_sn, "max_charge_w", rate["value"],
+                                  source=rate["source"], n_samples=rate["n_samples"],
+                                  note=rate["note"])
+    _charge_rate_cache[cache_key] = (now, rate)
+    return rate
+
+
 def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
     """Walk the resolution ladder for `key` on `device_sn`. Returns a
     dict with at least {value, source}; may also include n_samples,
@@ -1721,6 +1746,9 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
         value = _total_capacity_wh(device_sn) if key == "battery_capacity_wh" else None
         return {"value": value, "source": "home-cloud" if value is not None else "unavailable",
                 "note": "Home system total; portable model fitting unavailable"}
+
+    if key == "max_charge_w":
+        return {**_learned_charge_rate(device_sn), "read_only": True}
 
     # Step 1: anything stored in DB wins (user overrides + cached fits).
     stored = state.energy.get_device_param(device_sn, key)
@@ -1767,58 +1795,6 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
                     "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s catalog failed: %s", device_sn, key, e)
-
-    elif key == "max_charge_w":
-        # Step 0: an explicit value in smart_charge config (set by the
-        # user via the Smart-charge form on the Automation tab) wins
-        # over the auto-fit. The Device-tab `device_params` 'user'
-        # override is already handled by the early-return at the top
-        # of this function — this is the SECOND user channel.
-        try:
-            if smart_charge.has_user_set_field(device_sn, "max_charge_w"):
-                cfg = smart_charge.get_config(device_sn)
-                cfg_w = float(cfg.get("max_charge_w") or 0)
-                if cfg_w > 0:
-                    state.energy.set_device_param(
-                        device_sn, key, cfg_w, source="user",
-                        note="from smart_charge config (Automation tab)",
-                    )
-                    return {"value": cfg_w, "source": "user",
-                            "updated_at": int(time.time())}
-        except Exception as e:
-            log.debug("resolve %s/%s smart_charge lookup failed: %s",
-                      device_sn, key, e)
-
-        try:
-            tz_off = int(device_location.get_tz_offset() or 0)
-            wx = state.energy.list_weather_observations(
-                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
-            )
-            w, n = forecaster.fit_max_charge_w(
-                _cached_history(device_sn),
-                tz_offset_seconds=tz_off, weather_hourly=wx,
-            )
-            if w is not None:
-                state.energy.set_device_param(
-                    device_sn, key, w, source="fit", n_samples=n,
-                    confidence=("high" if n >= 30 else "medium" if n >= 12 else "low"),
-                )
-                return {"value": w, "source": "fit", "n_samples": n,
-                        "updated_at": int(time.time())}
-            # Fit returned None — no qualifying samples after filtering.
-            # Write a default ourselves so the next call sees `default`
-            # instead of falling through to whatever stale fit was here
-            # before. Without this, an old buggy fit's value can't be
-            # displaced even with the new filter rejecting all samples.
-            default_w = float(smart_charge.DEFAULT_CONFIG.get("max_charge_w") or 800)
-            state.energy.set_device_param(
-                device_sn, key, default_w, source="default",
-                n_samples=n, note="fit found no qualifying samples",
-            )
-            return {"value": default_w, "source": "default",
-                    "n_samples": n, "updated_at": int(time.time())}
-        except Exception as e:
-            log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)
 
     elif key == "inverter_overhead_pct":
         try:
@@ -2111,6 +2087,9 @@ async def _smart_charge_evaluate(record: bool = True,
                 device_sn, plan.to_dict(), executed=False,
                 input_snapshot={"version": 1, **inputs, "unavailable_reason": unavailable})
         return plan
+    learned_rate = _learned_charge_rate(device_sn)
+    cfg = {**cfg, "max_charge_w": learned_rate["value"]}
+    inputs["charge_rate"] = {key: value for key, value in learned_rate.items() if key != "samples"}
     # If packs are attached, the forecaster needs the system-wide SOC to
     # match the system-wide capacity it'll be paired with.
     starting_soc = inputs["system_soc_pct"]
@@ -3481,6 +3460,8 @@ _advisor_helpers = advisor_routes.AdvisorHelpers(
     capacity_hints=_capacity_hints,
     system_soc_pct=_system_soc_pct,
     is_read_only=lambda sn: not _portable_control_ready(sn),
+    smart_charge_config=lambda sn: {**smart_charge.get_config(sn),
+                                    "max_charge_w": _learned_charge_rate(sn)["value"]},
 )
 advisor_routes.install(app, state, _advisor_helpers)
 
@@ -3536,21 +3517,12 @@ def api_devices_params(device_sn: str | None = None,
     }
     if debug_key == "max_charge_w":
         try:
-            ehist = state.energy.history(device_sn, hours=14 * 24, bucket_s=3600)
-            tz_off = device_location.get_tz_offset() or 0
-            wx = state.energy.list_weather_observations(
-                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
-            )
-            samples, n_used = forecaster.fit_max_charge_w(
-                ehist, tz_offset_seconds=int(tz_off),
-                weather_hourly=wx, return_candidates=True,
-            )
+            rate = _learned_charge_rate(device_sn)
             response["debug"] = {
                 "key": "max_charge_w",
-                "tz_offset_seconds": int(tz_off),
-                "weather_observations": len(wx),
-                "n_used_in_fit": n_used,
-                "samples": samples,  # list of {ts, input_w, ac_input_w, solar_w, ghi_w_m2, value_used, path}
+                "tz_offset_seconds": device_location.get_tz_offset(),
+                "n_used_in_fit": rate["n_samples"],
+                "samples": rate["samples"],
             }
         except Exception as e:
             response["debug"] = {"key": "max_charge_w", "error": str(e)}
@@ -3576,6 +3548,8 @@ async def api_devices_params_set(req: Request):
         raise HTTPException(400, "device_sn and key required")
     if key not in energy_db.DEVICE_PARAM_KEYS:
         raise HTTPException(400, f"unknown param key: {key!r}")
+    if key == "max_charge_w":
+        raise HTTPException(400, "AC charging rate is learned automatically and cannot be overridden")
     if value is None:
         state.energy.clear_device_param(device_sn, key)
     else:
@@ -3610,6 +3584,7 @@ async def api_devices_params_refit(req: Request):
     # memo so the live fit picks up the latest data.
     state.energy.clear_device_param(device_sn, key)
     _param_fit_cache.pop((device_sn, "_history"), None)
+    _charge_rate_cache.pop((state.account_generation, device_sn), None)
     return {"device_sn": device_sn, "key": key,
             **resolve_device_param(device_sn, key)}
 
@@ -4390,6 +4365,8 @@ def api_smart_charge_get(device_sn: str | None = None):
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     cfg = smart_charge.get_config(device_sn)
+    if device_sn and not _is_home_device(device_sn):
+        cfg = {**cfg, "max_charge_w": _learned_charge_rate(device_sn)["value"]}
     return {
         "device_sn": device_sn,
         "config": cfg,
@@ -4426,9 +4403,13 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
         _require_portable_device(device_sn)
     if isinstance(body, dict) and body.get("lg_interlock_enabled") and not body.get("kasa_device_host"):
         raise HTTPException(400, "Select the Kasa plug controlling this Jackery's AC charging")
+    if isinstance(body, dict):
+        body = {key: value for key, value in body.items() if key != "max_charge_w"}
     saved = smart_charge.set_config(body if isinstance(body, dict) else {},
                                     device_sn=device_sn)
     state.smart_charge_wake.set()
+    if not _is_home_device(device_sn):
+        saved = {**saved, "max_charge_w": _learned_charge_rate(device_sn)["value"]}
     return {
         "device_sn": device_sn,
         "config": saved,
@@ -4683,36 +4664,25 @@ def api_smart_charge_status(device_sn: str | None = None):
     the UI status panel. History pulls from the persisted log in
     energy_db so it survives container restarts.
 
-    `observed_max_charge_w` is fit from the user's own input_w samples
-    (95th percentile of values >= 100W), so the UI can show their
-    actual charging rate instead of a hardcoded 5000-Plus number. Falls
-    back to None when too few charging observations exist yet."""
+    The planner and UI share the automatic sustained-minute charge rate.
+    `charge_rate` includes the 1,000 W learning fallback and provenance;
+    legacy observed fields remain nullable until a stable fit exists."""
     if not device_sn:
         device_sn = state.device.device_sn if state.device else None
     history: list[dict] = []
-    observed_w: float | None = None
-    observed_n: int = 0
+    rate = None
     if device_sn:
         history = state.energy.list_smart_charge_decisions(device_sn, limit=50)
-        try:
-            main_wh, pack_wh = _capacity_hints(device_sn)
-            ehist = state.energy.history(
-                device_sn, hours=14 * 24, bucket_s=3600,
-                main_capacity_wh=main_wh, pack_capacity_wh=pack_wh,
-            )
-            tz_off = device_location.get_tz_offset() or 0
-            wx = state.energy.list_weather_observations(
-                since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
-            )
-            observed_w, observed_n = forecaster.fit_max_charge_w(
-                ehist, tz_offset_seconds=int(tz_off), weather_hourly=wx,
-            )
-        except Exception as e:
-            log.debug("observed_max_charge_w fit failed: %s", e)
+        if not _is_home_device(device_sn):
+            rate = _learned_charge_rate(device_sn)
+    config = smart_charge.get_config(device_sn)
+    if rate:
+        config = {**config, "max_charge_w": rate["value"]}
     return {"device_sn": device_sn,
-            "config": smart_charge.get_config(device_sn),
-            "observed_max_charge_w": (round(observed_w) if observed_w is not None else None),
-            "observed_max_charge_n": observed_n,
+            "config": config,
+            "charge_rate": ({key: value for key, value in rate.items() if key != "samples"} if rate else None),
+            "observed_max_charge_w": rate["value"] if rate and rate["source"] == "fit" else None,
+            "observed_max_charge_n": rate["n_samples"] if rate else 0,
             "history": history}
 
 
@@ -4780,8 +4750,7 @@ def api_smart_charge_backtest(
         since_ts=since_ts - 14 * 86400, limit=24 * (days + 14) + 72,
     )
 
-    cfg = smart_charge.get_config(device_sn)
-    cfg_max_charge = float(cfg.get("max_charge_w") or 800)
+    cfg_max_charge = _learned_charge_rate(device_sn)["value"]
 
     # Capacity + tz mirror what _smart_charge_evaluate would resolve.
     active_sn = state.device.device_sn if state.device else None

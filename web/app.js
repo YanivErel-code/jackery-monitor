@@ -1173,8 +1173,8 @@ function renderDeviceParams(rows, deviceSn) {
         ${(p.source === 'fit' || p.source === 'probe' || p.source === 'catalog')
           ? '<button class="btn btn-ghost btn-small" data-action="refit" type="button" title="Drop the stored value and re-resolve from the ladder">Refit</button>'
           : ''}
-        <button class="btn btn-ghost btn-small" data-action="override" type="button">Override</button>
-        ${p.source === 'user' ? '<button class="btn btn-ghost btn-small" data-action="reset" type="button">Reset</button>' : ''}
+        ${!p.read_only ? '<button class="btn btn-ghost btn-small" data-action="override" type="button">Override</button>' : '<span class="hint">Automatic</span>'}
+        ${p.source === 'user' && !p.read_only ? '<button class="btn btn-ghost btn-small" data-action="reset" type="button">Reset</button>' : ''}
       </div>
     </div>
     <div class="device-param-debug" data-debug-for="${safe(p.key)}" hidden></div>`).join('');
@@ -1260,11 +1260,11 @@ async function inspectParam(btn, deviceSn) {
     panel.innerHTML = `
       <div class="dd-section" style="padding:8px 12px">
         <h4>Samples used by the fit (n=${dbg.n_used_in_fit}, weather_observations=${dbg.weather_observations || 0}, tz_offset=${dbg.tz_offset_seconds}s)</h4>
-        <p class="hint" style="margin:4px 0 8px">Each row is one hourly bucket. The 95th percentile of <strong>value_used</strong> gives the fitted result. Path values: <code>ac_input_w</code> = cloud-classified AC, <code>input_w_dark_ghi</code> = no-solar via weather GHI &lt; 50 W/m² (best signal), <code>input_w_night</code> = no-solar via local clock fallback when no weather, <code>skipped_solar_possible</code> = daytime with weather, <code>skipped_daytime_no_ghi</code> = daytime no weather, <code>below_min_input</code> = idle.</p>
+        <p class="hint" style="margin:4px 0 8px">Fresh completed minute readings from the newest stable six-minute charging window. The median of consistent <strong>value_used</strong> readings gives the estimate; isolated spikes, solar and high-SOC tapering are excluded. <code>ac_input_w</code> = classified AC; <code>input_w_night</code> = near-zero solar with confirmed local night hours.</p>
         <div style="overflow-x:auto">
           <table class="dd-table">
             <thead><tr>
-              <th>hour</th><th>input_w</th><th>ac_input_w</th><th>solar_w</th><th>GHI W/m²</th><th>value_used</th><th>path</th>
+              <th>minute</th><th>input_w</th><th>ac_input_w</th><th>solar_w</th><th>GHI W/m²</th><th>value_used</th><th>path</th>
             </tr></thead>
             <tbody>${rows_html}</tbody>
           </table>
@@ -3111,6 +3111,39 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
 // ============================================================
 // Load config + Kasa device list + recent decisions into the form.
 // Called on Settings tab activation; re-runs are cheap.
+let _chargeRateRefreshPending = false;
+
+function renderSmartChargeRate(rate) {
+  const output = $('sc-charge-rate');
+  if (!output) return;
+  const note = $('sc-charge-rate-note');
+  if (!rate || !Number.isFinite(rate.value)) {
+    output.textContent = 'Charging estimate unavailable — reload to retry.';
+    if (note) note.textContent = '';
+    return;
+  }
+  const source = rate.source === 'fit' ? 'learned automatically' : 'default while learning';
+  output.textContent = `${Math.round(rate.value).toLocaleString()} W — ${source}`;
+  if (note) note.textContent = rate.note || '';
+}
+
+async function refreshSmartChargeRate() {
+  if (!isTabVisible('automation') || isHomeMonitoring() || _chargeRateRefreshPending) return;
+  const deviceSn = activeJackeryDevice()?.device_sn;
+  if (!deviceSn) return;
+  _chargeRateRefreshPending = true;
+  try {
+    const response = await fetch(`/api/smart_charge/status?device_sn=${encodeURIComponent(deviceSn)}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const status = await response.json();
+    if (isTabVisible('automation') && isCurrentDeviceRequest(deviceSn)) renderSmartChargeRate(status.charge_rate);
+  } catch {
+    if (isTabVisible('automation') && isCurrentDeviceRequest(deviceSn)) renderSmartChargeRate(null);
+  } finally {
+    _chargeRateRefreshPending = false;
+  }
+}
+
 async function loadSmartCharge() {
   // Render only when the form actually exists in the DOM (Automation tab).
   if (!$('sc-form')) return;
@@ -3177,37 +3210,7 @@ async function loadSmartCharge() {
     $('sc-mode').value = cfg.mode || 'off';
     $('sc-target-soc').value = cfg.target_sunrise_soc_pct ?? 25;
     if ($('sc-reserve-soc')) $('sc-reserve-soc').value = cfg.reserve_soc_pct ?? 10;
-    // Prefer a saved value; if unsaved AND the server has observed a
-    // charging rate from this device's own samples, prefill that
-    // instead of the population fallback.
-    const observedW = status?.observed_max_charge_w ?? null;
-    const observedN = status?.observed_max_charge_n ?? 0;
-    const inp = $('sc-max-charge-w');
-    if (cfg.max_charge_w != null) {
-      inp.value = cfg.max_charge_w;
-    } else if (observedW) {
-      inp.value = observedW;
-    } else {
-      inp.value = 800;  // matches DEFAULT_CONFIG.max_charge_w
-    }
-    // Render the hint dynamically — show what THIS device actually
-    // pulled if we've seen enough charging samples; otherwise a
-    // generic "we'll learn this once you charge" message.
-    const hint = $('sc-max-charge-hint');
-    if (hint) {
-      if (observedW && observedN >= 6) {
-        hint.innerHTML =
-          `Observed AC charging rate for this device: <strong>~${observedW} W</strong> ` +
-          `(95th percentile across ${observedN} samples ≥ 100W). ` +
-          `Set this to whatever your unit actually pulls — the prefill is what the dashboard observed, ` +
-          `not the marketing max.`;
-      } else {
-        hint.innerHTML =
-          `AC charging rate this device pulls from the wall while the smart-charge plug is on. ` +
-          `The dashboard learns this from observed charging events on this device ` +
-          `(${observedN}/6 samples so far) — the hint will update once we've seen a few minutes of charging.`;
-      }
-    }
+    renderSmartChargeRate(status?.charge_rate);
     $('sc-max-on-min').value = cfg.max_on_duration_minutes ?? 480;
     $('sc-claude-toggle').checked = !!cfg.claude_enabled;
 
@@ -3862,7 +3865,6 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
     kasa_device_host: $('sc-kasa-host').value || null,
     target_sunrise_soc_pct: parseInt($('sc-target-soc').value, 10) || 25,
     reserve_soc_pct: Number($('sc-reserve-soc')?.value ?? 10),
-    max_charge_w: parseInt($('sc-max-charge-w').value, 10) || 800,
     max_on_duration_minutes: parseInt($('sc-max-on-min').value, 10) || 480,
     claude_enabled: $('sc-claude-toggle').checked,
     ...(window.LGThinQ?.config() || {}),
@@ -8099,6 +8101,7 @@ function initHeroSortable() {
   // completed in another browser) lights up the dot promptly.
   refreshAutomationDot();
   setInterval(refreshAutomationDot, 3 * 60_000);
+  setInterval(refreshSmartChargeRate, 60_000);
 
   // If auth was missing the user is in the modal — when they sign in successfully
   // the modal hides and the WS snapshot will populate the UI.
