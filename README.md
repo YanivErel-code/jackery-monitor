@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml)
 [![Docker image](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml)
+[![Release](https://img.shields.io/github/v/release/YanivErel-code/jackery-monitor)](https://github.com/YanivErel-code/jackery-monitor/releases/latest)
 [![License](https://img.shields.io/github/license/YanivErel-code/jackery-monitor)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 
@@ -9,9 +10,12 @@ Self-hosted dashboard for Jackery power stations. Live per-battery state +
 power flow, 6-hour history chart, output control over MQTT, energy
 aggregation in SQLite, **5-day solar SOC forecast**, **smart-charge
 automation that turns on a grid-power Kasa plug only when the forecast
-says you won't make it through the night**, and **an optional Claude AI
-advisor that reviews yesterday's predictions vs reality every morning
-and suggests one-click tweaks** to the algorithm constants.
+says you won't make it through the night**, and **an optional Anthropic or
+OpenAI advisor that reviews predictions and telemetry on demand and suggests
+config changes for you to approve**.
+
+See the [v1.0.0 release and upgrade guide](docs/releases/v1.0.0.md) for the
+major-release overview, changed LG availability policy and known limitations.
 
 Designed to run on a Synology NAS in Docker. Works anywhere with Docker
 Compose. Multi-device — handles multiple Jackery devices on the same account
@@ -33,7 +37,7 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
 
 *Live tab: state of charge with sunset SOC prediction, today's kWh + solar/grid dollar breakdown, animated power flow diagram (Solar → Battery → Loads with traveling-dot animation, speed proportional to wattage), output toggles + AC-charge plug control, collapsible per-pack SOC card, and the 6-hour battery + power chart.*
 
-> **🤖 New: AI advisor.** Each morning Claude Opus (with extended thinking) reviews the last 48h of forecast errors, smart-charge decisions, samples, and weather, then proposes specific config tweaks — *"raise `max_charge_w` from 1500 → 1850, your unit consistently pulls more during fast-charge mode"* — that you approve with one click. Nothing applies automatically. See [AI features](#ai-features-optional) below.
+> **🤖 Optional AI advisor.** Choose Anthropic or OpenAI in Settings, then run a review from Automation → Insights. The advisor can inspect forecast errors, smart-charge decisions, samples and weather and propose config changes for your approval. Nothing applies automatically. See [AI features](#ai-features-optional) below.
 
 ---
 

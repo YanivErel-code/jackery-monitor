@@ -4,9 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project tries to follow [Semantic Versioning](https://semver.org/).
-Pre-1.0 means breaking changes can land in any minor.
+Versions before 1.0 allowed breaking changes in minor releases. Operational
+limitations still apply; a major version is not a hardware safety guarantee.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-10-22
+
+First major release, rolling up 92 non-merge commits since the tree represented
+by v0.3.0. See the [release and upgrade guide](docs/releases/v1.0.0.md).
+
+### Added
+- Generic, encrypted LG ThinQ monitoring, explicit per-Jackery appliance mappings,
+  manual 240 V reservations and finish-time-aware smart-charge planning.
+- Persistent Automation warnings and a separate red navigation dot for LG issues.
+- Frozen-measurement detection, bounded cloud recovery, durable evidence and
+  reversible historical quarantine with guarded selective restoration.
+- Read-only Jackery Home EU discovery, Explorer 1000 v2 catalog support,
+  per-device AC auto recovery, rescue watchdogs and pack-balance windows.
+- Anthropic/OpenAI advisor selection, exact decision-input snapshots, richer
+  control/pack history queries, redesigned Energy reporting and CSV export.
+- Container builds publish SBOM and maximum-detail build provenance attestations.
+
+### Changed
+- Fresh mapped active states (including the dryer's powered-on `INITIAL`) and
+  manual reservations block charging. Fresh LG disconnected reports are assumed
+  OFF. LG token/API failures and unknown/stale/missing states warn but do not
+  block charging. Monitoring failure can therefore allow charging while an
+  appliance is running; use manual reservation when required.
+- Sunrise accuracy uses original, immutable sunset forecasts rather than later
+  rolling revisions. Uncaptured originals and excluded data remain unknown.
+- Drain/load learning uses quality-gated multi-night evidence and preserves
+  calibration provenance and range limits instead of fitting discontinuities.
+
+### Fixed
+- Source/receipt freshness, delayed HTTP versus MQTT races, stale expansion packs,
+  frozen-history ingestion and forecast/actual contamination after data repair.
+- Smart-charge input validation, final-hour top-ups and conflicting-rule UI sync.
+- Forecast charge-ceiling accounting, partial-hour/weather alignment, diversion
+  accounting, reserve protection, overload handling and manual recovery overrides.
+- Redundant dashboard requests, blocking historical aggregates, cached-shell
+  startup failures, device-switch races, HTML injection and secret handling.
+
+## [0.x — accumulated development notes]
+
+Preserved historical development log. Some foundational entries below predate
+v0.3.0; the comparative v1.0.0 summary above is the release change list.
 
 ### Added
 - Add encrypted, UI-configurable, read-only LG ThinQ connections for generic LG
