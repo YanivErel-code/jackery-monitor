@@ -19,6 +19,12 @@ I'll acknowledge within a few days. This is a personal-scale project so
 4. **Anthropic API key** for the optional Claude features (`/data/anthropic-creds.json`)
 5. **Dashboard login** — username + PBKDF2-SHA256 hash (`/data/auth.json`)
 6. **Device location** — lat/lon, label, UTC offset (`/data/location.json`)
+7. **LG ThinQ personal access token** (`/data/lg-thinq-creds.json`, mode 0600)
+
+LG uses read-only device-list/status requests. Its token is never returned in
+API responses or included in exception messages. Removing the token leaves
+configured charging protection fail-closed until explicitly disabled or
+reconnected. Appliance mappings are non-secret configuration in `smart_charge.json`.
 
 All share the same key file at `/data/.jackery-creds.key` (mode 0600),
 generated on first use. **The key is co-located with the ciphertext** —

@@ -1008,6 +1008,16 @@
               </label>
             </div>
           </div>
+          <fieldset class="lg-protection" id="lg-protection">
+            <legend>LG appliance 220/240 V protection</legend>
+            <label class="keep-awake-row"><input id="sc-lg-enabled" type="checkbox" /> Block grid charging for selected LG appliances</label>
+            <p id="sc-lg-help" class="hint">Which LG appliances are actually connected to this Jackery's 220/240 V output? Check only those devices below, then save. Selections are separate for each Jackery; unselected appliances do not affect charging. Voltage and wiring are not detected automatically. Connect your LG account in Settings → General → LG ThinQ.</p>
+            <div id="sc-lg-devices" class="lg-device-list" role="group" aria-label="Appliances connected to this Jackery" aria-describedby="sc-lg-help"><span class="hint">No LG devices loaded.</span></div>
+            <label class="keep-awake-row"><input id="sc-lg-hold" type="checkbox" /> Reserve 240 V availability (manual hold)</label>
+            <p class="hint">Protection is live even in Off/Test mode and also blocks this charging plug's manual, automation and rescue ON commands. It overrides low-SOC rescue charging.</p>
+            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest selected finish plus 5 minutes, rounded up to an hourly slot. Paused, unknown or untimed activity has no assumed release time. Charging still requires every selected appliance to report OFF, even after its timer ends.</p>
+            <p class="hint">With protection enabled, active, disconnected, unfamiliar or stale states hold charging OFF. Only a recently confirmed OFF state releases the hold. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
+          </fieldset>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
             <button class="btn btn-primary" type="submit">Save</button>
             <button id="sc-evaluate" class="btn btn-ghost" type="button">Evaluate now</button>
@@ -1484,6 +1494,24 @@
             <button id="temp-unit-f" class="temp-pill"    type="button" role="radio" aria-checked="false">°F</button>
           </div>
         </div>
+      </section>
+      <section class="card device-card" id="settings-card-lg-thinq">
+        <div class="card-header"><h2>LG ThinQ</h2><span id="lg-connection-status" class="hint" role="status">Not loaded</span></div>
+        <p class="hint">Read-only status monitoring for any supported LG appliance. No commands are sent to LG appliances. Configure which devices use each Jackery's 240 V output under Automation → Smart grid charging.</p>
+        <form id="lg-credentials-form" autocomplete="off">
+          <div class="settings-row">
+            <label class="settings-label" for="lg-token"><span class="settings-label-text">LG personal access token</span><span class="settings-hint">Create a token at <a href="https://connect-pat.lgthinq.com/" target="_blank" rel="noopener noreferrer">LG's token portal</a> with device-list and device-status read permissions. Stored encrypted on this Synology; never returned to the browser.</span></label>
+            <div class="settings-control"><input id="lg-token" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter a new token to connect or replace" maxlength="265" aria-describedby="lg-message" required /></div>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" for="lg-country"><span class="settings-label-text">LG account country</span><span class="settings-hint">Two-letter country code, such as US, CA, GB or AU.</span></label>
+            <div class="settings-control"><input id="lg-country" type="text" value="US" minlength="2" maxlength="2" pattern="[A-Za-z]{2}" required style="width:80px" /></div>
+          </div>
+          <div class="lg-actions"><button id="lg-connect" class="btn btn-primary" type="submit">Connect / replace token</button><button id="lg-refresh" class="btn btn-ghost" type="button">Refresh appliance status</button><button id="lg-disconnect" class="btn btn-ghost" type="button">Remove token</button></div>
+        </form>
+        <p id="lg-message" class="hint" role="status"></p>
+        <div id="lg-appliances" class="lg-device-list"></div>
+        <p class="hint">Status is read from LG's cloud every 30 seconds for mapped appliances; some older models update more slowly. This is a best-effort software guard, not a hardware safety interlock. Unknown states are never treated as OFF. Removing the token does not disable configured protection.</p>
       </section>
       </div><!-- /data-settings-group=general -->
 
@@ -2004,6 +2032,7 @@
 
   <script src="/static/sortable.min.js"></script>
   <script src="/static/dashboard_requests.js"></script>
+  <script src="/static/lg_thinq.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

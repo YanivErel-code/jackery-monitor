@@ -112,11 +112,13 @@ async def _with_retry(operation_name: str, fn):
     missing dep) breaks out immediately — retrying won't help and
     just multiplies the user-facing error spam by 3x."""
     import asyncio
+
+    import lg_thinq
     last_err: Exception | None = None
     for attempt in range(_KASA_RETRY_ATTEMPTS):
         try:
             return await fn()
-        except KasaConfigError:
+        except (KasaConfigError, lg_thinq.InterlockBlocked):
             raise
         except Exception as e:
             last_err = e
@@ -145,9 +147,16 @@ async def set_state(host: str, on: bool) -> dict:
     """Turn a device on/off by IP. Retries transient failures so a
     single network blip during a UI toggle doesn't bubble up as
     'err' to the user — most kasa hiccups recover on attempt 2."""
+    import lg_thinq
+    if on and (reason := lg_thinq.block_reason_for_host(host)):
+        raise lg_thinq.InterlockBlocked(reason)
+
     async def _attempt():
         dev = await _connect(host)
         if on:
+            await lg_thinq.refresh_for_host(host)
+            if reason := lg_thinq.block_reason_for_host(host):
+                raise lg_thinq.InterlockBlocked(reason)
             await dev.turn_on()
         else:
             await dev.turn_off()

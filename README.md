@@ -377,6 +377,64 @@ viewing the 5000 Plus.
 
 ---
 
+## LG ThinQ appliance protection (optional)
+
+Last updated: 2026-10-22.
+
+1. In **Settings → General → LG ThinQ**, enter your LG personal access token
+   and account country. Create the token at <https://connect-pat.lgthinq.com/>
+   with device-list and device-status **read** permissions; appliance-control
+   permissions are not needed. Connection is checked before replacing a saved token.
+2. Under **Automation → Smart grid charging → LG appliance 220/240 V protection**,
+   select the LG appliances **actually connected to the currently selected
+   Jackery's 220/240 V output**. Save the configuration for each Jackery separately.
+   No appliance is selected automatically, and voltage/wiring is never inferred
+   from the device type. Unselected appliances do not affect charging.
+3. Enable protection and save. Any selected appliance that is active, disconnected,
+   unsupported, missing or stale holds that Jackery's configured charging plug
+   **OFF**. Only an explicit, recently received `OFF`/`POWER_OFF` status from
+   **every** selected appliance releases the hold; an empty selection also blocks.
+
+This supports generic LG appliance discovery, not just dryers. Status schemas
+that cannot positively establish OFF remain unknown rather than being guessed.
+For running devices with valid remaining-time reports, smart charging excludes
+windows before the **latest selected appliance's estimated finish plus five
+minutes**, rounding future starts up to its hourly scheduling grid. It also
+estimates SOC at that finish using the existing no-charging forecast and records
+the timing inputs with the decision. This is not extra appliance-wattage learning:
+LG power draw is not invented or double-counted on top of the household load.
+Paused, unsupported, stale or untimed activity and manual holds have no reliable
+release time, so no future charging window is assumed until status changes.
+An elapsed timer never releases the real interlock: every selected appliance
+still needs a fresh, explicit OFF status before charging can actually start.
+Reported state/timer changes wake the smart charger to recalculate immediately
+after the next LG poll rather than waiting for its normal five-minute tick.
+Every protected plug ON attempt also performs a fresh cloud status read; a
+changed state blocks that attempt and wakes another calculation.
+Mapped devices are polled every 30 seconds; cached responses expire after 75
+seconds. A separate five-second worker enforces OFF without depending on the
+forecast, SOC freshness or smart-charge decision loop. The same plug's app-side
+manual, rescue and automation ON commands are blocked too. Protection is live
+even with smart charging in **Off/Test** mode; it takes priority over low-SOC
+rescue charging. It never turns the charging plug ON by itself.
+
+Before starting a new 240 V appliance, enable **Reserve 240 V availability
+(manual hold)**, save, and verify that charging is actually OFF. Jackery disables
+some 240 V outlets during AC charging, so an appliance might not be able to start
+and report activity if charging is already on. This integration cannot discover
+physical wiring, control third-party Kasa apps, or guarantee real-time LG cloud
+updates (especially on older models): it is a best-effort software guard, **not
+a hardware safety interlock**.
+
+The token is stored AES-256-GCM encrypted in `/data/lg-thinq-creds.json` with
+mode `0600`, using the existing application key. API responses never return it.
+Removing the token does **not** disable configured protection; reconnect or
+explicitly disable protection to release that hold. Backups include the encrypted
+token and per-Jackery mappings in `smart_charge.json`; keep the encryption key
+separately according to the existing backup policy or reconnect LG after restore.
+
+---
+
 ## AI features (optional)
 
 Two Claude-powered features. Both are opt-in, gated by an Anthropic API key

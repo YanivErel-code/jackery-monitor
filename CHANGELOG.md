@@ -8,6 +8,16 @@ Pre-1.0 means breaking changes can land in any minor.
 
 ## [Unreleased]
 
+### Added
+- Add encrypted, UI-configurable, read-only LG ThinQ connections for generic LG
+  appliances. Map selected appliances to each Jackery's 220/240 V charging
+  interlock; active, unknown, offline or stale states hold grid charging OFF.
+  Recheck all Kasa ON paths, enforce an independent OFF watchdog and preserve
+  a manual 240 V reservation. Protection is opt-in; unsupported states fail closed.
+  Use the latest selected appliance's estimated finish plus a five-minute margin
+  to constrain charging windows, estimate SOC at finish and audit the timing
+  inputs; a timer never overrides the requirement for confirmed OFF status.
+
 ### Fixed
 - Keep selective restores from reintroducing forecast/actual windows covered by
   another incident, including adjacent intervals; validate archive device/key bindings.
