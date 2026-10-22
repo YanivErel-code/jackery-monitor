@@ -65,6 +65,8 @@ jobs:
           # RS822+ is x86_64 (Ryzen V1500B) — only need amd64. Add linux/arm64
           # later if you ever migrate to a Synology with a Realtek/ARM CPU.
           platforms: linux/amd64
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
