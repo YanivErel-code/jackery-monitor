@@ -289,7 +289,7 @@ async def test_changed_lg_timer_wakes_replanning_but_unchanged_snapshot_does_not
     remaining = iter([30, 90, 90])
     wakes = []
 
-    async def refresh(selected):
+    async def refresh(selected=None):
         lg.monitor.credential_stamp = lg.credential_stamp(credentials)
         lg.monitor.devices = {
             "oven": {
@@ -313,6 +313,52 @@ async def test_changed_lg_timer_wakes_replanning_but_unchanged_snapshot_does_not
     with pytest.raises(asyncio.CancelledError):
         await lg.poll_loop(lambda: wakes.append(True))
     assert len(wakes) == 2
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+async def test_background_poll_keeps_every_discovered_offline_appliance_fresh(
+    lg, monkeypatch, mapped
+):
+    import asyncio
+
+    from thinqconnect.thinq_api import ThinQAPIException
+
+    import smart_charge
+
+    lg.save_credentials("thinqpat_" + "synthetic-polling" * 3, "US")
+    if mapped:
+        smart_charge.set_config(
+            {"lg_interlock_enabled": True, "lg_device_ids": ["dryer"]}, "MAIN"
+        )
+    api = AsyncMock()
+    appliance_ids = ("dryer", "washer", "styler", "refrigerator")
+    api.async_get_device_list.return_value = [
+        {"deviceId": device_id, "deviceInfo": {"alias": device_id}}
+        for device_id in appliance_ids
+    ]
+    api.async_get_device_status.side_effect = ThinQAPIException("1222", "Disconnected", {})
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    clock = [1000]
+    monkeypatch.setattr(lg.time, "time", lambda: clock[0])
+    await lg.monitor.refresh()
+    snapshots = []
+
+    async def sleep(seconds):
+        snapshots.append(lg.monitor.public_status())
+        clock[0] += seconds
+        if len(snapshots) == 5:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(lg.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await lg.poll_loop()
+    assert len(snapshots[-1]["devices"]) == len(appliance_ids)
+    assert all(
+        device["fresh"] and device["activity"] == "off" and device["assumed_off"]
+        for snapshot in snapshots
+        for device in snapshot["devices"]
+    )
+    assert api.async_get_device_status.await_count == len(appliance_ids) * 6
 
 
 def test_unselected_active_appliance_does_not_block_and_mappings_are_per_jackery(lg, monkeypatch):

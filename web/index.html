@@ -1511,7 +1511,7 @@
         </form>
         <p id="lg-message" class="hint" role="status"></p>
         <div id="lg-appliances" class="lg-device-list"></div>
-        <p class="hint">Status is read from LG's cloud every 30 seconds for mapped appliances; some older models update more slowly. A fresh LG device-disconnected response is treated as assumed OFF; network failures, token errors and expired readings are not. This policy cannot distinguish power-off from a real appliance Wi-Fi outage. This is a best-effort software guard, not a hardware safety interlock. Removing the token does not disable configured protection.</p>
+        <p class="hint">Status is read from LG's cloud every 30 seconds for all discovered appliances, including those not mapped to a Jackery; only mapped appliances affect charging protection. Some older models update more slowly. A fresh LG device-disconnected response is treated as assumed OFF; network failures, token errors and expired readings are not. This policy cannot distinguish power-off from a real appliance Wi-Fi outage. This is a best-effort software guard, not a hardware safety interlock. Removing the token does not disable configured protection.</p>
       </section>
       </div><!-- /data-settings-group=general -->
 

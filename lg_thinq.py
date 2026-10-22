@@ -485,7 +485,7 @@ async def poll_loop(on_update=None):
                 for config in configs.values()
                 for device_id in config.get("lg_device_ids", [])
             }
-            await monitor.refresh(selected)
+            await monitor.refresh()
         except Exception:
             monitor.error = "LG monitoring unavailable"
         if on_update and any(config.get("lg_interlock_enabled") for config in configs.values()):

@@ -20,6 +20,9 @@ Pre-1.0 means breaking changes can land in any minor.
   inputs; a timer alone never overrides status-based charging eligibility.
 
 ### Fixed
+- Refresh every discovered LG appliance, not just mapped ones, so offline-as-OFF
+  readings remain current across the appliance list. Charging protection and
+  recalculation still depend only on each Jackery's selected appliances.
 - Treat a fresh, explicit LG device-disconnected response as assumed OFF for
   appliances whose Wi-Fi powers off with them. Label and audit the assumption;
   still block on authentication/API failures, missing devices and expired data,
