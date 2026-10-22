@@ -3114,6 +3114,7 @@ document.getElementById('cost-form')?.addEventListener('submit', async (e) => {
 async function loadSmartCharge() {
   // Render only when the form actually exists in the DOM (Automation tab).
   if (!$('sc-form')) return;
+  $('sc-form').dataset.loadedDeviceSn = '';
   const dev = activeJackeryDevice();
   const deviceSn = dev?.device_sn || '';
   const lbl = $('sc-device-label');
@@ -3137,14 +3138,16 @@ async function loadSmartCharge() {
       fetch(`/api/smart_charge/status${q}`),
       fetch(`/api/smart_charge/analytics?days=14&device_sn=${encodeURIComponent(deviceSn)}`),
     ]);
+    if (!cfgRes.ok) throw new Error('Smart-charge settings could not be loaded');
     const cfgPayload = cfgRes.ok ? await cfgRes.json() : {};
     const cfg = cfgPayload.config || {};
-    if (activeJackeryDevice()?.device_sn !== deviceSn) return;
-    window.LGThinQ?.hydrate(cfg);
     const conflicts = cfgPayload.conflicting_rules || [];
     const kasa = kasaRes.ok ? await kasaRes.json() : { devices: [] };
     const status = statusRes.ok ? await statusRes.json() : {};
     const ana = anaRes.ok ? await anaRes.json() : { summary: {} };
+    if (activeJackeryDevice()?.device_sn !== deviceSn) return;
+    window.LGThinQ?.hydrate(cfg);
+    $('sc-form').dataset.loadedDeviceSn = deviceSn;
 
     // Populate Kasa picker. Show alias + last 4 of host so dupes don't
     // collide. Preserve current selection if the host still exists.
@@ -3831,6 +3834,11 @@ document.getElementById('sc-form')?.addEventListener('submit', async (e) => {
   if (!deviceSn) {
     status.hidden = false;
     status.textContent = 'No active device — cannot save.';
+    return;
+  }
+  if ($('sc-form').dataset.loadedDeviceSn !== deviceSn) {
+    status.hidden = false;
+    status.textContent = 'Wait for this Jackery’s settings to load before saving.';
     return;
   }
   status.hidden = false;
