@@ -68,6 +68,106 @@ async def test_startup_uses_saved_device_model_not_generic_capacity(monitor):
     assert monitor.forecast_calls[0]["starting_soc_pct"] == pytest.approx(199 / 6)
 
 
+async def test_lg_hold_overrides_charge_plan_and_records_off_decision(monitor, monkeypatch):
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", lambda **kw: monitor.smart_charge.Plan(
+        action="on", reason="forecast requires charging", mode="active", decided_at=NOW))
+    monkeypatch.setattr(monitor.lg_thinq, "block_reason", lambda config: "LG 240 V interlock: Oven active")
+    recorded = []
+    monkeypatch.setattr(monitor.state.energy, "record_smart_charge_decision", lambda **kw: recorded.append(kw))
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "off"
+    assert "Oven active" in plan.reason
+    monitor.toggle.assert_awaited_once_with("test-plug", False)
+    assert recorded[0]["plan"]["action"] == "off"
+    assert recorded[0]["executed"] is True
+
+
+@pytest.mark.parametrize("body", [{"lg_interlock_enabled": "false"}, {"lg_manual_hold": 1},
+                                   {"lg_device_ids": "oven"}, {"lg_device_ids": ["../oven"]},
+                                   {"lg_device_ids": ["oven"] * 33},
+                                   {"lg_interlock_enabled": True, "lg_device_ids": ["oven"]}])
+async def test_lg_configuration_rejects_invalid_input(monitor, body):
+    from fastapi import HTTPException, Request
+    receive = AsyncMock(return_value={"type": "http.request", "body": json.dumps(body).encode()})
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive)
+    with pytest.raises(HTTPException) as error:
+        await monitor.api_smart_charge_set(request, device_sn="MAIN")
+    assert error.value.status_code == 400
+    assert not monitor.smart_charge.get_config("MAIN")["lg_interlock_enabled"]
+
+
+async def test_lg_protection_cannot_enable_controls_on_monitor_only_home(monitor):
+    from fastapi import HTTPException, Request
+    monitor.state.last_cloud_meta = {"devices": [{"device_sn": "MAIN", "api_family": "home"}]}
+    body = {"mode": "off", "lg_interlock_enabled": True, "lg_device_ids": ["oven"]}
+    receive = AsyncMock(return_value={"type": "http.request", "body": json.dumps(body).encode()})
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive)
+    with pytest.raises(HTTPException) as error:
+        await monitor.api_smart_charge_set(request, device_sn="MAIN")
+    assert error.value.status_code == 501
+    assert not monitor.smart_charge.get_config("MAIN")["lg_interlock_enabled"]
+
+
+async def test_lg_finish_time_reaches_scheduler_soc_estimate_and_saved_decision(monitor, monkeypatch):
+    context = {"expected_finish_ts": NOW + 1800, "charge_not_before_ts": NOW + 2100,
+               "timing_uncertain": False, "blocked_now": True}
+    monkeypatch.setattr(monitor.lg_thinq, "planning_context", lambda *args, **kw: dict(context))
+    monkeypatch.setattr(monitor.lg_thinq, "block_reason", lambda config: "LG appliance still running")
+    received = []
+    compute = monitor.smart_charge.compute_plan
+
+    def capture(**kwargs):
+        received.append(kwargs)
+        return compute(**kwargs)
+
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", capture)
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert received[0]["charge_not_before_ts"] == NOW + 2100
+    assert received[0]["charging_unavailable"] is False
+    assert plan.lg_protection["soc_at_finish_pct"] is not None
+    assert plan.action == "off"
+    snapshot = monitor.state.energy.smart_charge_decision_inputs("MAIN", plan.decided_at)
+    assert snapshot["lg_protection"]["expected_finish_ts"] == NOW + 1800
+    monitor.toggle.assert_awaited_once_with("test-plug", False)
+
+
+async def test_lg_change_wakes_smart_charger_without_waiting_five_minutes(monitor, monkeypatch):
+    import asyncio
+    called = asyncio.Event()
+    evaluations = []
+
+    async def evaluate(**kwargs):
+        evaluations.append(kwargs)
+        called.set()
+
+    monkeypatch.setattr(monitor, "_smart_charge_evaluate", evaluate)
+    task = asyncio.create_task(monitor.smart_charge_loop())
+    try:
+        await asyncio.wait_for(called.wait(), timeout=1)
+        called.clear()
+        monitor.state.smart_charge_wake.set()
+        await asyncio.wait_for(called.wait(), timeout=1)
+        assert len(evaluations) == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_pre_charge_recheck_rejection_records_off_and_wakes_fresh_plan(monitor, monkeypatch):
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", lambda **kwargs: monitor.smart_charge.Plan(
+        action="on", reason="old plan", mode="active", decided_at=NOW, planned_hours=[NOW // 3600 * 3600]))
+    monitor.toggle.side_effect = monitor.lg_thinq.InterlockBlocked("LG appliance extended its cycle")
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "off"
+    assert plan.planned_hours == []
+    assert monitor.state.smart_charge_wake.is_set()
+    snapshot = monitor.state.energy.smart_charge_decision_inputs("MAIN", plan.decided_at)
+    assert snapshot["planned_hours"] == []
+    decision = monitor.state.energy.smart_charge_decision("MAIN", plan.decided_at)
+    assert decision["action"] == "off"
+    assert not decision["executed"]
+
+
 @pytest.mark.parametrize("soc", [None, True, "bad", float("nan"), -1, 101])
 async def test_invalid_main_soc_skips_forecast_and_plug(monitor, soc):
     monitor.state.last_status["battery_percent"] = soc

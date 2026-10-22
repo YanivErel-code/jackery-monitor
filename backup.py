@@ -88,6 +88,8 @@ SMALL_FILES = (
     "kasa-creds.json",
     "anthropic-creds.json",
     "jackery-creds.json",
+    "lg-thinq-creds.json",
+    "smart_charge.json",
     "settings.json",
     "location.json",
     "anthropic-prefs.json",
