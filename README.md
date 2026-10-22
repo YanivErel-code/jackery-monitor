@@ -390,21 +390,35 @@ Last updated: 2026-10-22.
    Jackery's 220/240 V output**. Save the configuration for each Jackery separately.
    No appliance is selected automatically, and voltage/wiring is never inferred
    from the device type. Unselected appliances do not affect charging.
-3. Enable protection and save. Any selected appliance that is active,
-   unsupported, missing or stale holds that Jackery's configured charging plug
-   **OFF**. A fresh `OFF`/`POWER_OFF` status or LG's explicit device-disconnected
-   response (`1222`) from **every** selected appliance releases the hold; an empty
-   selection also blocks.
+3. Enable protection and save. A selected appliance with a fresh active state
+   holds that Jackery's configured charging plug **OFF**. This includes `INITIAL`,
+   the powered-on state observed from the dryer before starting its cycle.
+   Manual 240 V reservations also hold charging OFF regardless of LG availability.
+   Missing tokens, API errors, stale/unknown states, missing devices and empty
+   selections instead show a warning and do not block charging.
 
 For appliances whose Wi-Fi shuts down with their power, a fresh LG
 device-disconnected response is treated as **assumed OFF**, not proof of power
 state. The UI shows “offline — treated as OFF” and decision inputs record that
 assumption. A genuine appliance Wi-Fi outage can therefore allow grid charging
 while an appliance is running. This exception applies only to the device-status
-endpoint's explicit `1222` response: token/permission errors, timeouts, missing
-devices, device-list failures and stale cached responses still block charging.
+endpoint's explicit `1222` response. Other failures stay **unknown**, not OFF:
+token/permission errors, timeouts, missing devices, device-list failures and stale
+cached responses do not block charging under the requested availability policy.
 The assumption expires after 75 seconds unless LG reports it again, and every
 pre-charge check re-reads the selected appliances as usual.
+
+**Automation shows a persistent LG monitoring warning** for these issues, with
+the sanitized cause and a reminder that LG errors do not block charging. The
+warning appears above every Automation sub-tab, refreshes with the status poll
+and clears automatically after recovery. A separate **red dot on the Automation
+tab** alerts you from other tabs; the dashboard reads monitoring status on
+startup and every ten seconds while visible, without additional LG cloud calls.
+Browser/API request failures also show a warning. Replace an invalid/expired
+token in **Settings → General → LG ThinQ**.
+Decision inputs record monitoring warnings separately from actual charging holds.
+A monitoring outage can allow grid charging while an appliance is running;
+use the manual reservation when uninterrupted 240 V availability is required.
 
 This supports generic LG appliance discovery, not just dryers. Other unrecognized
 status schemas remain unknown rather than being guessed.
@@ -414,15 +428,17 @@ minutes**, rounding future starts up to its hourly scheduling grid. It also
 estimates SOC at that finish using the existing no-charging forecast and records
 the timing inputs with the decision. This is not extra appliance-wattage learning:
 LG power draw is not invented or double-counted on top of the household load.
-Paused, unsupported, stale or untimed activity and manual holds have no reliable
-release time, so no future charging window is assumed until status changes.
-An elapsed timer never releases the real interlock: every selected appliance
-still needs a fresh OFF or explicit LG-disconnected report before charging can
-actually start.
+Fresh paused, powered-on but untimed activity and manual holds have no reliable
+release time, so no future charging window is assumed while those holds apply.
+Unavailable/unknown appliances do not contribute a fictitious finish estimate
+or prevent planning around other appliances' confirmed running timers.
+An elapsed timer alone never releases a fresh active-state interlock; losing
+LG status instead releases the automatic hold with a monitoring warning.
 Reported state/timer changes wake the smart charger to recalculate immediately
 after the next LG poll rather than waiting for its normal five-minute tick.
-Every protected plug ON attempt also performs a fresh cloud status read; a
-changed state blocks that attempt and wakes another calculation.
+Every protected plug ON attempt also performs a fresh cloud status read. A
+fresh active state blocks that attempt and wakes another calculation; a read
+failure warns without blocking. Manual reservations are always rechecked too.
 All discovered LG appliances are polled every 30 seconds, including appliances
 not mapped to a Jackery, so their displayed offline-as-OFF status stays current.
 Only mapped appliances affect charging protection or wake charging recalculation.

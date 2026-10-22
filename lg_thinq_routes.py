@@ -1,13 +1,26 @@
 from fastapi import APIRouter, HTTPException, Request
 
 import lg_thinq
+import smart_charge
 
 router = APIRouter(prefix="/api/lg_thinq", tags=["LG ThinQ"])
 
 
+def _status_payload():
+    status = lg_thinq.monitor.public_status()
+    configs = [config for config in smart_charge.get_all_configs().values()
+               if config.get("lg_interlock_enabled")]
+    status["protection_enabled"] = bool(configs)
+    status["warnings"] = list(dict.fromkeys(
+        status["warnings"] + [warning for config in configs
+                              for warning in lg_thinq.protection_warnings(config, status=status)]
+    ))
+    return status
+
+
 @router.get("/status")
 async def status():
-    return lg_thinq.monitor.public_status()
+    return _status_payload()
 
 
 @router.post("/credentials")
@@ -38,13 +51,13 @@ async def save_credentials(request: Request):
     except OSError:
         raise HTTPException(500, "Could not save encrypted LG credentials") from None
     await lg_thinq.monitor.refresh(force_list=True)
-    return lg_thinq.monitor.public_status()
+    return _status_payload()
 
 
 @router.post("/refresh")
 async def refresh():
     await lg_thinq.monitor.refresh(force_list=True)
-    return lg_thinq.monitor.public_status()
+    return _status_payload()
 
 
 @router.delete("/credentials")
@@ -53,4 +66,4 @@ async def clear_credentials():
         lg_thinq.clear_credentials()
     except OSError:
         raise HTTPException(500, "Could not remove LG credentials") from None
-    return lg_thinq.monitor.public_status()
+    return _status_payload()

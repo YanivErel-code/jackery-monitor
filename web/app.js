@@ -3632,9 +3632,10 @@ function renderSmartChargePlan(plan, narration) {
       <div><span class="sc-lbl">Charge schedule</span><span>${scheduleStr}</span></div>
       <div><span class="sc-lbl">Sunrise</span><span>${sunrise}</span></div>
       <div><span class="sc-lbl">Cheapest rate</span><span>${rate}</span></div>
-      ${plan.lg_protection ? `<div><span class="sc-lbl">LG estimated finish</span><span>${plan.lg_protection.expected_finish_ts ? fmtHour(plan.lg_protection.expected_finish_ts) : (plan.lg_protection.blocked_now ? 'Unknown — charging held OFF' : 'All selected appliances OFF or LG-disconnected')}</span></div>
+      ${plan.lg_protection ? `<div><span class="sc-lbl">LG estimated finish</span><span>${plan.lg_protection.expected_finish_ts ? fmtHour(plan.lg_protection.expected_finish_ts) : (plan.lg_protection.blocked_now ? 'Unknown — charging held OFF' : (plan.lg_protection.monitoring_degraded ? 'Unavailable — LG errors do not hold charging OFF' : 'All selected appliances OFF or LG-disconnected'))}</span></div>
       <div><span class="sc-lbl">Estimated SOC at finish</span><span>${plan.lg_protection.soc_at_finish_pct != null ? Math.round(plan.lg_protection.soc_at_finish_pct) + '%' : '—'}</span></div>
-      <div><span class="sc-lbl">LG planning constraint</span><span>${plan.lg_protection.charge_not_before_ts ? 'After ' + fmtHour(plan.lg_protection.charge_not_before_ts) + '; fresh OFF or LG-disconnected status still required' : (plan.lg_protection.blocked_now ? 'No charging assumed until a reliable finish estimate or eligible status' : 'No hold')}</span></div>` : ''}
+      <div><span class="sc-lbl">LG planning constraint</span><span>${plan.lg_protection.charge_not_before_ts ? 'After ' + fmtHour(plan.lg_protection.charge_not_before_ts) + '; active-state and manual holds are rechecked' : (plan.lg_protection.blocked_now ? 'No charging assumed until a reliable finish estimate or eligible status' : 'No hold')}</span></div>
+      ${plan.lg_protection.warnings?.length ? `<div><span class="sc-lbl">LG monitoring warning</span><span>${escapeHtml(plan.lg_protection.warnings.join('; '))} — errors do not block charging; active-state and manual holds still apply</span></div>` : ''}` : ''}
     </div>${narrationLine}`;
   el.hidden = false;
 }

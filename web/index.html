@@ -105,7 +105,7 @@
       <button class="tab" data-tab="energy" data-portable>Energy</button>
       <button class="tab" data-tab="forecast" data-portable>Forecast</button>
       <button class="tab" data-tab="device">Device</button>
-      <button class="tab" data-tab="automation" data-portable>Automation<span id="tab-automation-dot" class="tab-dot" hidden title="New AI insights pending"></span></button>
+      <button class="tab" data-tab="automation" data-portable>Automation<span id="tab-automation-dot" class="tab-dot" hidden title="New AI insights pending"></span><span id="tab-automation-lg-dot" class="tab-dot lg-alert-dot" hidden role="img" aria-label="LG monitoring issue" title="LG monitoring needs attention — click Automation"></span></button>
       <button class="tab" data-tab="logs">Logs</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
@@ -875,6 +875,12 @@
                 data-automation-tab="insights">Insights</button>
       </nav>
 
+      <div id="automation-lg-warning" class="lg-monitoring-warning" hidden role="alert" aria-live="polite">
+        <strong>LG monitoring needs attention</strong>
+        <p id="automation-lg-warning-detail"></p>
+        <p>LG monitoring errors do not block grid charging. Confirmed active appliances and manual 240 V reservations still apply. Check Settings → General → LG ThinQ to reconnect or replace the token.</p>
+      </div>
+
       <!-- KASA ACCOUNT section: cloud credentials for newer SMART devices -->
       <section class="card" data-automation-group="devices">
         <div class="card-header">
@@ -1015,8 +1021,8 @@
             <div id="sc-lg-devices" class="lg-device-list" role="group" aria-label="Appliances connected to this Jackery" aria-describedby="sc-lg-help"><span class="hint">No LG devices loaded.</span></div>
             <label class="keep-awake-row"><input id="sc-lg-hold" type="checkbox" /> Reserve 240 V availability (manual hold)</label>
             <p class="hint">Protection is live even in Off/Test mode and also blocks this charging plug's manual, automation and rescue ON commands. It overrides low-SOC rescue charging.</p>
-            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest selected finish plus 5 minutes, rounded up to an hourly slot. Paused, unknown or untimed activity has no assumed release time. An elapsed timer alone never releases the hold: every selected appliance still needs a fresh OFF or LG-disconnected report.</p>
-            <p class="hint">A fresh LG device-disconnected response is treated as OFF, for appliances whose Wi-Fi turns off with their power. The UI labels this as assumed OFF, not a measured power state. Active, unfamiliar or stale readings, token errors and failed requests still hold charging OFF. A real Wi-Fi outage can therefore allow charging while an appliance is running. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
+            <p class="hint">Valid running-cycle timers feed the smart-charge schedule and estimated SOC at finish. Planning waits for the latest confirmed active appliance's finish plus 5 minutes, rounded up to an hourly slot. Confirmed paused or untimed activity has no assumed release time. An elapsed timer alone never releases a fresh active-state hold.</p>
+            <p class="hint">A fresh LG device-disconnected response is treated as assumed OFF. Missing, unfamiliar or stale readings, missing/expired tokens and API failures instead show an Automation warning and do not block charging. Only a fresh active state or manual reservation holds charging OFF. A Wi-Fi or monitoring failure can therefore allow charging while an appliance is running. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
           </fieldset>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
             <button class="btn btn-primary" type="submit">Save</button>
@@ -1511,7 +1517,7 @@
         </form>
         <p id="lg-message" class="hint" role="status"></p>
         <div id="lg-appliances" class="lg-device-list"></div>
-        <p class="hint">Status is read from LG's cloud every 30 seconds for all discovered appliances, including those not mapped to a Jackery; only mapped appliances affect charging protection. Some older models update more slowly. A fresh LG device-disconnected response is treated as assumed OFF; network failures, token errors and expired readings are not. This policy cannot distinguish power-off from a real appliance Wi-Fi outage. This is a best-effort software guard, not a hardware safety interlock. Removing the token does not disable configured protection.</p>
+        <p class="hint">Status is read from LG's cloud every 30 seconds for all discovered appliances, including those not mapped to a Jackery; only mapped appliances affect charging protection. Some older models update more slowly. A fresh LG device-disconnected response is treated as assumed OFF. Network failures, token errors and expired readings remain unknown, show an Automation warning and do not block charging. Manual holds and fresh active readings still block. Monitoring or Wi-Fi failures can allow charging while an appliance is running. This is a best-effort software guard, not a hardware safety interlock.</p>
       </section>
       </div><!-- /data-settings-group=general -->
 
