@@ -28,6 +28,14 @@ ACTIVE_STATES = frozenset(
         "POWER_ON",
         "INITIAL",
         "RUNNING",
+        "RINSING",
+        "SPINNING",
+        "REFRESHING",
+        "ADD_DRAIN",
+        "DETECTING",
+        "DETERGENT_AMOUNT",
+        "RINSE_HOLD",
+        "RESERVED",
         "DRYING",
         "COOLING",
         "HEATING",
@@ -434,7 +442,18 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
     if config.get("lg_manual_hold") or not selected or not status["configured"] or status["error"]:
         return context
     finishes = []
-    timed_states = {"RUNNING", "DRYING", "COOLING", "HEATING", "PREHEATING", "COOKING"}
+    timed_states = {
+        "RUNNING",
+        "DRYING",
+        "COOLING",
+        "HEATING",
+        "PREHEATING",
+        "COOKING",
+        "RINSING",
+        "SPINNING",
+        "REFRESHING",
+        "ADD_DRAIN",
+    }
     permitted_states = timed_states | OFF_STATES | {"ON", "POWER_ON"}
     for device_id in selected:
         device = devices.get(device_id)

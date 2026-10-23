@@ -1,5 +1,7 @@
 # Jackery Monitor
 
+Last updated: 2026-10-23 11:08 AM CDT.
+
 [![CI](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml)
 [![Docker image](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml)
 [![Release](https://img.shields.io/github/v/release/YanivErel-code/jackery-monitor)](https://github.com/YanivErel-code/jackery-monitor/releases/latest)
@@ -426,7 +428,7 @@ viewing the 5000 Plus.
 
 ## LG ThinQ appliance protection (optional)
 
-Last updated: 2026-10-22.
+Last updated: 2026-10-23.
 
 1. In **Settings → General → LG ThinQ**, enter your LG personal access token
    and account country. Create the token at <https://connect-pat.lgthinq.com/>
@@ -441,6 +443,10 @@ Last updated: 2026-10-22.
    relying on the change. A selected appliance with a fresh active state
    holds that Jackery's configured charging plug **OFF**. This includes `INITIAL`,
    the powered-on state observed from the dryer before starting its cycle.
+   Normal washer rinse, spin, refresh, drain, preparation and hold phases are
+   recognized as active, not monitoring errors. Unselected washers do not block
+   charging. Remaining-time reports for rinse, spin, refresh and drain cycles
+   update the finish estimate; preparation and hold phases keep timing uncertain.
    Manual 240 V reservations also hold charging OFF regardless of LG availability.
    Missing tokens, API errors, stale/unknown states, missing devices and empty
    selections instead show a warning and do not block charging.
