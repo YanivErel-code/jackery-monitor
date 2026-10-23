@@ -10,6 +10,10 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Recognize the washer's LG-reported rinse, spin, refresh, drain, preparation and
+  hold phases instead of flagging normal running states as monitoring failures.
+  Recalculate reported cycle finish times; preparation and hold phases retain
+  uncertain timing. Only explicitly mapped appliances affect charging.
 - Stop short smart-charge ON/OFF cycling during rolling replans. Optimize with
   full-precision SOC rather than rounded display gains, and retain a recent
   successful ON interval through its validated original end. Recheck the full

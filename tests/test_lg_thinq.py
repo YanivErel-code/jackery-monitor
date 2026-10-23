@@ -26,6 +26,97 @@ def test_active_appliance_phases_never_release_interlock(lg, state):
     assert result["activity"] == "active"
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        "RINSING",
+        "SPINNING",
+        "REFRESHING",
+        "ADD_DRAIN",
+        "DETECTING",
+        "DETERGENT_AMOUNT",
+        "RINSE_HOLD",
+        "RESERVED",
+    ],
+)
+def test_washer_profile_phases_are_active_without_false_monitoring_warning(lg, monkeypatch, state):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "washer-test" * 5, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    lg.monitor.devices = {
+        "washer": {
+            "device_id": "washer",
+            "alias": "Washer",
+            "observed_at": 999,
+            **lg.classify_state(
+                {
+                    "runState": {"currentState": state},
+                    "timer": {"remainHour": 0, "remainMinute": 14},
+                }
+            ),
+        }
+    }
+    status = lg.monitor.public_status()
+    assert status["devices"][0]["activity"] == "active"
+    assert status["warnings"] == []
+    assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["washer"]})
+    assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["dryer"]}) is None
+
+
+@pytest.mark.parametrize("state", ["RINSING", "SPINNING", "REFRESHING", "ADD_DRAIN"])
+def test_washer_cycle_finish_estimate_updates_without_releasing_active_interlock(
+    lg, monkeypatch, state
+):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "washer-timer-test" * 4, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["washer"]}
+    for minutes in (14, 20, 2):
+        lg.monitor.devices = {
+            "washer": {
+                "device_id": "washer",
+                "alias": "Washer",
+                "observed_at": 1000,
+                **lg.classify_state(
+                    {
+                        "runState": {"currentState": state},
+                        "timer": {"remainHour": 0, "remainMinute": minutes},
+                    }
+                ),
+            }
+        }
+        context = lg.planning_context(config, now_ts=1000)
+        assert context["blocked_now"]
+        assert not context["monitoring_degraded"] and not context["timing_uncertain"]
+        assert context["expected_finish_ts"] == 1000 + minutes * 60
+        assert context["charge_not_before_ts"] == 1000 + minutes * 60 + lg.FINISH_MARGIN_SECONDS
+
+
+@pytest.mark.parametrize("state", ["DETECTING", "DETERGENT_AMOUNT", "RINSE_HOLD", "RESERVED"])
+def test_washer_preparation_or_hold_does_not_promise_a_finish_time(lg, monkeypatch, state):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "washer-hold-test" * 4, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    lg.monitor.devices = {
+        "washer": {
+            "device_id": "washer",
+            "observed_at": 1000,
+            **lg.classify_state(
+                {
+                    "runState": {"currentState": state},
+                    "timer": {"remainHour": 0, "remainMinute": 14},
+                }
+            ),
+        }
+    }
+    context = lg.planning_context(
+        {"lg_interlock_enabled": True, "lg_device_ids": ["washer"]}, now_ts=1000
+    )
+    assert context["blocked_now"] and context["timing_uncertain"]
+    assert not context["monitoring_degraded"]
+    assert context["expected_finish_ts"] is None and context["charge_not_before_ts"] is None
+
+
 @pytest.mark.parametrize("state", ["OFF", "POWER_OFF"])
 def test_explicit_off_state_releases_interlock(lg, state):
     assert lg.classify_state({"runState": {"currentState": state}})["activity"] == "off"
