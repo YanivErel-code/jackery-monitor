@@ -1,6 +1,6 @@
 # Jackery Monitor
 
-Last updated: 2026-10-23 11:08 AM CDT.
+Last updated: 2026-10-23 11:32 AM CDT.
 
 [![CI](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml)
 [![Docker image](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml)
@@ -440,16 +440,21 @@ Last updated: 2026-10-23.
    No appliance is selected automatically, and voltage/wiring is never inferred
    from the device type. Unselected appliances do not affect charging.
 3. Enable protection; it saves automatically. Confirm “Saved automatically” before
-   relying on the change. A selected appliance with a fresh active state
-   holds that Jackery's configured charging plug **OFF**. This includes `INITIAL`,
-   the powered-on state observed from the dryer before starting its cycle.
-   Normal washer rinse, spin, refresh, drain, preparation and hold phases are
-   recognized as active, not monitoring errors. Unselected washers do not block
-   charging. Remaining-time reports for rinse, spin, refresh and drain cycles
-   update the finish estimate; preparation and hold phases keep timing uncertain.
+   relying on the change. Any fresh, valid LG power/cycle value other than an
+   explicit `OFF` / `POWER_OFF` keeps a selected appliance's 240 V reservation
+   and holds that Jackery's charging plug **OFF**. The UI shows **ON (not confirmed
+   OFF)** alongside LG's reported phase. Cycle names are not an allowlist:
+   `END`, future phases and manufacturer-specific names do not cause monitoring
+   warnings or release the hold. Only an explicit OFF reading or the fresh
+   disconnected assumption below releases it while monitoring remains available.
    Manual 240 V reservations also hold charging OFF regardless of LG availability.
-   Missing tokens, API errors, stale/unknown states, missing devices and empty
+   Missing tokens, API errors, stale/malformed status, missing devices and empty
    selections instead show a warning and do not block charging.
+
+Device discovery refreshes every five minutes separately from 30-second status
+polling. **Settings → General → LG ThinQ → Refresh** re-discovers immediately.
+Removed appliances disappear from discovery; a previously selected missing
+mapping stays visible as unavailable until you uncheck it.
 
 For appliances whose Wi-Fi shuts down with their power, a fresh LG
 device-disconnected response is treated as **assumed OFF**, not proof of power
@@ -474,16 +479,22 @@ Decision inputs record monitoring warnings separately from actual charging holds
 A monitoring outage can allow grid charging while an appliance is running;
 use the manual reservation when uninterrupted 240 V availability is required.
 
-This supports generic LG appliance discovery, not just dryers. Other unrecognized
-status schemas remain unknown rather than being guessed.
-For running devices with valid remaining-time reports, smart charging excludes
+This supports generic LG appliances, not just dryers. Missing or malformed
+power/status fields remain unknown; a valid new phase name is not a monitoring
+failure. No appliance power draw or physical running state is inferred from its name.
+For powered-on devices with observed countdown progress, smart charging excludes
 windows before the **latest selected appliance's estimated finish plus five
 minutes**, including eligible partial hours without starting before that bound. It also
 estimates SOC at that finish using the existing no-charging forecast and records
 the timing inputs with the decision. This is not extra appliance-wattage learning:
 LG power draw is not invented or double-counted on top of the household load.
-Fresh paused, powered-on but untimed activity and manual holds have no reliable
-release time, so no future charging window is assumed while those holds apply.
+Every powered-on compartment must have a valid, recently decreasing countdown.
+No finish is assumed on the first reading, after an increase/reset, a stale gap,
+or when progress has not been seen for 120 seconds. A phase change with an unchanged
+countdown also waits for new progress. This detects stalled/paused timers without
+recognizing phase names. Countdown progress is only evidence for an estimate,
+not proof that an appliance will finish; the hold remains until OFF/disconnected.
+Untimed/unconfirmed countdowns and manual holds have no assumed release time.
 Unavailable/unknown appliances do not contribute a fictitious finish estimate
 or prevent planning around other appliances' confirmed running timers.
 An elapsed timer alone never releases a fresh active-state interlock; losing

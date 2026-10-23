@@ -10,6 +10,12 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Replace LG cycle-phase allowlists with generic fresh ON/OFF evidence. Show any
+  valid reported phase, including `END` and future values, without a false
+  monitoring warning; mapped appliances remain reserved until OFF/disconnected.
+  Use recent countdown progress in every powered-on compartment for provisional
+  finish estimates, never as authority to release a hold. Real monitoring errors
+  remain visible and non-blocking; manual reservations still apply.
 - Recognize the washer's LG-reported rinse, spin, refresh, drain, preparation and
   hold phases instead of flagging normal running states as monitoring failures.
   Recalculate reported cycle finish times; preparation and hold phases retain

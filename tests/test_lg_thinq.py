@@ -26,6 +26,189 @@ def test_active_appliance_phases_never_release_interlock(lg, state):
     assert result["activity"] == "active"
 
 
+def test_arbitrary_reported_phases_are_not_monitoring_errors_or_proof_of_off(lg, monkeypatch):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "generic-phase-test" * 3, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    for phase in (
+        "END",
+        "FUTURE_PHASE",
+        "Vendor phase 2027",
+        *[f"PHASE_{index}" for index in range(100)],
+    ):
+        classified = lg.classify_state({"runState": {"currentState": phase}})
+        assert classified["activity"] == "active"
+        assert classified["states"] == [phase]
+        lg.monitor.devices = {
+            "appliance": {"device_id": "appliance", "observed_at": 999, **classified}
+        }
+        assert not lg.monitor.public_status()["warnings"]
+        assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]})
+        assert lg.block_reason({"lg_interlock_enabled": True, "lg_device_ids": ["other"]}) is None
+
+
+@pytest.mark.parametrize("phase", ["", "   ", None, 12, False, True, [], "X" * 81, "PHASE\x00"])
+def test_invalid_phase_values_remain_unknown_not_off_or_powered_on(lg, phase):
+    assert lg.classify_state({"runState": {"currentState": phase}})["activity"] == "unknown"
+
+
+@pytest.mark.parametrize("field", ["power", "powerState"])
+@pytest.mark.parametrize("powered", [False, True])
+def test_boolean_power_fields_are_evidence_without_interpreting_cycle_names(lg, field, powered):
+    assert lg.classify_state({field: powered})["activity"] == ("active" if powered else "off")
+
+
+@pytest.mark.parametrize("phase", ["END", "FUTURE_PHASE_2027"])
+async def test_generic_power_guard_blocks_mocked_plug_on_until_explicit_off(lg, monkeypatch, phase):
+    import kasa_client
+    import smart_charge
+
+    lg.save_credentials("thinqpat_" + "generic-guard-test" * 3, "US")
+    smart_charge.set_config(
+        {
+            "lg_interlock_enabled": True,
+            "lg_device_ids": ["appliance"],
+            "kasa_device_host": "charge-plug",
+        },
+        "MAIN",
+    )
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [{"deviceId": "appliance", "deviceInfo": {}}]
+    api.async_get_device_status.return_value = {"runState": {"currentState": phase}}
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    device = AsyncMock()
+    monkeypatch.setattr(kasa_client, "_connect", AsyncMock(return_value=device))
+    monkeypatch.setattr(kasa_client, "_describe", lambda *args: {"is_on": True})
+    await lg.monitor.refresh()
+    with pytest.raises(lg.InterlockBlocked):
+        await kasa_client.set_state("charge-plug", True)
+    device.turn_on.assert_not_awaited()
+    kasa_client._connect.assert_not_awaited()
+    api.async_get_device_status.return_value = {"runState": {"currentState": "POWER_OFF"}}
+    await lg.monitor.refresh()
+    assert not lg.monitor.public_status()["warnings"]
+    await kasa_client.set_state("charge-plug", True)
+    device.turn_on.assert_awaited_once()
+
+
+async def test_phase_agnostic_countdown_evidence_expires_and_recalculates(lg, monkeypatch):
+    clock = [1000]
+    monkeypatch.setattr(lg.time, "time", lambda: clock[0])
+    lg.save_credentials("thinqpat_" + "generic-countdown-test" * 3, "US")
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [
+        {"deviceId": "appliance", "deviceInfo": {"alias": "Appliance"}}
+    ]
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    config = {"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]}
+    observations = [
+        (1000, "PHASE_A", 20, False),
+        (1030, "PHASE_A", 19, True),
+        (1060, "PHASE_A", 19, True),
+        (1090, "PHASE_B", 19, False),
+        (1120, "PHASE_B", 18, True),
+        (1150, "PHASE_B", 24, False),
+        (1180, "PHASE_B", 23, True),
+        (1210, "PHASE_B", 23, True),
+        (1240, "PHASE_B", 23, True),
+        (1270, "PHASE_B", 23, True),
+        (1300, "PHASE_B", 23, True),
+        (1330, "PHASE_B", 23, False),
+        (1360, "END", 0, False),
+        (1390, "POWER_OFF", 0, False),
+        (1420, "NEXT_CYCLE", 5, False),
+        (1450, "NEXT_CYCLE", 4, True),
+        (1550, "NEXT_CYCLE", 3, False),
+    ]
+    for observed_at, phase, minutes, expected_finish_available in observations:
+        clock[0] = observed_at
+        api.async_get_device_status.return_value = {
+            "runState": {"currentState": phase},
+            "timer": {"remainHour": 0, "remainMinute": minutes},
+        }
+        await lg.monitor.refresh()
+        status = lg.monitor.public_status()
+        device = status["devices"][0]
+        assert not status["warnings"]
+        assert device["finish_estimate_available"] is expected_finish_available
+        context = lg.planning_context(config, now_ts=observed_at)
+        assert context["blocked_now"] is (phase != "POWER_OFF")
+        if expected_finish_available:
+            assert context["expected_finish_ts"] == observed_at + minutes * 60
+            assert (
+                context["charge_not_before_ts"]
+                == observed_at + minutes * 60 + lg.FINISH_MARGIN_SECONDS
+            )
+        else:
+            assert context["expected_finish_ts"] is None
+            assert context["charge_not_before_ts"] is None
+
+
+@pytest.mark.parametrize("progress_at", [0, None, True, float("nan"), 1001, 879])
+def test_invalid_or_expired_countdown_evidence_never_promises_a_finish(
+    lg, monkeypatch, progress_at
+):
+    monkeypatch.setattr(lg.time, "time", lambda: 1000)
+    credentials = lg.save_credentials("thinqpat_" + "countdown-age-test" * 3, "US")
+    lg.monitor.credential_stamp = lg.credential_stamp(credentials)
+    lg.monitor.devices = {
+        "appliance": {
+            "device_id": "appliance",
+            "activity": "active",
+            "states": ["RUNNING"],
+            "remaining_minutes": 10,
+            "observed_at": 1000,
+            "timer_last_progress_at": progress_at,
+        }
+    }
+    context = lg.planning_context(
+        {"lg_interlock_enabled": True, "lg_device_ids": ["appliance"]}, now_ts=1000
+    )
+    assert context["blocked_now"] and context["timing_uncertain"]
+    assert context["expected_finish_ts"] is None
+
+
+async def test_each_powered_compartment_needs_its_own_countdown_progress(lg, monkeypatch):
+    clock = [1000]
+    monkeypatch.setattr(lg.time, "time", lambda: clock[0])
+    lg.save_credentials("thinqpat_" + "generic-compartment-test" * 3, "US")
+    api = AsyncMock()
+    api.async_get_device_list.return_value = [{"deviceId": "oven", "deviceInfo": {}}]
+    monkeypatch.setattr(lg, "make_api", lambda *args: api)
+    for observed_at, upper, lower, available in [
+        (1000, 20, 10, False),
+        (1030, 19, 10, False),
+        (1060, 18, 9, True),
+        (1090, 18, 8, True),
+        (1120, 18, 7, True),
+        (1150, 18, 6, True),
+        (1180, 18, 5, True),
+        (1210, 18, 4, False),
+        (1240, 17, 3, True),
+        (1270, 16, 8, False),
+        (1300, 15, 7, True),
+    ]:
+        clock[0] = observed_at
+        api.async_get_device_status.return_value = {
+            "upper": {
+                "runState": {"currentState": "NEW_UPPER_PHASE"},
+                "timer": {"remainHour": 0, "remainMinute": upper},
+            },
+            "lower": {
+                "runState": {"currentState": "NEW_LOWER_PHASE"},
+                "timer": {"remainHour": 0, "remainMinute": lower},
+            },
+        }
+        await lg.monitor.refresh()
+        device = lg.monitor.public_status()["devices"][0]
+        assert device["finish_estimate_available"] is available
+        context = lg.planning_context(
+            {"lg_interlock_enabled": True, "lg_device_ids": ["oven"]}, now_ts=observed_at
+        )
+        assert context["blocked_now"]
+        assert context["timing_uncertain"] is (not available)
+
+
 @pytest.mark.parametrize(
     "state",
     [
@@ -77,6 +260,7 @@ def test_washer_cycle_finish_estimate_updates_without_releasing_active_interlock
                 "device_id": "washer",
                 "alias": "Washer",
                 "observed_at": 1000,
+                "timer_last_progress_at": 999,
                 **lg.classify_state(
                     {
                         "runState": {"currentState": state},
@@ -93,7 +277,7 @@ def test_washer_cycle_finish_estimate_updates_without_releasing_active_interlock
 
 
 @pytest.mark.parametrize("state", ["DETECTING", "DETERGENT_AMOUNT", "RINSE_HOLD", "RESERVED"])
-def test_washer_preparation_or_hold_does_not_promise_a_finish_time(lg, monkeypatch, state):
+def test_unobserved_washer_countdown_does_not_promise_a_finish_time(lg, monkeypatch, state):
     monkeypatch.setattr(lg.time, "time", lambda: 1000)
     credentials = lg.save_credentials("thinqpat_" + "washer-hold-test" * 4, "US")
     lg.monitor.credential_stamp = lg.credential_stamp(credentials)
@@ -142,7 +326,7 @@ def test_generic_air_conditioner_and_multi_compartment_oven(lg):
     [
         {},
         {"runState": {}},
-        {"runState": {"currentState": "NEW_STATE"}},
+        {"runState": {"currentState": None}},
         {"remoteControlEnable": {"remoteControlEnabled": False}},
     ],
 )
@@ -150,12 +334,12 @@ def test_unknown_or_unrelated_fields_cannot_mean_idle(lg, payload):
     assert lg.classify_state(payload)["activity"] == "unknown"
 
 
-def test_unknown_compartment_does_not_get_hidden_by_off(lg):
+def test_reported_non_off_compartment_cannot_be_hidden_by_an_off_compartment(lg):
     payload = {
         "top": {"runState": {"currentState": "POWER_OFF"}},
         "bottom": {"runState": {"currentState": "NEW_STATE"}},
     }
-    assert lg.classify_state(payload)["activity"] == "unknown"
+    assert lg.classify_state(payload)["activity"] == "active"
 
 
 @pytest.mark.parametrize("incomplete", [{}, None, {"otherField": "OFF"}])
@@ -191,6 +375,7 @@ def test_planning_waits_for_latest_selected_finish_and_keeps_real_interlock(lg, 
             "states": ["COOKING"],
             "remaining_minutes": 20,
             "observed_at": 1000,
+            "timer_last_progress_at": 999,
         },
         "ac": {
             "device_id": "ac",
@@ -198,6 +383,7 @@ def test_planning_waits_for_latest_selected_finish_and_keeps_real_interlock(lg, 
             "states": ["RUNNING"],
             "remaining_minutes": 30,
             "observed_at": 1000,
+            "timer_last_progress_at": 999,
         },
         "dryer": {
             "device_id": "dryer",
@@ -205,6 +391,7 @@ def test_planning_waits_for_latest_selected_finish_and_keeps_real_interlock(lg, 
             "states": ["RUNNING"],
             "remaining_minutes": 120,
             "observed_at": 1000,
+            "timer_last_progress_at": 999,
         },
     }
     config = {"lg_interlock_enabled": True, "lg_device_ids": ["oven", "ac"]}
@@ -218,8 +405,10 @@ def test_planning_waits_for_latest_selected_finish_and_keeps_real_interlock(lg, 
     assert lg.planning_context(config, now_ts=1000)["expected_finish_ts"] == 6400
     lg.monitor.devices["ac"]["remaining_minutes"] = 30
     lg.monitor.devices["ac"]["states"] = ["PAUSED"]
+    lg.monitor.devices["ac"]["timer_last_progress_at"] = None
     assert lg.planning_context(config, now_ts=1000)["timing_uncertain"]
     lg.monitor.devices["ac"]["states"] = ["RUNNING"]
+    lg.monitor.devices["ac"]["timer_last_progress_at"] = 999
     lg.monitor.devices["ac"]["observed_at"] = 900
     context = lg.planning_context(config, now_ts=1000)
     assert context["expected_finish_ts"] == 2200
@@ -325,7 +514,7 @@ def test_known_active_appliance_still_blocks_despite_another_appliance_error(lg,
     lg.monitor.credential_stamp = lg.credential_stamp(credentials)
     lg.monitor.devices = {
         "oven": {"device_id": "oven", "alias": "Oven", "activity": "active", "observed_at": 1000,
-                 "states": ["COOKING"], "remaining_minutes": 20},
+                 "states": ["COOKING"], "remaining_minutes": 20, "timer_last_progress_at": 999},
         "dryer": {"device_id": "dryer", "alias": "Dryer", "activity": "unknown", "observed_at": 0,
                   "error": "LG connection unavailable"},
     }
