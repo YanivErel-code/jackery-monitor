@@ -70,7 +70,7 @@ def build_schedule(
     margin_seconds,
     committed_until_ts=None,
 ):
-    """Repair reserve first, then sunrise SOC, before preferring lower-cost slots.
+    """Repair reserve and sunrise SOC, ranking cost before the early-finish preference.
 
     The bounded greedy search reports when it cannot validate a feasible plan;
     it does not claim global cost optimality or guaranteed physical feasibility.
@@ -206,7 +206,7 @@ def build_schedule(
             price = slot["rate"] * power * duration / 3600000
             margin = slot["start"] >= sunrise - margin_seconds and breach is None
             choices.append(
-                ((margin, round(price / gain, 9), -slot["start"]), index, interval, projected)
+                ((round(price / gain, 9), margin, -slot["start"]), index, interval, projected)
             )
         if not choices:
             break
