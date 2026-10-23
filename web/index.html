@@ -953,6 +953,8 @@
           </div>
         </div>
         <form id="sc-form">
+          <p class="hint">Valid changes save automatically. Mode, plug and LG protection changes save immediately; numbers save after a short typing pause. Controller actions follow their normal checks.</p>
+          <p><span id="sc-save-status" class="hint" role="status" aria-live="polite">Loading settings…</span> <button id="sc-save-retry" type="button" class="btn btn-ghost btn-small" hidden>Retry</button></p>
           <div class="settings-row">
             <label class="settings-label" for="sc-mode">
               <span class="settings-label-text">Mode</span>
@@ -987,7 +989,7 @@
           <div class="settings-row">
             <label class="settings-label" for="sc-reserve-soc">
               <span class="settings-label-text">Minimum system SOC reserve</span>
-              <span class="settings-hint" id="sc-reserve-help">Set your minimum whole-system SOC goal (0–95%; default 10%), then click Save. Protects the predicted path before sunrise, not just its endpoint. Best effort when charging is constrained; not a hardware safety guarantee.</span>
+              <span class="settings-hint" id="sc-reserve-help">Set your minimum whole-system SOC goal (0–95%; default 10%); changes save automatically. Protects the predicted path before sunrise, not just its endpoint. Best effort when charging is constrained; not a hardware safety guarantee.</span>
             </label>
             <div class="settings-control">
               <input id="sc-reserve-soc" type="number" min="0" max="95" step="1" value="10" aria-describedby="sc-reserve-help" required /> <small>%</small>
@@ -1027,7 +1029,7 @@
           <fieldset class="lg-protection" id="lg-protection">
             <legend>LG appliance 220/240 V protection</legend>
             <label class="keep-awake-row"><input id="sc-lg-enabled" type="checkbox" /> Block grid charging for selected LG appliances</label>
-            <p id="sc-lg-help" class="hint">Which LG appliances are actually connected to this Jackery's 220/240 V output? Check only those devices below, then save. Selections are separate for each Jackery; unselected appliances do not affect charging. Voltage and wiring are not detected automatically. Connect your LG account in Settings → General → LG ThinQ.</p>
+            <p id="sc-lg-help" class="hint">Which LG appliances are actually connected to this Jackery's 220/240 V output? Check only those devices below; selections save automatically. Selections are separate for each Jackery; unselected appliances do not affect charging. Voltage and wiring are not detected automatically. Connect your LG account in Settings → General → LG ThinQ.</p>
             <div id="sc-lg-devices" class="lg-device-list" role="group" aria-label="Appliances connected to this Jackery" aria-describedby="sc-lg-help"><span class="hint">No LG devices loaded.</span></div>
             <label class="keep-awake-row"><input id="sc-lg-hold" type="checkbox" /> Reserve 240 V availability (manual hold)</label>
             <p class="hint">Protection is live even in Off/Test mode and also blocks this charging plug's manual, automation and rescue ON commands. It overrides low-SOC rescue charging.</p>
@@ -1035,9 +1037,8 @@
             <p class="hint">A fresh LG device-disconnected response is treated as assumed OFF. Missing, unfamiliar or stale readings, missing/expired tokens and API failures instead show an Automation warning and do not block charging. Only a fresh active state or manual reservation holds charging OFF. A Wi-Fi or monitoring failure can therefore allow charging while an appliance is running. Use manual hold before starting an appliance while charging; cloud updates cannot guarantee uninterrupted 240 V availability.</p>
           </fieldset>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-            <button class="btn btn-primary" type="submit">Save</button>
-            <button id="sc-evaluate" class="btn btn-ghost" type="button">Evaluate now</button>
-            <button id="sc-backtest" class="btn btn-ghost" type="button" title="Replay the last N days of recorded decisions through the current compute_plan">Backtest</button>
+            <button id="sc-evaluate" class="btn btn-ghost" type="button" disabled>Evaluate now</button>
+            <button id="sc-backtest" class="btn btn-ghost" type="button" title="Replay the last N days of recorded decisions through the current compute_plan" disabled>Backtest</button>
             <label style="display:flex; gap:4px; align-items:center; font-size:12px; color:#9aa0a6">
               days <input id="sc-backtest-days" type="number" min="1" max="30" step="1" value="7" style="width:55px" />
             </label>
@@ -1072,6 +1073,8 @@
           <strong>Test mode logs decisions but doesn't toggle the plug</strong> — use it for a few days to verify the controller's calls before flipping to active.
         </p>
         <form id="solar-form">
+          <p class="hint">Valid changes save automatically. Mode and plug changes save immediately; numbers save after a short typing pause. Controller actions follow their normal checks.</p>
+          <p><span id="solar-save-status" class="hint" role="status" aria-live="polite">Loading settings…</span> <button id="solar-save-retry" type="button" class="btn btn-ghost btn-small" hidden>Retry</button></p>
           <div class="settings-row">
             <label class="settings-label" for="solar-mode">
               <span class="settings-label-text">Mode</span>
@@ -1203,8 +1206,7 @@
             </div>
           </div>
           <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-            <button class="btn btn-primary" type="submit">Save</button>
-            <button id="solar-evaluate" class="btn btn-ghost" type="button">Evaluate now</button>
+            <button id="solar-evaluate" class="btn btn-ghost" type="button" disabled>Evaluate now</button>
           </div>
         </form>
         <div id="solar-runtime" class="sc-current-plan" hidden></div>

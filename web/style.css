@@ -1597,6 +1597,11 @@ main {
   text-align: right;
 }
 .settings-control input[type="number"]:focus { outline: 1px solid var(--accent); }
+#sc-form input[aria-invalid="true"],
+#solar-form input[aria-invalid="true"] {
+  border-color: var(--danger);
+  outline: 1px solid var(--danger);
+}
 .settings-control input[type="number"]:disabled {
   opacity: 0.5; cursor: not-allowed;
   background: var(--bg-elev-2);
