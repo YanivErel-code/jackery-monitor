@@ -125,8 +125,16 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   preceding forecast sunrise, including commands before a process restart.
   It conservatively estimates commanded time, not metered charging time, and
   does not count independent/manual charging. The loop wakes at planned interval
-  boundaries as well as every five minutes and on LG/config updates. Network
-  latency and failures still prevent this from being a hardware safety cutoff.
+  boundaries as well as every five minutes and on LG/config updates. Scheduling
+  uses full-precision SOC, not rounded display values. A recent successful ON
+  decision retains its already-active validated interval through its original
+  end, capped by the remaining duration budget and current forecast hour. The
+  path is still recalculated on every tick; LG/manual holds, changed planning
+  settings, stale inputs or a no-grid forecast covering both goals override
+  retention. A short restart can recover the interval from persisted decisions;
+  history older than ten minutes or lacking validated plug identity is not used.
+  See [replanning stability and limits](docs/adr/0007-smart-charge-stability.md).
+  Network latency and failures still prevent this from being a hardware safety cutoff.
   LG/manual holds remain higher priority; neither a reserve deficit nor an
   infeasible target overrides them. Targets and duration limits are not silently
   increased. See [scheduler design and limits](docs/adr/0002-reserve-aware-smart-charge.md)

@@ -2003,7 +2003,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
                   "pack_baseline_applied_w")
     return {
         "version": 1, **inputs,
-        "config": {k: cfg.get(k) for k in ("mode", "target_sunrise_soc_pct", "reserve_soc_pct",
+        "config": {k: cfg.get(k) for k in ("mode", "kasa_device_host", "target_sunrise_soc_pct", "reserve_soc_pct",
                                            "max_charge_w", "max_on_duration_minutes")},
         "cost_plan": {"type": cost_plan.get("type"), "rate_per_kwh": cost_plan.get("rate_per_kwh"),
                       "tou_rates": [{k: rate.get(k) for k in ("start_hour", "end_hour", "rate", "months")
@@ -2020,7 +2020,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
         "planned_intervals": plan.planned_intervals,
         "schedule_projection": {key: getattr(plan, key) for key in (
             "scheduled_sunrise_soc_pct", "scheduled_min_soc_pct", "reserve_soc_pct",
-            "plan_feasible", "warnings", "trajectory_validated", "remaining_charge_seconds")},
+            "plan_feasible", "warnings", "trajectory_validated", "remaining_charge_seconds", "retained_charge_until_ts")},
         "lg_protection": plan.lg_protection,
     }
 
@@ -2039,6 +2039,50 @@ def _smart_charge_elapsed_on_seconds(device_sn: str, *, since: float, until: flo
                ORDER BY decided_at""", (device_sn, since, until)).fetchall()
     return smart_charge.commanded_on_seconds([dict(row) for row in [*previous, *current]],
                                             since=since, until=until)
+
+
+def _smart_charge_committed_until(device_sn: str, *, now: float, sunrise: float | None,
+                                  config: dict, capacity_wh: int) -> int | None:
+    """Recover only the still-active interval of a recent validated ON command."""
+    if not sunrise or config.get("mode") != "active" or not config.get("kasa_device_host"):
+        return None
+    with state.energy._conn() as connection:
+        row = connection.execute(
+            """SELECT decided_at, action, sunrise_ts, input_snapshot_json
+               FROM smart_charge_decisions WHERE device_sn=? AND decided_at>=? AND decided_at<=?
+               AND mode='active' AND executed=1 AND action IN ('on','off')
+               ORDER BY decided_at DESC LIMIT 1""", (device_sn, now - 600, now)).fetchone()
+    if (not row or row["action"] != "on" or row["sunrise_ts"] != sunrise
+            or not 0 <= now - row["decided_at"] <= 600):
+        return None
+    try:
+        snapshot = json.loads(row["input_snapshot_json"] or "null")
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(snapshot, dict) or snapshot.get("version") != 1
+            or snapshot.get("capacity_wh") != capacity_wh
+            or not isinstance(snapshot.get("schedule_projection"), dict)
+            or snapshot["schedule_projection"].get("trajectory_validated") is not True):
+        return None
+    previous_config = snapshot.get("config")
+    if not isinstance(previous_config, dict) or any(
+            previous_config.get(key) != config.get(key) for key in (
+                "mode", "kasa_device_host", "target_sunrise_soc_pct", "reserve_soc_pct",
+                "max_on_duration_minutes")):
+        return None
+    intervals = snapshot.get("planned_intervals")
+    if not isinstance(intervals, list) or len(intervals) > 72:
+        return None
+    for interval in intervals:
+        if not isinstance(interval, dict):
+            continue
+        start, end = interval.get("start"), interval.get("end")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value)
+               for value in (start, end)):
+            continue
+        if start <= row["decided_at"] <= now < end <= sunrise and 0 < end - start <= 3600:
+            return int(end)
+    return None
 
 
 async def _smart_charge_evaluate(record: bool = True,
@@ -2159,6 +2203,8 @@ async def _smart_charge_evaluate(record: bool = True,
     try:
         elapsed_on_seconds = (_smart_charge_elapsed_on_seconds(
             device_sn, since=sunrise - 86400, until=now) if sunrise else 0)
+        committed_until_ts = _smart_charge_committed_until(
+            device_sn, now=now, sunrise=sunrise, config=cfg, capacity_wh=capacity)
     except Exception as error:
         log.warning("smart_charge duration history unavailable; skipping control: %s", error)
         return smart_charge.Plan(action="skip", reason="charging duration history unavailable",
@@ -2179,6 +2225,7 @@ async def _smart_charge_evaluate(record: bool = True,
         charge_not_before_ts=(lg_context or {}).get("charge_not_before_ts"),
         charging_unavailable=(lg_context or {}).get("timing_uncertain", False),
         elapsed_on_seconds=elapsed_on_seconds,
+        committed_until_ts=committed_until_ts,
     )
     if plan.trajectory_validated is False:
         plan.action = "skip"
@@ -2187,6 +2234,7 @@ async def _smart_charge_evaluate(record: bool = True,
     if reason := lg_thinq.block_reason(cfg):
         plan.action = "off"
         plan.reason = reason
+        plan.retained_charge_until_ts = None
     input_snapshot = _smart_charge_input_snapshot(inputs, cfg, cost_plan, weather, baseline_fcast, plan)
 
     # Always update the daily sunset/sunrise summary regardless of mode —
@@ -2210,6 +2258,7 @@ async def _smart_charge_evaluate(record: bool = True,
             except lg_thinq.InterlockBlocked as error:
                 plan.action = "off"
                 plan.reason = str(error)
+                plan.retained_charge_until_ts = None
                 plan.planned_hours = []
                 plan.planned_intervals = []
                 plan.window_start = plan.window_end = None

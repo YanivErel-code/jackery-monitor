@@ -10,6 +10,11 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Stop short smart-charge ON/OFF cycling during rolling replans. Optimize with
+  full-precision SOC rather than rounded display gains, and retain a recent
+  successful ON interval through its validated original end. Recheck the full
+  path and honor remaining duration, updated settings, data validity and LG
+  protection; no targets, power assumptions or duration limits are increased.
 - Validate the complete smart-charge SOC path before deferring to a later tariff
   window. Account for unmet demand after a no-grid forecast reaches 0%, rather
   than sizing charging from its clipped sunrise endpoint alone.

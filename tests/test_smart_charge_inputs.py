@@ -116,6 +116,149 @@ def test_elapsed_charge_time_is_recovered_from_persisted_decisions(monitor):
     assert monitor._smart_charge_elapsed_on_seconds("MAIN", since=NOW - 2000, until=NOW) == 1000
 
 
+def committed_record(monitor, *, serial="MAIN", action="on", executed=True, updates=None):
+    config = monitor.smart_charge.get_config("MAIN")
+    snapshot = {"version": 1, "capacity_wh": 30240,
+                "config": config, "schedule_projection": {"trajectory_validated": True},
+                "planned_intervals": [{"start": NOW - 300, "end": NOW + 1800}]}
+    snapshot.update(updates or {})
+    monitor.state.energy.record_smart_charge_decision(serial, {
+        "decided_at": NOW - 300, "mode": "active", "action": action,
+        "sunrise_ts": NOW + 8 * 3600}, executed=executed, input_snapshot=snapshot)
+
+
+def retained_until(monitor):
+    return monitor._smart_charge_committed_until("MAIN", now=NOW, sunrise=NOW + 8 * 3600,
+        config=monitor.smart_charge.get_config("MAIN"), capacity_wh=30240)
+
+
+def test_recent_successful_on_recovers_its_committed_interval_after_restart(monitor):
+    committed_record(monitor)
+    assert retained_until(monitor) == NOW + 1800
+
+
+@pytest.mark.parametrize("serial,action,executed", [
+    ("OTHER", "on", True), ("MAIN", "off", True), ("MAIN", "on", False),
+])
+def test_other_device_off_and_failed_commands_do_not_authorize_retention(monitor, serial, action, executed):
+    committed_record(monitor, serial=serial, action=action, executed=executed)
+    assert retained_until(monitor) is None
+
+
+@pytest.mark.parametrize("updates", [
+    {"config": {}}, {"capacity_wh": 5040}, {"schedule_projection": {"trajectory_validated": False}},
+    {"planned_intervals": [{"start": NOW + 10, "end": NOW + 1800}]},
+    {"planned_intervals": [{"start": NOW - 300, "end": NOW - 1}]},
+    {"planned_intervals": [{"start": NOW - 300, "end": float("inf")}]},
+])
+def test_unvalidated_or_inapplicable_previous_schedule_is_not_retained(monitor, updates):
+    committed_record(monitor, updates=updates)
+    assert retained_until(monitor) is None
+
+
+def test_new_successful_off_cancels_previous_commitment(monitor):
+    committed_record(monitor)
+    monitor.state.energy.record_smart_charge_decision("MAIN", {
+        "decided_at": NOW - 100, "mode": "active", "action": "off"}, executed=True)
+    assert retained_until(monitor) is None
+
+
+@pytest.mark.parametrize("change", [
+    {"kasa_device_host": "different-plug"}, {"kasa_device_host": None}, {"target_sunrise_soc_pct": 25},
+    {"reserve_soc_pct": 15}, {"max_on_duration_minutes": 90}, {"mode": "test"},
+])
+def test_user_configuration_changes_invalidate_old_commitment(monitor, change):
+    committed_record(monitor)
+    monitor.smart_charge.set_config({**monitor.smart_charge.get_config("MAIN"), **change}, device_sn="MAIN")
+    assert retained_until(monitor) is None
+
+
+def test_learned_power_refinement_does_not_discard_an_active_interval(monitor):
+    committed_record(monitor)
+    config = {**monitor.smart_charge.get_config("MAIN"), "max_charge_w": 977}
+    assert monitor._smart_charge_committed_until("MAIN", now=NOW, sunrise=NOW + 8 * 3600,
+        config=config, capacity_wh=30240) == NOW + 1800
+
+
+@pytest.mark.parametrize("offset", [601, 3600])
+def test_old_or_expired_decisions_do_not_hold_charging_indefinitely(monitor, offset):
+    committed_record(monitor)
+    assert monitor._smart_charge_committed_until("MAIN", now=NOW + offset,
+        sunrise=NOW + 8 * 3600, config=monitor.smart_charge.get_config("MAIN"),
+        capacity_wh=30240) is None
+
+
+def test_different_sunrise_cycle_does_not_reuse_a_commitment(monitor):
+    committed_record(monitor)
+    assert monitor._smart_charge_committed_until("MAIN", now=NOW, sunrise=NOW + 9 * 3600,
+        config=monitor.smart_charge.get_config("MAIN"), capacity_wh=30240) is None
+
+
+async def test_retained_interval_reaches_live_planning_and_persisted_snapshot(monitor, monkeypatch):
+    committed_record(monitor)
+    monkeypatch.setattr(monitor.smart_charge, "_find_next_sunrise", lambda hours: NOW + 8 * 3600)
+    calls = []
+
+    def compute(**kwargs):
+        calls.append(kwargs)
+        return monitor.smart_charge.Plan(action="on", reason="continuing validated interval",
+            mode="active", decided_at=NOW, sunrise_ts=NOW + 8 * 3600,
+            trajectory_validated=True, planned_intervals=[{"start": NOW, "end": NOW + 1800}],
+            retained_charge_until_ts=kwargs["committed_until_ts"])
+
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", compute)
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert calls[0]["committed_until_ts"] == NOW + 1800
+    assert plan.retained_charge_until_ts == NOW + 1800
+    monitor.toggle.assert_awaited_once_with("test-plug", True)
+    snapshot = monitor.state.energy.smart_charge_decision_inputs("MAIN", NOW)
+    assert snapshot["config"]["kasa_device_host"] == "test-plug"
+    assert snapshot["schedule_projection"]["retained_charge_until_ts"] == NOW + 1800
+    assert snapshot["planned_intervals"][0]["end"] == NOW + 1800
+
+
+async def test_lg_hold_still_immediately_cancels_a_retained_interval(monitor, monkeypatch):
+    committed_record(monitor)
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", lambda **kwargs: monitor.smart_charge.Plan(
+        action="on", reason="continuing", mode="active", decided_at=NOW,
+        retained_charge_until_ts=NOW + 1800))
+    monkeypatch.setattr(monitor.lg_thinq, "block_reason", lambda config: "LG appliance is active")
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "off"
+    assert plan.retained_charge_until_ts is None
+    monitor.toggle.assert_awaited_once_with("test-plug", False)
+
+
+async def test_stale_main_soc_cannot_be_overridden_by_a_committed_interval(monitor):
+    committed_record(monitor)
+    monitor.state.last_status["soc_source_ts"] = NOW - 3600
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "skip"
+    monitor.toggle.assert_not_awaited()
+
+
+def test_malformed_previous_snapshot_falls_back_to_fresh_planning(monitor):
+    committed_record(monitor)
+    with monitor.state.energy._conn() as connection:
+        connection.execute("UPDATE smart_charge_decisions SET input_snapshot_json=? WHERE device_sn=?",
+                           ("{broken", "MAIN"))
+    assert retained_until(monitor) is None
+
+
+async def test_pre_command_lg_refresh_can_reject_a_retained_on_request(monitor, monkeypatch):
+    committed_record(monitor)
+    monkeypatch.setattr(monitor.smart_charge, "compute_plan", lambda **kwargs: monitor.smart_charge.Plan(
+        action="on", reason="continuing", mode="active", decided_at=NOW,
+        retained_charge_until_ts=NOW + 1800, planned_intervals=[{"start": NOW, "end": NOW + 1800}]))
+    monitor.toggle.side_effect = monitor.lg_thinq.InterlockBlocked("LG cycle resumed")
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "off"
+    assert plan.planned_intervals == []
+    assert plan.retained_charge_until_ts is None
+    latest = monitor.state.energy.list_smart_charge_decisions("MAIN", limit=1)[0]
+    assert not latest["executed"]
+
+
 @pytest.mark.parametrize("value", [-1, 100, True, None, float("nan"), float("inf")])
 async def test_invalid_reserve_request_is_rejected(monitor, value):
     from fastapi import HTTPException, Request

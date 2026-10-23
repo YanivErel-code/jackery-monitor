@@ -1732,6 +1732,7 @@ def simulate_soc(
     extra_load_floor_pct: float | None = None,
     soc_ceiling_pct: float | None = None,
     drain_calibration_bands: list[SocDrainBand] | None = None,
+    round_soc: bool = True,
 ) -> list[dict[str, Any]]:
     """Walk SOC forward through the forecast window.
 
@@ -1772,6 +1773,9 @@ def simulate_soc(
     `drain_calibration_bands`: empirical combined baselines for validated
     SOC ranges, applied only to net-discharge intervals wholly inside their range.
     Band exits retain the legacy prior, including diversion lookahead.
+
+    `round_soc=False` retains full SOC precision for schedule optimization;
+    display/API forecasts keep their existing one-decimal default.
     """
     eff = CHARGE_EFFICIENCY if charge_efficiency is None else float(charge_efficiency)
     soc = max(0.0, min(100.0, float(starting_soc_pct)))
@@ -1868,7 +1872,7 @@ def simulate_soc(
         if floor is not None and soc < floor:
             soc = floor
         out.append({**h, "load_w": round(load, 1), "net_w": round(solar - load, 1),
-                    "predicted_soc": round(soc, 1),
+                    "predicted_soc": round(soc, 1) if round_soc else soc,
                     "extra_load_w_applied": round(applied_extra, 1)})
         if "load_without_baseline_w" in h:
             out[-1]["drain_baseline_applied_w"] = round(load - float(h["load_without_baseline_w"]), 1)
