@@ -90,6 +90,38 @@ test('explicit offline assumptions are labelled without calling expired readings
   assert.doesNotMatch(page.element('sc-lg-devices').children[2].children[1].textContent, /treated as OFF/);
 });
 
+test('arbitrary reported phases and END show ON without a monitoring warning', async () => {
+  const page = harness();
+  for (const phase of ['END', 'FUTURE_PHASE_2027', '<img src=x onerror=alert(1)>']) {
+    Object.assign(page.snapshot.devices[2], { activity: 'active', fresh: true, states: [phase] });
+    await page.api.load();
+    const description = page.element('sc-lg-devices').children[2].children[1];
+    assert.ok(description.textContent.includes(phase));
+    assert.match(description.textContent, /\bON\b/);
+    assert.equal(description.children.length, 0);
+    assert.equal(page.element('automation-lg-warning').hidden, true);
+  }
+});
+
+test('finish display requires countdown evidence, not a recognized cycle name', async () => {
+  const page = harness();
+  const device = page.snapshot.devices[2];
+  Object.assign(device, { activity: 'active', fresh: true, states: ['FUTURE_PHASE_2027'],
+    remaining_minutes: 14, observed_at: 1790000000, finish_estimate_available: false });
+  await page.api.load();
+  let description = page.element('sc-lg-devices').children[2].children[1].textContent;
+  assert.match(description, /14 min remaining/);
+  assert.doesNotMatch(description, /estimated finish/);
+  device.finish_estimate_available = true;
+  await page.api.load();
+  description = page.element('sc-lg-devices').children[2].children[1].textContent;
+  assert.match(description, /estimated finish/);
+  device.fresh = false;
+  await page.api.load();
+  description = page.element('sc-lg-devices').children[2].children[1].textContent;
+  assert.doesNotMatch(description, /estimated finish/);
+});
+
 test('LG token errors show a persistent Automation warning and clear on recovery', async () => {
   const page = harness();
   page.snapshot.error = 'LG token is invalid or expired';
