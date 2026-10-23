@@ -20,35 +20,9 @@ import crypto_util
 log = logging.getLogger("lg_thinq")
 POLL_SECONDS = 30
 MAX_STATUS_AGE = 75
+MAX_TIMER_PROGRESS_AGE = 120
 FINISH_MARGIN_SECONDS = 300
 OFF_STATES = frozenset({"OFF", "POWER_OFF"})
-ACTIVE_STATES = frozenset(
-    {
-        "ON",
-        "POWER_ON",
-        "INITIAL",
-        "RUNNING",
-        "RINSING",
-        "SPINNING",
-        "REFRESHING",
-        "ADD_DRAIN",
-        "DETECTING",
-        "DETERGENT_AMOUNT",
-        "RINSE_HOLD",
-        "RESERVED",
-        "DRYING",
-        "COOLING",
-        "HEATING",
-        "PAUSE",
-        "PAUSED",
-        "WRINKLE_PREVENT",
-        "WRINKLE_CARE",
-        "DELAYED_START",
-        "RESERVATION",
-        "PREHEATING",
-        "COOKING",
-    }
-)
 
 
 class InterlockBlocked(RuntimeError):
@@ -129,8 +103,11 @@ def credential_stamp(credentials: dict | None) -> str:
 def classify_state(payload: Any) -> dict:
     signals: list[str] = []
     timers: list[int | None] = []
+    countdown_components: dict[str, dict] = {}
+    has_non_off = False
 
-    def visit(value, parent=""):
+    def visit(value, parent="", node_path=()):
+        nonlocal has_non_off
         if isinstance(value, dict):
             first_signal = len(signals)
             for key, child in value.items():
@@ -154,20 +131,31 @@ def classify_state(payload: Any) -> dict:
                     or normalized in {"power", "powerstate"}
                 )
                 if relevant:
-                    if isinstance(child, bool):
-                        signals.append("ON" if child else "OFF")
-                    elif isinstance(child, str):
-                        signals.append(child.strip().upper()[:80])
+                    if isinstance(child, bool) and normalized in {"power", "powerstate"}:
+                        signal = "ON" if child else "OFF"
+                    elif (
+                        isinstance(child, str)
+                        and 0 < len(child.strip()) <= 80
+                        and not any(
+                            ord(character) < 32 or ord(character) == 127 for character in child
+                        )
+                    ):
+                        signal = child.strip()
                     else:
                         signals.append("UNKNOWN")
+                        continue
+                    signals.append(signal)
+                    has_non_off = has_non_off or signal.upper() not in OFF_STATES
                 else:
-                    visit(child, normalized)
+                    visit(child, normalized, (*node_path, key))
             owns_state = any(
                 re.sub(r"[^a-z]", "", name.lower())
                 in {"runstate", "operation", "power", "powerstate"}
                 for name in value
             )
-            if owns_state and not all(signal in OFF_STATES for signal in signals[first_signal:]):
+            if owns_state and not all(
+                signal.upper() in OFF_STATES for signal in signals[first_signal:]
+            ):
                 timer = value.get("timer")
                 hours = timer.get("remainHour") if isinstance(timer, dict) else None
                 minutes = timer.get("remainMinute") if isinstance(timer, dict) else None
@@ -180,19 +168,72 @@ def classify_state(payload: Any) -> dict:
                     and 0 <= minutes < 60
                 )
                 timers.append(hours * 60 + minutes if valid else None)
+                countdown_components[json.dumps(node_path, separators=(",", ":"))] = {
+                    "remaining_minutes": hours * 60 + minutes if valid else None,
+                    "states": signals[first_signal:],
+                }
         elif isinstance(value, list):
-            for child in value:
-                visit(child, parent)
+            for child_index, child in enumerate(value):
+                visit(child, parent, (*node_path, child_index))
 
     visit(payload)
-    if any(signal in ACTIVE_STATES for signal in signals):
+    if has_non_off:
         activity = "active"
-    elif signals and all(signal in OFF_STATES for signal in signals):
+    elif signals and all(signal.upper() in OFF_STATES for signal in signals):
         activity = "off"
     else:
         activity = "unknown"
     remaining = max(timers) if timers and all(timer is not None for timer in timers) else None
-    return {"activity": activity, "states": signals, "remaining_minutes": remaining}
+    return {
+        "activity": activity,
+        "states": signals,
+        "remaining_minutes": remaining,
+        "countdown_components": countdown_components,
+    }
+
+
+def _recent_timestamp(value: Any, now: float, max_age: float) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 <= now - value <= max_age
+    )
+
+
+def _countdown_progress(previous: dict, current: dict, now: float) -> dict[str, float]:
+    if (
+        current.get("activity") != "active"
+        or previous.get("activity") != "active"
+        or not _recent_timestamp(previous.get("observed_at"), now, MAX_STATUS_AGE)
+    ):
+        return {}
+    progress = {}
+    for component_path, component in current.get("countdown_components", {}).items():
+        previous_component = previous.get("countdown_components", {}).get(component_path, {})
+        remaining = component.get("remaining_minutes")
+        previous_remaining = previous_component.get("remaining_minutes")
+        if (
+            not isinstance(remaining, int)
+            or isinstance(remaining, bool)
+            or remaining <= 0
+            or not isinstance(previous_remaining, int)
+            or isinstance(previous_remaining, bool)
+        ):
+            continue
+        if remaining < previous_remaining:
+            progress[component_path] = now
+        elif (
+            remaining == previous_remaining
+            and previous_component.get("states") == component.get("states")
+            and _recent_timestamp(
+                previous.get("countdown_progress", {}).get(component_path),
+                now,
+                MAX_TIMER_PROGRESS_AGE,
+            )
+        ):
+            progress[component_path] = previous["countdown_progress"][component_path]
+    return progress
 
 
 def make_api(session, credentials: dict):
@@ -280,9 +321,20 @@ class ThinQMonitor:
                             continue
                         try:
                             payload = await api.async_get_device_status(device_id, timeout=8)
+                            classified = classify_state(payload)
+                            observed_at = time.time()
+                            progress = _countdown_progress(device, classified, observed_at)
+                            progress_at = (
+                                min(progress.values())
+                                if progress
+                                and len(progress) == len(classified["countdown_components"])
+                                else None
+                            )
                             device.update(
-                                classify_state(payload),
-                                observed_at=time.time(),
+                                classified,
+                                observed_at=observed_at,
+                                timer_last_progress_at=progress_at,
+                                countdown_progress=progress,
                                 error=None,
                                 disconnected=False,
                                 assumed_off=False,
@@ -299,6 +351,9 @@ class ThinQMonitor:
                                 error=None if disconnected else safe_error(error),
                                 states=["DISCONNECTED"] if disconnected else [],
                                 remaining_minutes=None,
+                                timer_last_progress_at=None,
+                                countdown_components={},
+                                countdown_progress={},
                                 disconnected=disconnected,
                                 assumed_off=disconnected,
                             )
@@ -325,6 +380,17 @@ class ThinQMonitor:
             )
             if not record["fresh"]:
                 record["activity"] = "unknown"
+            remaining = record.get("remaining_minutes")
+            record["finish_estimate_available"] = (
+                record["fresh"]
+                and record.get("activity") == "active"
+                and isinstance(remaining, int)
+                and not isinstance(remaining, bool)
+                and remaining > 0
+                and _recent_timestamp(
+                    record.get("timer_last_progress_at"), now, MAX_TIMER_PROGRESS_AGE
+                )
+            )
             devices.append(record)
         warnings = []
         if not credentials:
@@ -341,7 +407,7 @@ class ThinQMonitor:
                 elif not device["fresh"]:
                     warnings.append(label + ": status is stale or unavailable")
                 elif device.get("activity") == "unknown":
-                    warnings.append(label + ": appliance state is not recognized")
+                    warnings.append(label + ": LG power/status fields are missing or invalid")
         return {
             "configured": bool(credentials),
             "country_code": (credentials or {}).get("country_code", "US"),
@@ -384,7 +450,7 @@ def block_reason(config: dict, *, status: dict | None = None) -> str | None:
         device = devices.get(device_id)
         if device and device.get("fresh") and device.get("activity") == "active":
             label = device.get("alias") or "Selected appliance"
-            return prefix + label + " reports active"
+            return prefix + label + " is ON / not confirmed OFF"
     return None
 
 
@@ -428,6 +494,10 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
                 "fresh",
                 "observed_at",
                 "remaining_minutes",
+                "timer_last_progress_at",
+                "countdown_components",
+                "countdown_progress",
+                "finish_estimate_available",
                 "states",
                 "disconnected",
                 "assumed_off",
@@ -442,32 +512,17 @@ def planning_context(config: dict, *, now_ts: float) -> dict | None:
     if config.get("lg_manual_hold") or not selected or not status["configured"] or status["error"]:
         return context
     finishes = []
-    timed_states = {
-        "RUNNING",
-        "DRYING",
-        "COOLING",
-        "HEATING",
-        "PREHEATING",
-        "COOKING",
-        "RINSING",
-        "SPINNING",
-        "REFRESHING",
-        "ADD_DRAIN",
-    }
-    permitted_states = timed_states | OFF_STATES | {"ON", "POWER_ON"}
     for device_id in selected:
         device = devices.get(device_id)
         if not device or not device.get("fresh") or device.get("activity") != "active":
             continue
         remaining = device.get("remaining_minutes")
-        states = set(device.get("states") or [])
         if (
             device.get("activity") != "active"
             or not isinstance(remaining, int)
             or isinstance(remaining, bool)
             or remaining <= 0
-            or not states.intersection(timed_states)
-            or not states.issubset(permitted_states)
+            or device.get("finish_estimate_available") is not True
         ):
             return context
         finish = math.ceil(device["observed_at"] + remaining * 60)
@@ -551,13 +606,14 @@ async def poll_loop(on_update=None):
                         "activity",
                         "states",
                         "remaining_minutes",
+                        "finish_estimate_available",
                         "disconnected",
                         "assumed_off",
                         "error",
                     )
                 }
                 remaining = device.get("remaining_minutes")
-                if device.get("activity") == "active" and remaining:
+                if device.get("finish_estimate_available") and remaining:
                     record["finish_minute"] = int((device["observed_at"] + remaining * 60) // 60)
                 summary["devices"].append(record)
             signature = json.dumps(summary, sort_keys=True)
