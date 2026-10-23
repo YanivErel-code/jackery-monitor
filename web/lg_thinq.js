@@ -20,7 +20,7 @@
       for (const device of snapshot.devices || []) {
         if (device.error) warnings.push(`${device.alias}: ${device.error}`);
         else if (!device.fresh) warnings.push(`${device.alias}: status is stale or unavailable`);
-        else if (device.activity === 'unknown') warnings.push(`${device.alias}: appliance state is not recognized`);
+        else if (device.activity === 'unknown') warnings.push(`${device.alias}: LG power/status fields are missing or invalid`);
       }
     }
     if (protectionEnabled) {
@@ -38,10 +38,10 @@
 
   function describe(device) {
     const activity = device.fresh
-      ? (device.assumed_off ? 'offline — treated as OFF' : device.activity)
+      ? (device.assumed_off ? 'offline — treated as OFF' : device.activity === 'active' ? 'ON (not confirmed OFF)' : device.activity)
       : (device.error ? `unknown · ${device.error}` : 'unknown / stale');
     const remaining = !device.fresh || device.remaining_minutes == null ? '' : ` · ${device.remaining_minutes} min remaining`;
-    const finish = device.fresh && device.remaining_minutes > 0 && device.observed_at
+    const finish = device.fresh && device.finish_estimate_available === true && device.remaining_minutes > 0 && device.observed_at
       ? ` · estimated finish ${new Date((device.observed_at + device.remaining_minutes * 60) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
     const states = device.fresh && !device.assumed_off ? (device.states || []).join(', ') : '';
     return `${device.alias} · ${device.device_type || 'LG appliance'} · ${activity}${remaining}${finish}${states ? ` · ${states}` : ''}`;
