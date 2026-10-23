@@ -195,6 +195,7 @@ def test_partial_interval_or_budget_boundary_wakes_before_five_minutes():
 
 
 def test_oct22_saved_incident_no_longer_defers_into_depletion():
+    """Full-precision plans may wait while above reserve, but not past its first breach."""
     data = json.loads((Path(__file__).parent / "fixtures" / "smart_charge_oct22.json").read_text())
     sunrise = smart_charge._find_next_sunrise(data["forecast"]["forecast"])
     elapsed = smart_charge.commanded_on_seconds(
@@ -217,7 +218,9 @@ def test_oct22_saved_incident_no_longer_defers_into_depletion():
     assert legacy.action == "off"
     assert legacy.window_start == data["original_window_start"]
     assert data["original_action"] == "off"
-    assert result.action == "on"
+    first_reserve_breach = min(hour["ts"] for hour in data["forecast"]["forecast"]
+                               if hour["predicted_soc"] < result.reserve_soc_pct)
+    assert result.window_start < first_reserve_breach
     assert result.window_start < data["original_window_start"]
     assert result.deficit_kwh > 9.072
     assert not result.plan_feasible

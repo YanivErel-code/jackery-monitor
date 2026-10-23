@@ -301,6 +301,7 @@ class Plan:
     warnings: list[str] | None = None
     trajectory_validated: bool | None = None
     remaining_charge_seconds: float | None = None
+    retained_charge_until_ts: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -713,7 +714,7 @@ def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
                  tz_offset_seconds: int = 0, now_ts: float | None = None,
                  forecast_unavailable_reason: str | None = None,
                  charge_not_before_ts: float | None = None, charging_unavailable: bool = False,
-                 elapsed_on_seconds: float = 0) -> Plan:
+                 elapsed_on_seconds: float = 0, committed_until_ts: float | None = None) -> Plan:
     """Validate an interval-by-interval charge schedule before authorizing deferral.
 
     Legacy start-stamped fixtures remain readable, but their unvalidated plans
@@ -759,6 +760,7 @@ def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
             cost_plan=cost_plan, tz_offset_seconds=tz_offset_seconds,
             charge_not_before_ts=charge_not_before_ts, unavailable=charging_unavailable,
             margin_seconds=SUNRISE_MARGIN_S,
+            committed_until_ts=committed_until_ts,
         )
     except (ValueError, TypeError, OverflowError) as error:
         plan.action = "skip"

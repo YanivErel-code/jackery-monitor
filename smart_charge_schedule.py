@@ -8,6 +8,8 @@ from itertools import pairwise
 import forecaster
 from cost import rate_at
 
+SOC_EPSILON = 1e-7
+
 
 def _finite(value, *, minimum=None, maximum=None):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -66,6 +68,7 @@ def build_schedule(
     charge_not_before_ts,
     unavailable,
     margin_seconds,
+    committed_until_ts=None,
 ):
     """Repair reserve first, then sunrise SOC, before preferring lower-cost slots.
 
@@ -129,6 +132,7 @@ def build_schedule(
             charge_efficiency=efficiency,
             soc_ceiling_pct=ceiling,
             drain_calibration_bands=bands,
+            round_soc=False,
         )
         return trace
 
@@ -147,7 +151,7 @@ def build_schedule(
     def violation(trace):
         for hour in trace:
             achievable = min(reserve, value_at(ideal, hour["ts"]))
-            if hour["predicted_soc"] + 0.001 < achievable:
+            if hour["predicted_soc"] + SOC_EPSILON < achievable:
                 return hour["ts"]
         return None
 
@@ -155,9 +159,35 @@ def build_schedule(
     unused = list(range(len(slots)))
     remaining = max(0, budget_seconds)
     trace = baseline
+    retained_interval = None
+    if committed_until_ts is not None:
+        committed_until_ts = _finite(committed_until_ts)
+        baseline_covered = (
+            min(soc, *(hour["predicted_soc"] for hour in baseline)) >= reserve - SOC_EPSILON
+            and baseline[-1]["predicted_soc"] >= target - SOC_EPSILON
+        )
+        if (
+            committed_until_ts > now
+            and not_before <= now
+            and remaining >= 1
+            and not baseline_covered
+        ):
+            for index, slot in enumerate(slots):
+                if slot["start"] <= now < slot["end"]:
+                    end = math.floor(min(committed_until_ts, slot["end"], now + remaining))
+                    if end > now:
+                        retained_interval = {"start": now, "end": end}
+                        selected.append(retained_interval)
+                        remaining -= end - now
+                        if end == slot["end"]:
+                            unused.remove(index)
+                        else:
+                            slot["start"] = end
+                        trace = project(selected)
+                    break
     while unused and remaining >= 1:
         breach = violation(trace)
-        if breach is None and trace[-1]["predicted_soc"] >= target:
+        if breach is None and trace[-1]["predicted_soc"] >= target - SOC_EPSILON:
             break
         metric_time = breach if breach is not None else sunrise
         previous = value_at(trace, metric_time)
@@ -171,11 +201,13 @@ def build_schedule(
             interval = {"start": start, "end": start + duration}
             projected = project([*selected, interval])
             gain = value_at(projected, metric_time) - previous
-            if gain <= 0.001:
+            if gain <= SOC_EPSILON:
                 continue
             price = slot["rate"] * power * duration / 3600000
             margin = slot["start"] >= sunrise - margin_seconds and breach is None
-            choices.append(((margin, price / gain, -slot["start"]), index, interval, projected))
+            choices.append(
+                ((margin, round(price / gain, 9), -slot["start"]), index, interval, projected)
+            )
         if not choices:
             break
         _, index, interval, trace = min(choices, key=lambda choice: choice[0])
@@ -183,7 +215,7 @@ def build_schedule(
         unused.remove(index)
         remaining -= interval["end"] - interval["start"]
 
-    feasible = violation(trace) is None and trace[-1]["predicted_soc"] >= target
+    feasible = violation(trace) is None and trace[-1]["predicted_soc"] >= target - SOC_EPSILON
     if feasible:
         expensive_first = sorted(
             selected,
@@ -194,19 +226,24 @@ def build_schedule(
             reverse=True,
         )
         for interval in expensive_first:
+            if interval is retained_interval:
+                continue
             candidate = [item for item in selected if item is not interval]
             projected = project(candidate)
-            if violation(projected) is None and projected[-1]["predicted_soc"] >= target:
+            if (
+                violation(projected) is None
+                and projected[-1]["predicted_soc"] >= target - SOC_EPSILON
+            ):
                 selected, trace = candidate, projected
     selected.sort(key=lambda interval: interval["start"])
     minimum = min([soc, *(hour["predicted_soc"] for hour in trace)])
     scheduled_sunrise = trace[-1]["predicted_soc"]
     warnings = []
-    if minimum < reserve:
+    if minimum < reserve - SOC_EPSILON:
         warnings.append(
             f"Reserve {reserve:g}% cannot be maintained by this plan (projected minimum {minimum:.1f}%)"
         )
-    if scheduled_sunrise < target:
+    if scheduled_sunrise < target - SOC_EPSILON:
         warnings.append(
             f"Sunrise target {target:g}% is not achievable by this plan (projected {scheduled_sunrise:.1f}%); check charging power, duration budget and holds"
         )
@@ -242,8 +279,9 @@ def build_schedule(
             (rate_at(cost_plan, interval["start"], tz_offset_seconds) for interval in selected),
             default=None,
         ),
-        "scheduled_sunrise_soc_pct": scheduled_sunrise,
-        "scheduled_min_soc_pct": minimum,
+        "scheduled_sunrise_soc_pct": round(scheduled_sunrise, 1),
+        "scheduled_min_soc_pct": round(minimum, 1),
+        "retained_charge_until_ts": retained_interval["end"] if retained_interval else None,
         "reserve_soc_pct": reserve,
         "plan_feasible": not warnings,
         "warnings": warnings,
