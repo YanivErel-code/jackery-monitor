@@ -10,6 +10,10 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Prefer lower-cost useful smart-charge intervals over the optional one-hour
+  pre-sunrise finish buffer. Keep the early-finish preference for equal marginal
+  cost, while preserving reserve/target validation, holds, duration limits and
+  committed-interval stability. Expensive charging remains available when needed.
 - Replace LG cycle-phase allowlists with generic fresh ON/OFF evidence. Show any
   valid reported phase, including `END` and future values, without a false
   monitoring warning; mapped appliances remain reserved until OFF/disconnected.
