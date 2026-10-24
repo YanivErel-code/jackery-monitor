@@ -119,7 +119,8 @@ def test_elapsed_charge_time_is_recovered_from_persisted_decisions(monitor):
 def committed_record(monitor, *, serial="MAIN", action="on", executed=True, updates=None):
     config = monitor.smart_charge.get_config("MAIN")
     snapshot = {"version": 1, "capacity_wh": 30240,
-                "config": config, "schedule_projection": {"trajectory_validated": True},
+                "config": config, "schedule_projection": {
+                    "trajectory_validated": True, "schedule_policy": "overnight_first_v1"},
                 "planned_intervals": [{"start": NOW - 300, "end": NOW + 1800}]}
     snapshot.update(updates or {})
     monitor.state.energy.record_smart_charge_decision(serial, {
@@ -135,6 +136,13 @@ def retained_until(monitor):
 def test_recent_successful_on_recovers_its_committed_interval_after_restart(monitor):
     committed_record(monitor)
     assert retained_until(monitor) == NOW + 1800
+
+
+@pytest.mark.parametrize("policy", [None, "price_first", "future_unsupported_policy"])
+def test_commitment_from_another_policy_is_replanned_not_carried_forward(monitor, policy):
+    committed_record(monitor, updates={"schedule_projection": {
+        "trajectory_validated": True, "schedule_policy": policy}})
+    assert retained_until(monitor) is None
 
 
 @pytest.mark.parametrize("serial,action,executed", [
@@ -204,7 +212,7 @@ async def test_retained_interval_reaches_live_planning_and_persisted_snapshot(mo
         return monitor.smart_charge.Plan(action="on", reason="continuing validated interval",
             mode="active", decided_at=NOW, sunrise_ts=NOW + 8 * 3600,
             trajectory_validated=True, planned_intervals=[{"start": NOW, "end": NOW + 1800}],
-            retained_charge_until_ts=kwargs["committed_until_ts"])
+            retained_charge_until_ts=kwargs["committed_until_ts"], schedule_policy="overnight_first_v1")
 
     monkeypatch.setattr(monitor.smart_charge, "compute_plan", compute)
     plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
@@ -214,6 +222,7 @@ async def test_retained_interval_reaches_live_planning_and_persisted_snapshot(mo
     snapshot = monitor.state.energy.smart_charge_decision_inputs("MAIN", NOW)
     assert snapshot["config"]["kasa_device_host"] == "test-plug"
     assert snapshot["schedule_projection"]["retained_charge_until_ts"] == NOW + 1800
+    assert snapshot["schedule_projection"]["schedule_policy"] == "overnight_first_v1"
     assert snapshot["planned_intervals"][0]["end"] == NOW + 1800
 
 
