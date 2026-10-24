@@ -10,6 +10,11 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Prefer overnight smart charging from local midnight to sunrise, with cheaper
+  overnight hours first and earliest starts at equal rates. Keep earlier charging
+  available for reserve/target needs and retry cost-first if the preferred plan
+  is infeasible. Replan old-policy commitments while retaining bounded stability
+  for new validated intervals; preserve holds, learned power and duration limits.
 - Prefer lower-cost useful smart-charge intervals over the optional one-hour
   pre-sunrise finish buffer. Keep the early-finish preference for equal marginal
   cost, while preserving reserve/target validation, holds, duration limits and

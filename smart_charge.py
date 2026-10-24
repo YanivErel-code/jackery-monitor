@@ -302,6 +302,7 @@ class Plan:
     trajectory_validated: bool | None = None
     remaining_charge_seconds: float | None = None
     retained_charge_until_ts: int | None = None
+    schedule_policy: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
