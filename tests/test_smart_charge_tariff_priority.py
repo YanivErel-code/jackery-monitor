@@ -55,11 +55,12 @@ def test_cheaper_final_hour_beats_expensive_pre_margin_slot():
     assert result["scheduled_sunrise_soc_pct"] >= 30
 
 
-def test_equal_cost_keeps_one_hour_early_finish_preference():
+def test_equal_cost_now_prefers_midnight_over_the_early_finish_anchor():
     inputs = arguments()
     inputs["cost_plan"] = {"type": "flat", "rate_per_kwh": 0.25}
     result = build_schedule(**inputs)
-    assert result["planned_intervals"] == [{"start": SUNRISE - 7200, "end": SUNRISE - 3600}]
+    midnight = SUNRISE - 7 * 3600
+    assert result["planned_intervals"] == [{"start": midnight, "end": midnight + 3600}]
 
 
 def test_expensive_early_charging_still_protects_reserve():

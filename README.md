@@ -1,6 +1,6 @@
 # Jackery Monitor
 
-Last updated: 2026-10-23 04:54 PM CDT.
+Last updated: 2026-10-24 11:06 AM CDT.
 
 [![CI](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml)
 [![Docker image](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml)
@@ -100,10 +100,12 @@ still needs reporter hardware validation. See [Home monitoring](docs/jackery-hom
   lower-cost windows. Simulates actual ON intervals, concurrent loads,
   partial hours, efficiency, calibrated drain and charge ceilings; a baseline
   clamped at 0% no longer hides remaining overnight energy demand.
-  Prefers lower-cost useful charging over finishing one hour before sunrise;
-  equal-cost-effective choices still prefer the early finish. It may use the
-  final hour to avoid unnecessary expensive charging. This is not a fixed peak-
-  hour ban: reserve or sunrise-target needs can still require earlier charging.
+  Prefers overnight charging from local midnight to sunrise, choosing cheaper
+  overnight hours first and starting at midnight when overnight rates are equal.
+  Earlier charging remains available when the computed reserve/sunrise path or
+  duration budget needs it; an infeasible preferred plan is retried using the
+  cost-first policy. A valid ongoing interval stays bounded to its original end
+  to prevent switching every few minutes. Old-policy commitments are replanned.
   Shows baseline versus scheduled sunrise SOC, minimum planned SOC and warnings
   when the proposed plan cannot satisfy the reserve or target within its limits.
   Charging power is learned automatically per device, using **1,000 W until

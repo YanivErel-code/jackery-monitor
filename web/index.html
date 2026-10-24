@@ -980,7 +980,7 @@
           <div class="settings-row">
             <label class="settings-label" for="sc-target-soc">
               <span class="settings-label-text">Target SOC at sunrise</span>
-              <span class="settings-hint">Whole-system SOC goal at sunrise. The planner checks the complete path and prioritizes lower-cost useful charging over finishing 1h early; equal-cost choices still prefer the early finish. Reserve or target needs can require expensive hours. Infeasible targets are flagged; holds and the duration budget still apply.</span>
+              <span class="settings-hint">Whole-system SOC goal at sunrise. Prefers overnight charging from local midnight, with cheaper overnight hours first and earliest starts at equal rates. Earlier charging is available when needed for the reserve or sunrise path. Rechecks every 5 minutes; holds, duration limits and stable ongoing intervals still apply. Infeasible targets are flagged.</span>
             </label>
             <div class="settings-control">
               <input id="sc-target-soc" type="number" min="5" max="95" step="1" value="25" /> <small>%</small>
