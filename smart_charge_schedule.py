@@ -9,6 +9,7 @@ import forecaster
 from cost import rate_at
 
 SOC_EPSILON = 1e-7
+SCHEDULE_POLICY = "overnight_first_v1"
 
 
 def _finite(value, *, minimum=None, maximum=None):
@@ -70,7 +71,72 @@ def build_schedule(
     margin_seconds,
     committed_until_ts=None,
 ):
-    """Repair reserve and sunrise SOC, ranking cost before the early-finish preference.
+    """Prefer earliest low-rate overnight charging while preserving a valid SOC path."""
+    inputs = {
+        "forecast": forecast,
+        "current_soc_pct": current_soc_pct,
+        "capacity_wh": capacity_wh,
+        "now": now,
+        "sunrise": sunrise,
+        "target": target,
+        "reserve": reserve,
+        "power_w": power_w,
+        "budget_seconds": budget_seconds,
+        "cost_plan": cost_plan,
+        "tz_offset_seconds": tz_offset_seconds,
+        "charge_not_before_ts": charge_not_before_ts,
+        "unavailable": unavailable,
+        "margin_seconds": margin_seconds,
+        "committed_until_ts": committed_until_ts,
+    }
+    result = _build_schedule(**inputs, overnight_first=True)
+    preference_relaxed = False
+    if not result["plan_feasible"]:
+        alternative = _build_schedule(**inputs, overnight_first=False)
+        if alternative["plan_feasible"]:
+            result = alternative
+            preference_relaxed = True
+    result["schedule_policy"] = SCHEDULE_POLICY
+    overnight_start = _overnight_start(sunrise, tz_offset_seconds)
+    intervals = result["planned_intervals"]
+    if preference_relaxed:
+        prefix = "overnight preference relaxed to find a feasible reserve/sunrise plan"
+    elif any(interval["start"] < overnight_start for interval in intervals):
+        if result["retained_charge_until_ts"] is not None and now < overnight_start:
+            prefix = "continuing a validated earlier-charge interval; overnight-first for remaining demand"
+        else:
+            prefix = "overnight-first plan includes earlier charging for its reserve/sunrise path"
+    else:
+        prefix = "overnight-first: prefer earliest low-rate hours from local midnight"
+    result["reason"] = prefix + "; " + result["reason"]
+    return result
+
+
+def _overnight_start(sunrise, tz_offset_seconds):
+    offset = _finite(tz_offset_seconds, minimum=-14 * 3600, maximum=14 * 3600)
+    return math.floor((sunrise + offset) / 86400) * 86400 - offset
+
+
+def _build_schedule(
+    *,
+    forecast,
+    current_soc_pct,
+    capacity_wh,
+    now,
+    sunrise,
+    target,
+    reserve,
+    power_w,
+    budget_seconds,
+    cost_plan,
+    tz_offset_seconds,
+    charge_not_before_ts,
+    unavailable,
+    margin_seconds,
+    committed_until_ts,
+    overnight_first,
+):
+    """Repair reserve and sunrise SOC before applying the requested slot preference.
 
     The bounded greedy search reports when it cannot validate a feasible plan;
     it does not claim global cost optimality or guaranteed physical feasibility.
@@ -80,6 +146,7 @@ def build_schedule(
     power = _finite(power_w, minimum=1)
     efficiency = _finite(forecast.get("charge_efficiency") or 0.90, minimum=0.01, maximum=1)
     hours = _hours(forecast, now, sunrise)
+    overnight_start = _overnight_start(sunrise, tz_offset_seconds)
     bands = (forecast.get("drain_calibration") or {}).get("soc_bands") or []
     ceiling = forecast.get("charge_ceiling_pct")
     if ceiling is not None:
@@ -92,8 +159,12 @@ def build_schedule(
         end = int(hour["ts"])
         start = max(now, round(hour["ts"] - hour["duration_h"] * 3600), math.ceil(not_before))
         if not unavailable and start < end:
-            rate = _finite(rate_at(cost_plan, start, tz_offset_seconds), minimum=0)
-            slots.append({"start": start, "end": end, "rate": rate})
+            boundaries = (
+                [start, overnight_start, end] if start < overnight_start < end else [start, end]
+            )
+            for begin, finish in pairwise(boundaries):
+                rate = _finite(rate_at(cost_plan, begin, tz_offset_seconds), minimum=0)
+                slots.append({"start": begin, "end": finish, "rate": rate})
 
     def project(intervals):
         split_hours = []
@@ -197,7 +268,11 @@ def build_schedule(
             if slot["start"] >= metric_time:
                 continue
             duration = min(slot["end"] - slot["start"], int(remaining))
-            start = slot["start"] if breach is not None else slot["end"] - duration
+            start = (
+                slot["start"]
+                if breach is not None or (overnight_first and slot["start"] >= overnight_start)
+                else slot["end"] - duration
+            )
             interval = {"start": start, "end": start + duration}
             projected = project([*selected, interval])
             gain = value_at(projected, metric_time) - previous
@@ -205,9 +280,13 @@ def build_schedule(
                 continue
             price = slot["rate"] * power * duration / 3600000
             margin = slot["start"] >= sunrise - margin_seconds and breach is None
-            choices.append(
-                ((round(price / gain, 9), margin, -slot["start"]), index, interval, projected)
-            )
+            if overnight_first and slot["start"] >= overnight_start:
+                priority = (0, slot["rate"], slot["start"], round(price / gain, 9))
+            elif overnight_first:
+                priority = (1, round(price / gain, 9), margin, -slot["start"])
+            else:
+                priority = (round(price / gain, 9), margin, -slot["start"])
+            choices.append((priority, index, interval, projected))
         if not choices:
             break
         _, index, interval, trace = min(choices, key=lambda choice: choice[0])
@@ -220,8 +299,11 @@ def build_schedule(
         expensive_first = sorted(
             selected,
             key=lambda interval: (
+                interval["start"] < overnight_start if overnight_first else False,
                 rate_at(cost_plan, interval["start"], tz_offset_seconds),
-                -interval["start"],
+                interval["start"]
+                if overnight_first and interval["start"] >= overnight_start
+                else -interval["start"],
             ),
             reverse=True,
         )

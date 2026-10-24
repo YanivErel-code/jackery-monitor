@@ -2020,7 +2020,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
         "planned_intervals": plan.planned_intervals,
         "schedule_projection": {key: getattr(plan, key) for key in (
             "scheduled_sunrise_soc_pct", "scheduled_min_soc_pct", "reserve_soc_pct",
-            "plan_feasible", "warnings", "trajectory_validated", "remaining_charge_seconds", "retained_charge_until_ts")},
+            "plan_feasible", "warnings", "trajectory_validated", "remaining_charge_seconds", "retained_charge_until_ts", "schedule_policy")},
         "lg_protection": plan.lg_protection,
     }
 
@@ -2044,6 +2044,8 @@ def _smart_charge_elapsed_on_seconds(device_sn: str, *, since: float, until: flo
 def _smart_charge_committed_until(device_sn: str, *, now: float, sunrise: float | None,
                                   config: dict, capacity_wh: int) -> int | None:
     """Recover only the still-active interval of a recent validated ON command."""
+    from smart_charge_schedule import SCHEDULE_POLICY
+
     if not sunrise or config.get("mode") != "active" or not config.get("kasa_device_host"):
         return None
     with state.energy._conn() as connection:
@@ -2062,7 +2064,8 @@ def _smart_charge_committed_until(device_sn: str, *, now: float, sunrise: float 
     if (not isinstance(snapshot, dict) or snapshot.get("version") != 1
             or snapshot.get("capacity_wh") != capacity_wh
             or not isinstance(snapshot.get("schedule_projection"), dict)
-            or snapshot["schedule_projection"].get("trajectory_validated") is not True):
+            or snapshot["schedule_projection"].get("trajectory_validated") is not True
+            or snapshot["schedule_projection"].get("schedule_policy") != SCHEDULE_POLICY):
         return None
     previous_config = snapshot.get("config")
     if not isinstance(previous_config, dict) or any(
