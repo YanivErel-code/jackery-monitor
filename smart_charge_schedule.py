@@ -145,7 +145,13 @@ def _build_schedule(
     capacity = _finite(capacity_wh, minimum=1)
     power = _finite(power_w, minimum=1)
     efficiency = _finite(forecast.get("charge_efficiency") or 0.90, minimum=0.01, maximum=1)
+    bypass = forecast.get("ac_input_excludes_load") is True
+    supply_limit = (_finite(forecast.get("ac_supply_limit_w"), minimum=50, maximum=20000)
+                    if bypass else None)
     hours = _hours(forecast, now, sunrise)
+    if bypass:
+        for hour in hours:
+            hour["output_w"] = _finite(hour.get("output_w", hour["load_w"]), minimum=0)
     overnight_start = _overnight_start(sunrise, tz_offset_seconds)
     bands = (forecast.get("drain_calibration") or {}).get("soc_bands") or []
     ceiling = forecast.get("charge_ceiling_pct")
@@ -158,7 +164,8 @@ def _build_schedule(
     for hour in hours:
         end = int(hour["ts"])
         start = max(now, round(hour["ts"] - hour["duration_h"] * 3600), math.ceil(not_before))
-        if not unavailable and start < end:
+        if (not unavailable and start < end
+                and (not bypass or hour["output_w"] < supply_limit)):
             boundaries = (
                 [start, overnight_start, end] if start < overnight_start < end else [start, end]
             )
@@ -188,14 +195,17 @@ def _build_schedule(
                     if any(interval["start"] <= begin < interval["end"] for interval in intervals)
                     else 0
                 )
-                split_hours.append(
-                    {
-                        **hour,
-                        "ts": end,
-                        "duration_h": (end - begin) / 3600,
-                        "solar_w": hour["solar_w"] + grid,
-                    }
-                )
+                point = {
+                    **hour,
+                    "ts": end,
+                    "duration_h": (end - begin) / 3600,
+                    "solar_w": hour["solar_w"] + (grid if not bypass else 0),
+                }
+                if bypass and grid:
+                    battery_charge = min(grid, max(0.0, supply_limit - hour["output_w"]))
+                    point.update(ac_bypass_active=True, ac_battery_charge_w=battery_charge,
+                                 ac_wall_input_w=battery_charge + hour["output_w"])
+                split_hours.append(point)
         trace = forecaster.simulate_soc(
             soc,
             capacity,
@@ -215,6 +225,9 @@ def _build_schedule(
                 return previous_soc + fraction * (hour["predicted_soc"] - previous_soc)
             previous_time, previous_soc = hour["ts"], hour["predicted_soc"]
         return previous_soc
+
+    def wall_wh(points):
+        return sum(float(hour.get("ac_wall_input_w") or 0) * hour["duration_h"] for hour in points)
 
     ideal = project(slots)
     baseline = project([])
@@ -278,7 +291,10 @@ def _build_schedule(
             gain = value_at(projected, metric_time) - previous
             if gain <= SOC_EPSILON:
                 continue
-            price = slot["rate"] * power * duration / 3600000
+            if bypass:
+                price = slot["rate"] * (wall_wh(projected) - wall_wh(trace)) / 1000
+            else:
+                price = slot["rate"] * power * duration / 3600000
             margin = slot["start"] >= sunrise - margin_seconds and breach is None
             if overnight_first and slot["start"] >= overnight_start:
                 priority = (0, slot["rate"], slot["start"], round(price / gain, 9))

@@ -1,6 +1,6 @@
 # Jackery Monitor
 
-Last updated: 2026-10-24 11:06 AM CDT.
+Last updated: 2026-11-01 10:19 PM CST.
 
 [![CI](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/ci.yml)
 [![Docker image](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/YanivErel-code/jackery-monitor/actions/workflows/docker-publish.yml)
@@ -828,6 +828,23 @@ The dashboard marks affected readings as an error, and the monitor stops
 recording new energy/chart samples, pack snapshots, or generating forecasts and
 smart/solar/independent SOC-rule decisions from those suspect values. Existing
 plug states are not blindly toggled merely because measurements are suspect.
+
+For a device with user-confirmed battery-side AC metering, set the per-device
+smart-charge config `ac_input_excludes_load: true` and `ac_supply_limit_w` to its
+shared outlet limit (1,750 W for the reviewed Explorer 5000 Plus). During AC
+charging, reported input feeds the battery and output is grid bypass; wall power
+is their sum. Complete AC hours fit efficiency from stored energy / input,
+without subtracting output. Mixed ON/OFF hours are excluded from that fit.
+Solar-only hours retain input-minus-output accounting. Unknown devices keep
+their existing metering behavior until explicitly configured.
+
+Scheduled AC charging uses the learned battery-charge rate, capped by outlet
+limit minus predicted household output. Bypassed loads incur no battery drain;
+slots above the outlet limit are ineligible. Cost ranking includes both charging
+and bypass wall power, with solar kept separate. This is a forecast constraint,
+not a hardware current limiter. Config API, saved decision inputs, parameter
+resolution, dashboard forecasts and approximate backtests share these semantics.
+Existing dashboard saves preserve these per-device settings.
 
 Unresolved energy reconciliation can instead use
 `EnergyDB.exclude_learning_interval(device_sn, start_ts, end_ts, reason=...)`.

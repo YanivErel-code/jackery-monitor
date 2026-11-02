@@ -1674,6 +1674,11 @@ def _resolved_capacity_wh(device_sn: str | None) -> int:
     return _total_capacity_wh(device_sn, mc)
 
 
+def _ac_metering_settings(device_sn: str | None) -> dict:
+    cfg = smart_charge.get_config(device_sn)
+    return {key: cfg.get(key) for key in ("ac_input_excludes_load", "ac_supply_limit_w")}
+
+
 def _cached_history(device_sn: str) -> list[dict]:
     """One-shot 14d history pull, used by the resolver's live-fit
     branch. Memoized via _param_fit_cache so multiple param lookups
@@ -1837,7 +1842,9 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
     elif key == "charge_efficiency":
         try:
             cap = _resolved_capacity_wh(device_sn)
-            v, n = forecaster.fit_charge_efficiency(_cached_history(device_sn), cap)
+            v, n = forecaster.fit_charge_efficiency(
+                _cached_history(device_sn), cap,
+                ac_input_excludes_load=_ac_metering_settings(device_sn)["ac_input_excludes_load"])
             source = "fit" if n >= 5 else "default"
             state.energy.set_device_param(
                 device_sn, key, v, source=source, n_samples=n,
@@ -1994,9 +2001,11 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     start = plan.decided_at // 3600 * 3600
     weather_keys = ("ts", "ghi_w_m2", "cloud_cover_pct")
     forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w",
+                     "output_w", "ac_battery_charge_w", "ac_wall_input_w", "ac_bypass_active",
                      "load_without_baseline_w", "drain_baseline_prior_w",
                      "drain_baseline_applied_w")
     model_keys = ("solar_coefficient", "fit_samples", "diurnal_shape", "charge_efficiency",
+                  "ac_input_excludes_load", "ac_supply_limit_w",
                   "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
                   "solar_cap_w", "charge_ceiling_pct", "readiness", "drain_calibration",
@@ -2004,7 +2013,8 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     return {
         "version": 1, **inputs,
         "config": {k: cfg.get(k) for k in ("mode", "kasa_device_host", "target_sunrise_soc_pct", "reserve_soc_pct",
-                                           "max_charge_w", "max_on_duration_minutes")},
+                                           "max_charge_w", "max_on_duration_minutes",
+                                           "ac_input_excludes_load", "ac_supply_limit_w")},
         "cost_plan": {"type": cost_plan.get("type"), "rate_per_kwh": cost_plan.get("rate_per_kwh"),
                       "tou_rates": [{k: rate.get(k) for k in ("start_hour", "end_hour", "rate", "months")
                                     if k in rate} for rate in cost_plan.get("tou_rates") or []]},
@@ -2071,7 +2081,7 @@ def _smart_charge_committed_until(device_sn: str, *, now: float, sunrise: float 
     if not isinstance(previous_config, dict) or any(
             previous_config.get(key) != config.get(key) for key in (
                 "mode", "kasa_device_host", "target_sunrise_soc_pct", "reserve_soc_pct",
-                "max_on_duration_minutes")):
+                "max_on_duration_minutes", "ac_input_excludes_load", "ac_supply_limit_w")):
         return None
     intervals = snapshot.get("planned_intervals")
     if not isinstance(intervals, list) or len(intervals) > 72:
@@ -2153,6 +2163,7 @@ async def _smart_charge_evaluate(record: bool = True,
     inputs["tz_offset_seconds"] = tz_off
     car_load_w = _car_load_w(device_sn)
     fcast = forecaster.build_forecast(
+        **_ac_metering_settings(device_sn),
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
@@ -2168,6 +2179,7 @@ async def _smart_charge_evaluate(record: bool = True,
     # needed; with the floor on, predicted_sunrise_soc is at the target
     # by construction and the deficit math collapses to zero.
     baseline_fcast = forecaster.build_forecast(
+        **_ac_metering_settings(device_sn),
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
@@ -2829,6 +2841,7 @@ async def _solar_charge_evaluate(record: bool = True,
                                 or device_location.get_tz_offset() or 0)
                 sc_car_load_w = float(cfg.get("car_load_w") or 1400)
                 fcast_baseline = forecaster.build_forecast(
+                    **_ac_metering_settings(device_sn),
                     energy_history=energy_hist,
                     weather_hourly=weather["hourly"],
                     starting_soc_pct=starting_soc,
@@ -2853,6 +2866,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     + float(cfg.get("on_hysteresis_pp") or 3)
                 )
                 fcast_with_div = forecaster.build_forecast(
+                    **_ac_metering_settings(device_sn),
                     energy_history=energy_hist,
                     weather_hourly=weather["hourly"],
                     starting_soc_pct=starting_soc,
@@ -3884,6 +3898,7 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
 
     result = await asyncio.to_thread(
         forecaster.build_forecast,
+        **_ac_metering_settings(device_sn),
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
         starting_soc_pct=starting_soc,
@@ -4438,6 +4453,13 @@ async def api_smart_charge_set(req: Request, device_sn: str | None = None):
         raise HTTPException(status_code=400,
                             detail="no active device — pass device_sn explicitly")
     if isinstance(body, dict):
+        if "ac_input_excludes_load" in body and not isinstance(body["ac_input_excludes_load"], bool):
+            raise HTTPException(400, "AC metering setting must be true or false")
+        if "ac_supply_limit_w" in body and body["ac_supply_limit_w"] is not None:
+            limit = body["ac_supply_limit_w"]
+            if (isinstance(limit, bool) or not isinstance(limit, (int, float))
+                    or not isfinite(limit) or not 50 <= limit <= 20000):
+                raise HTTPException(400, "AC supply limit must be between 50 and 20,000 watts")
         if "reserve_soc_pct" in body:
             reserve = body["reserve_soc_pct"]
             if (isinstance(reserve, bool) or not isinstance(reserve, (int, float))
@@ -4818,6 +4840,7 @@ def api_smart_charge_backtest(
     tz_offset = int(loc.get("utc_offset_seconds") or 0)
 
     results = bt.replay_decisions(
+        **_ac_metering_settings(device_sn),
         decisions=decisions,
         full_energy_history=history,
         weather_observations=weather_obs,
