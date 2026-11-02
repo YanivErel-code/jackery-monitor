@@ -10,6 +10,10 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Exclude unresolved energy-reconciliation intervals from SOC-based efficiency
+  and drain learning without deleting raw energy, SOC, forecasts or control audit.
+  Persist reversible per-device exclusions and retain rows to prevent fits from
+  bridging an excluded interval.
 - Prefer overnight smart charging from local midnight to sunrise, with cheaper
   overnight hours first and earliest starts at equal rates. Keep earlier charging
   available for reserve/target needs and retry cost-first if the preferred plan
