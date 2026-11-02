@@ -1323,6 +1323,7 @@ def fit_charge_efficiency(
     *,
     default: float = DEFAULT_CHARGE_EFFICIENCY,
     min_windows: int = 5,
+    ac_input_excludes_load: bool = False,
 ) -> tuple[float, int]:
     """Fit the per-device charge efficiency by reconciling input_wh
     against the SOC gain it produced on clean charging windows.
@@ -1345,7 +1346,13 @@ def fit_charge_efficiency(
       stored_wh = ΔSOC% * capacity_wh / 100
       efficiency = stored_wh / net_input_wh
 
-    Net-energy denominator: when loads run concurrently with charging
+    With confirmed battery-side AC metering (`ac_input_excludes_load`),
+    complete AC-charging hours use input_wh directly: grid-bypassed output
+    never left the battery and must not be subtracted. Mixed ON/OFF hours
+    cannot establish that boundary and are skipped. Solar-only windows and
+    devices with unconfirmed metering keep the net-energy denominator.
+
+    For solar-only net-energy accounting, when loads run concurrently with charging
     (e.g. solar charges battery while the home draws ~150W constantly),
     only `input_wh - output_wh` is the energy actually available to
     store. The original code divided stored_wh by raw input_wh, which
@@ -1393,7 +1400,12 @@ def fit_charge_efficiency(
             continue
         input_wh = float(a.get("input_wh") or 0)
         output_wh = float(a.get("output_wh") or 0)
-        net_input_wh = max(input_wh - output_wh, 0.0)
+        if ac_input_excludes_load and float(a.get("ac_input_wh") or 0) > 5:
+            if not a.get("ac_charge_complete"):
+                continue
+            net_input_wh = input_wh
+        else:
+            net_input_wh = max(input_wh - output_wh, 0.0)
         if net_input_wh < MIN_INPUT_WH:
             continue
         dt_h = (b["ts"] - a["ts"]) / 3600.0
@@ -1807,7 +1819,8 @@ def simulate_soc(
     for h in forecast_hours:
         duration_h = max(0.0, min(1.0, float(h.get("duration_h", 1.0))))
         natural_load = _calibrated_load(h, natural_soc, capacity_wh, drain_calibration_bands or [])
-        net = float(h.get("solar_w") or 0) - natural_load
+        net = (float(h.get("solar_w") or 0) + float(h.get("ac_battery_charge_w") or 0)
+               if h.get("ac_bypass_active") else float(h.get("solar_w") or 0) - natural_load)
         updated_soc = _advance_soc(natural_soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
         nat_hourly_pp.append((net * eff if net > 0 else net) * duration_h / capacity_wh * 100.0)
         natural_soc = updated_soc
@@ -1827,6 +1840,16 @@ def simulate_soc(
         duration_h = max(0.0, min(1.0, float(h.get("duration_h", 1.0))))
         solar = float(h.get("solar_w") or 0)
         load = _calibrated_load(h, soc, capacity_wh, drain_calibration_bands or [])
+        if h.get("ac_bypass_active"):
+            # Input is charging power after the bypass branch. Household
+            # output is supplied by the grid; charging efficiency absorbs
+            # charging-path/BMS residuals rather than adding discharge losses.
+            net = solar + float(h.get("ac_battery_charge_w") or 0)
+            soc = _advance_soc(soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
+            out.append({**h, "load_w": round(load, 1), "net_w": round(net, 1),
+                        "predicted_soc": round(soc, 1) if round_soc else soc,
+                        "extra_load_w_applied": 0.0, "drain_baseline_applied_w": 0.0})
+            continue
         applied_extra = 0.0
         if extra_w > 0 and extra_floor is not None:
             # Tentatively apply extra this hour and compute SOC at end
@@ -1850,7 +1873,11 @@ def simulate_soc(
                     future_load = _calibrated_load(
                         future_hour, future_soc, capacity_wh, drain_calibration_bands or [],
                     )
-                    future_net = float(future_hour.get("solar_w") or 0) - future_load
+                    future_net = (
+                        float(future_hour.get("solar_w") or 0)
+                        + float(future_hour.get("ac_battery_charge_w") or 0)
+                        if future_hour.get("ac_bypass_active")
+                        else float(future_hour.get("solar_w") or 0) - future_load)
                     future_duration = max(0.0, min(1.0, float(future_hour.get("duration_h", 1.0))))
                     future_soc = _advance_soc(
                         future_soc, future_net, future_duration, capacity_wh, eff, soc_ceiling_pct,
@@ -1957,6 +1984,8 @@ def build_forecast(
     car_load_w: float | None = None,
     pack_count: int = 0,
     utc_offset_seconds: int = 0,
+    ac_input_excludes_load: bool = False,
+    ac_supply_limit_w: float | None = None,
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
@@ -2023,7 +2052,8 @@ def build_forecast(
                 break
     # Per-device charge efficiency, same idea: fit from the ratio of
     # observed SOC gain to reported input_wh on clean charging windows.
-    charge_eff, charge_eff_n = fit_charge_efficiency(energy_history, capacity_wh)
+    charge_eff, charge_eff_n = fit_charge_efficiency(
+        energy_history, capacity_wh, ac_input_excludes_load=ac_input_excludes_load)
     out_vals = [r["output_w"] for r in energy_history if r.get("output_w") is not None]
     # Reported as a debug stat only — NOT used as a fallback for missing
     # hours. Mixing daytime samples into nighttime forecasts was the bug.
@@ -2105,6 +2135,8 @@ def build_forecast(
             "solar_w_uncapped": round(solar_w_uncapped, 1),
             "solar_capped": capped,
             "load_w": round(load_w, 1),
+            "output_w": round(max(0.0, (load_w - prior_effective_parasitic_w)
+                                  / (1 + overhead_pct)), 1),
             "cloud_cover_pct": round(float(w.get("cloud_cover_pct") or 0), 1),
         })
         forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
@@ -2178,5 +2210,7 @@ def build_forecast(
         "charge_efficiency": round(charge_eff, 3),
         "charge_efficiency_n_windows": charge_eff_n,
         "charge_efficiency_source": charge_eff_source,
+        "ac_input_excludes_load": ac_input_excludes_load,
+        "ac_supply_limit_w": ac_supply_limit_w,
         "forecast": simulated,
     }

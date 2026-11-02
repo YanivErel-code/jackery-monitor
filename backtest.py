@@ -32,11 +32,14 @@ def _replay_one(
     weather_hourly: list[dict[str, Any]],
     cost_plan: dict[str, Any],
     tz_offset_seconds: int,
+    ac_input_excludes_load: bool = False,
+    ac_supply_limit_w: float | None = None,
 ) -> smart_charge.Plan:
     """Run the current compute_plan as if `now` were `decided_at`.
     Builds both the with-floor (display) and counterfactual (no-floor)
     forecasts the new code expects."""
     fcast = forecaster.build_forecast(
+        ac_input_excludes_load=ac_input_excludes_load, ac_supply_limit_w=ac_supply_limit_w,
         energy_history=energy_history_to_ts,
         weather_hourly=weather_hourly,
         starting_soc_pct=starting_soc_pct,
@@ -44,6 +47,7 @@ def _replay_one(
         ac_charge_floor_pct=target_pct,
     )
     baseline_fcast = forecaster.build_forecast(
+        ac_input_excludes_load=ac_input_excludes_load, ac_supply_limit_w=ac_supply_limit_w,
         energy_history=energy_history_to_ts,
         weather_hourly=weather_hourly,
         starting_soc_pct=starting_soc_pct,
@@ -54,6 +58,8 @@ def _replay_one(
         "mode": "active",  # exercise the same code path active mode would
         "target_sunrise_soc_pct": target_pct,
         "max_charge_w": max_charge_w,
+        "ac_input_excludes_load": ac_input_excludes_load,
+        "ac_supply_limit_w": ac_supply_limit_w,
     }
     return smart_charge.compute_plan(
         config=cfg,
@@ -77,6 +83,8 @@ def replay_decisions(
     cost_plan: dict[str, Any],
     tz_offset_seconds: int,
     target_override: float | None = None,
+    ac_input_excludes_load: bool = False,
+    ac_supply_limit_w: float | None = None,
 ) -> list[dict[str, Any]]:
     """For each historical decision, replay through compute_plan and
     return a comparison row. Older decisions first."""
@@ -109,6 +117,8 @@ def replay_decisions(
         ]
         try:
             plan = _replay_one(
+                ac_input_excludes_load=ac_input_excludes_load,
+                ac_supply_limit_w=ac_supply_limit_w,
                 decided_at=ts,
                 starting_soc_pct=float(soc),
                 target_pct=target,

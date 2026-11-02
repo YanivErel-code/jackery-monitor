@@ -1,4 +1,8 @@
-"""Learn a sustained AC input rate from fresh, completed minute readings."""
+"""Learn sustained reported AC charging power from fresh minute readings.
+
+For confirmed battery-side metering this is battery charging power, excluding
+bypassed household output. The scheduler separately applies the shared outlet cap.
+"""
 
 from __future__ import annotations
 

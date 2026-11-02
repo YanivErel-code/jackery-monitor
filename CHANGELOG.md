@@ -10,6 +10,12 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Correct confirmed battery-side AC metering: fit complete AC hours without
+  subtracting grid-bypassed output, and simulate charging without battery drain
+  from bypassed loads. Cap battery charging at the configured shared outlet
+  limit minus household output; include total wall power in schedule cost ranking.
+  Keep unconfirmed devices and solar-only accounting unchanged, preserve metering
+  settings across dashboard saves, and snapshot the boundary for advisor/replay.
 - Exclude unresolved energy-reconciliation intervals from SOC-based efficiency
   and drain learning without deleting raw energy, SOC, forecasts or control audit.
   Persist reversible per-device exclusions and retain rows to prevent fits from

@@ -80,6 +80,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_sunrise_soc_pct": 25,        # SOC we want at sunrise
     "reserve_soc_pct": 10,
     "max_charge_w": DEFAULT_CHARGE_W,
+    "ac_input_excludes_load": False,     # confirmed battery-side AC metering
+    "ac_supply_limit_w": None,          # shared charging + bypass outlet limit
     "max_on_duration_minutes": 480,      # safety cap per dusk-dawn cycle
     "claude_enabled": False,             # optional decision narrator
     "lg_interlock_enabled": False,
@@ -136,6 +138,11 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         pass
     out["claude_enabled"] = bool(cfg.get("claude_enabled"))
+    out["ac_input_excludes_load"] = cfg.get("ac_input_excludes_load") is True
+    limit = cfg.get("ac_supply_limit_w")
+    if (isinstance(limit, (int, float)) and not isinstance(limit, bool)
+            and math.isfinite(limit) and 50 <= limit <= 20000):
+        out["ac_supply_limit_w"] = float(limit)
     out["lg_interlock_enabled"] = cfg.get("lg_interlock_enabled") is True
     out["lg_manual_hold"] = cfg.get("lg_manual_hold") is True
     selected = cfg.get("lg_device_ids")
@@ -208,7 +215,8 @@ def set_config(cfg: dict[str, Any], device_sn: str | None = None) -> dict[str, A
         previous = ((existing.get("by_device", {}).get(device_sn) or {})
                     if _is_per_device_shape(existing) else existing)
         effective = dict(cfg) if isinstance(cfg, dict) else {}
-        for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold", "reserve_soc_pct"):
+        for key in ("lg_interlock_enabled", "lg_device_ids", "lg_manual_hold", "reserve_soc_pct",
+                    "ac_input_excludes_load", "ac_supply_limit_w"):
             if key not in effective and key in previous:
                 effective[key] = previous[key]
         validated = _validate_config(effective)
@@ -515,7 +523,9 @@ def _legacy_compute_plan(
     ]
     avg_load_w = ((sum(window_loads) / len(window_loads))
                   if window_loads else 300.0)
-    if max_charge_w > avg_load_w:
+    if config.get("ac_input_excludes_load"):
+        hourly_gain_wh = max_charge_w * charge_eff + avg_load_w
+    elif max_charge_w > avg_load_w:
         hourly_gain_wh = (max_charge_w - avg_load_w) * charge_eff + avg_load_w
     else:
         hourly_gain_wh = max_charge_w
@@ -753,7 +763,10 @@ def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
     from smart_charge_schedule import build_schedule
     try:
         result = build_schedule(
-            forecast=baseline_forecast or forecast, current_soc_pct=current_soc_pct,
+            forecast={**(baseline_forecast or forecast),
+                      "ac_input_excludes_load": config.get("ac_input_excludes_load") is True,
+                      "ac_supply_limit_w": config.get("ac_supply_limit_w")},
+            current_soc_pct=current_soc_pct,
             capacity_wh=capacity_wh, now=int(now_ts or time.time()), sunrise=plan.sunrise_ts,
             target=plan.target_sunrise_soc_pct,
             reserve=float(_validate_config(config)["reserve_soc_pct"]),

@@ -1591,7 +1591,8 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                            MIN(last_soc_source_ts) AS soc_source_min,
                            MAX(last_soc_source_ts) AS soc_source_max,
                            COUNT(last_soc_source_ts) AS soc_source_known,
-                           COUNT(*) AS minute_count
+                           COUNT(*) AS minute_count,
+                           SUM(CASE WHEN last_ac_input_w > 50 THEN 1 ELSE 0 END) AS ac_minutes
                     FROM samples
                     WHERE device_sn = ? AND bucket >= ? AND bucket < ?
                     GROUP BY b
@@ -1673,6 +1674,10 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                    "battery_pct": int(r[10]) if r[10] is not None else None,
                    "soc_source_ts_min": r[11], "soc_source_ts_max": r[12],
                    "soc_source_known_buckets": r[13]}
+            row["ac_charge_complete"] = (
+                r[14] >= bucket_s / 60 * 0.95 and r[15] == r[14]
+                and int(r[0]) + bucket_s <= as_of
+            )
             if ts_sorted and row["battery_pct"] is not None:
                 row["system_soc"] = _capacity_weighted_soc(
                     float(row["battery_pct"]), int(row["ts"]),
