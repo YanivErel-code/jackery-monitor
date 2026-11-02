@@ -605,6 +605,10 @@ def _row_soc(row: dict[str, Any]) -> float | None:
     over-attributes drain by the pack ratio. Advisor flagged this as
     the root cause of parasitic_w fitting at 316-370W vs the empirical
     ~130W on the 30240 Wh / 6-pack rig 2026-05-06."""
+    # Preserve raw SOC for display while rejecting both endpoints of any fit
+    # touching unresolved energy-accounting evidence. Never drop/bridge the row.
+    if row.get("soc_fit_excluded"):
+        return None
     s = row.get("system_soc")
     if s is not None:
         with _ROW_SOC_STATS_LOCK:
@@ -1011,7 +1015,8 @@ def _clean_discharge_runs(
         has_soc = (_row_has_system_soc(row) if require_system_soc
                    else _row_soc(row) is not None)
         is_clean = (
-            (row.get("solar_wh") or 0) <= SOLAR_NOISE_WH
+            not row.get("soc_fit_excluded")
+            and (row.get("solar_wh") or 0) <= SOLAR_NOISE_WH
             and (row.get("ac_input_wh") or 0) <= AC_NOISE_WH
             and has_soc
         )

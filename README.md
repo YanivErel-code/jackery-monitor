@@ -829,6 +829,19 @@ recording new energy/chart samples, pack snapshots, or generating forecasts and
 smart/solar/independent SOC-rule decisions from those suspect values. Existing
 plug states are not blindly toggled merely because measurements are suspect.
 
+Unresolved energy reconciliation can instead use
+`EnergyDB.exclude_learning_interval(device_sn, start_ts, end_ts, reason=...)`.
+This persists a per-device entry in `learning_exclusions`, rounded outward to
+whole minutes. Overlapping history buckets retain their raw measurements and
+receive `soc_fit_excluded=True`; SOC-based efficiency/drain fits reject them,
+and empirical drain-calibration intervals become `learning_excluded`. Rows stay
+in history so fits cannot bridge the gap. Energy totals, load/solar measurements,
+forecast records and controller audit remain intact. Restore learning with
+`EnergyDB.restore_learning_interval(device_sn, rounded_start_ts)` after resolving
+the accounting. Existing in-memory forecast caches expire normally; a restart
+also clears them. This is distinct from confirmed frozen-telemetry quarantine.
+See the [November 1 reconciliation investigation](docs/charging-reconciliation-2026-11-01.md).
+
 On confirmation, the monitor also quarantines the detection lead-up: affected
 minute readings, pack snapshots, and hour-rounded forecast/actual windows are
 removed from active analytics in one transaction. Their original rows remain

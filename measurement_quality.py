@@ -1,4 +1,4 @@
-"""Persistent, reversible exclusion of confirmed measurement-discontinuity windows."""
+"""Persistent, reversible measurement quarantine and SOC-learning exclusions."""
 
 from __future__ import annotations
 
@@ -11,6 +11,17 @@ from contextlib import AbstractContextManager
 from typing import Protocol, TypedDict
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS learning_exclusions (
+    device_sn TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    detected_at INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'excluded',
+    PRIMARY KEY (device_sn, start_ts),
+    CHECK (end_ts > start_ts),
+    CHECK (status IN ('excluded', 'restored'))
+);
 CREATE TABLE IF NOT EXISTS measurement_incidents (
     device_sn TEXT NOT NULL,
     start_ts INTEGER NOT NULL,
@@ -153,6 +164,33 @@ def _summary_patch(row: sqlite3.Row, start: int, end: int) -> dict[str, object]:
 
 
 class MeasurementQualityMixin:
+    def exclude_learning_interval(self: QualityHost, device_sn: str, start_ts: float,
+                                  end_ts: float, *, reason: str) -> None:
+        """Exclude SOC-based fits; retain all raw measurements and controller audit."""
+        if (not device_sn or not reason or any(isinstance(value, bool)
+                or not isinstance(value, (int, float)) or not math.isfinite(value)
+                for value in (start_ts, end_ts)) or end_ts <= start_ts):
+            raise ValueError("invalid learning exclusion")
+        start, end = math.floor(start_ts / 60) * 60, math.ceil(end_ts / 60) * 60
+        with self._conn() as connection:
+            connection.execute(
+                "INSERT INTO learning_exclusions(device_sn,start_ts,end_ts,detected_at,reason) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(device_sn,start_ts) DO UPDATE "
+                "SET end_ts=MAX(learning_exclusions.end_ts,excluded.end_ts),"
+                "reason=excluded.reason,status='excluded'",
+                (device_sn, start, end, int(time.time()), reason),
+            )
+
+    def restore_learning_interval(self: QualityHost, device_sn: str, start_ts: int) -> None:
+        """Re-enable learning without changing the retained measurements."""
+        with self._conn() as connection:
+            result = connection.execute(
+                "UPDATE learning_exclusions SET status='restored' WHERE device_sn=? AND start_ts=?",
+                (device_sn, start_ts),
+            )
+            if not result.rowcount:
+                raise ValueError("unknown learning exclusion")
+
     def measurement_quarantined(self: QualityHost, device_sn: str, start: float,
                                end: float | None = None) -> bool:
         with self._conn() as connection:

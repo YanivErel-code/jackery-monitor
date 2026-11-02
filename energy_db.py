@@ -1571,6 +1571,11 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
         bucket_s = max(BUCKET_S, int(bucket_s))
         calibration = {}
         with self._conn() as c:
+            learning_exclusions = c.execute(
+                "SELECT start_ts,end_ts FROM learning_exclusions "
+                "WHERE device_sn=? AND status='excluded' AND start_ts<? AND end_ts>?",
+                (device_sn, upper_bound, since - bucket_s),
+            ).fetchall()
             rows = c.execute(
                 """SELECT (bucket / ?) * ? AS b,
                            SUM(input_wh) AS in_wh,
@@ -1681,6 +1686,13 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             if include_calibration and bucket_s == 3600:
                 row["calibration"] = calibration.get(int(r[0]))
                 row["history_complete"] = r[14] >= 55 and int(r[0]) + 3600 <= as_of
+            # Keep excluded rows in place so adjacent-point fits cannot bridge
+            # the interval. Raw energy/SOC remain visible for reconciliation.
+            if any(start < int(r[0]) + bucket_s and end > int(r[0])
+                   for start, end in learning_exclusions):
+                row["soc_fit_excluded"] = True
+                if row.get("calibration") is not None:
+                    row["calibration"] = {**row["calibration"], "quality": "learning_excluded"}
             out.append(row)
         return out
 
