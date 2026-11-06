@@ -677,6 +677,21 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             )
         return True
 
+    def today_totals(self, device_sn: str) -> dict:
+        """Indexed current-day read; never scan lifetime or rolling windows."""
+        since = _start_of_day(int(time.time()))
+        with self._conn() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
+                "COALESCE(SUM(solar_wh),0), COALESCE(SUM(solar_charge_diverted_wh),0), "
+                "COALESCE(SUM(ac_input_wh),0) FROM samples "
+                "WHERE device_sn=? AND bucket>=?", (device_sn, since),
+            ).fetchone()
+        return {"device_sn": device_sn, "today": {
+            "input_wh": row[0], "output_wh": row[1], "solar_wh": row[2],
+            "solar_charge_diverted_wh": row[3], "ac_input_wh": row[4], "since": since,
+        }}
+
     def totals(self, device_sn: str) -> DeviceTotals:
         """Lifetime + windowed totals for a single device."""
         now = int(time.time())

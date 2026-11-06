@@ -175,3 +175,63 @@ def test_forecast_writer_rechecks_permission_inside_connection(tmp_path):
     assert result == 0
     with db._conn() as conn:
         assert conn.execute("SELECT COUNT(*) FROM forecast_predictions").fetchone()[0] == 0
+
+
+def test_today_card_loads_while_lifetime_worker_is_blocked(dashboard, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    original = type(dashboard.state.energy).totals
+
+    def slow_lifetime(self, sn):
+        entered.set()
+        assert release.wait(timeout=3)
+        return original(self, sn)
+
+    monkeypatch.setattr(type(dashboard.state.energy), 'totals', slow_lifetime)
+    try:
+        dashboard.serialize_status()
+        assert entered.wait(timeout=2)
+        today = dashboard.api_energy_today('TEST')
+        assert today['device_sn'] == 'TEST'
+        assert today['today']['output_wh'] == 0
+        assert 'today_savings' in today
+        assert 'lifetime' not in today
+        assert 'lifetime_savings' not in today
+        assert dashboard.serialize_status()['energy']['today'] == today['today']
+        assert not release.is_set()
+    finally:
+        release.set()
+
+
+def test_today_query_matches_window_totals_and_excludes_other_days_devices(tmp_path, monkeypatch):
+    import energy_db
+    db = energy_db.EnergyDB(str(tmp_path / 'energy.db'))
+    now = 1_780_000_000
+    monkeypatch.setattr(energy_db.time, 'time', lambda: now)
+    midnight = energy_db._start_of_day(now)
+    with db._conn() as connection:
+        connection.executemany(
+            'INSERT INTO samples (device_sn,bucket,input_wh,output_wh,solar_wh,ac_input_wh) '
+            'VALUES (?,?,?,?,?,?)',
+            [('TEST', midnight - 60, 9999, 9999, 9999, 0),
+             ('TEST', midnight, 100, 60, 80, 20),
+             ('TEST', midnight + 60, 200, 90, 150, 50),
+             ('OTHER', midnight, 9000, 9000, 9000, 0)],
+        )
+    assert db.today_totals('TEST')['today'] == db.totals('TEST')['today']
+    assert db.today_totals('TEST')['today']['output_wh'] == 150
+    assert db.today_totals('MISSING')['today']['output_wh'] == 0
+
+
+def test_today_savings_never_requests_year_history(dashboard, monkeypatch):
+    calls = []
+    original = type(dashboard.state.energy).history
+
+    def bounded(self, sn, *, hours, bucket_s):
+        calls.append(hours)
+        assert hours == 24
+        return original(self, sn, hours=hours, bucket_s=bucket_s)
+
+    monkeypatch.setattr(type(dashboard.state.energy), 'history', bounded)
+    result = dashboard.api_energy_today('TEST')
+    assert 'today_savings' in result
+    assert calls == [24]

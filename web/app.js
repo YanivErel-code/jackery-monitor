@@ -4384,6 +4384,7 @@ function applyStatus(s) {
   // device switch. The EOD badge on the battery card is also per-device.
   if (prevDeviceSn !== newDeviceSn && newDeviceSn) {
     clearEnergyKpis();
+    if (!s.energy?.today) fetchTodayEnergy();
     forecastCache = null;
     energyHistoryCache = null;
     _eodAnchorSOC = null;
@@ -4547,33 +4548,7 @@ function applyStatus(s) {
     batCard.classList.toggle('low',         (t.battery_percent ?? 100) <= 20);
   }
 
-  // Today KPIs from energy aggregator
-  if (s.energy?.today) {
-    $('today-out-kwh').textContent = fmtKwh(s.energy.today.output_wh);
-    $('today-in-kwh').textContent  = fmtKwh(s.energy.today.input_wh);
-    renderChargedSplit('today-charged-split', s.energy.today);
-    // Excess-diversion line: show only when there's something to show.
-    // Threshold at 50Wh so a brief sensor blip doesn't surface the row;
-    // a real diversion session is kWh-scale.
-    const divWh = s.energy.today.solar_charge_diverted_wh || 0;
-    const divRow = $('today-diverted-row');
-    const divEl = $('today-diverted-kwh');
-    if (divRow && divEl) {
-      if (divWh >= 50) {
-        divRow.hidden = false;
-        divEl.textContent = fmtKwh(divWh);
-      } else {
-        divRow.hidden = true;
-      }
-    }
-  }
-  // Cost savings row in the TODAY card. Server only populates this when
-  // the cost plan loads cleanly; keep the row hidden otherwise.
-  if (s.energy) {
-    renderSavingsRow('today',
-      s.energy.today_savings,
-      s.energy.cost_plan?.currency || 'USD');
-  }
+  renderTodayEnergy(s.energy);
 
   // Output state. If a toggle is pending and the device hasn't propagated
   // yet, hold the expected value and keep the .pending tag so the user
@@ -4986,6 +4961,7 @@ function describeSrc(meta) {
 // ENERGY KPIs
 // ============================================================
 function clearEnergyKpis() {
+  _todayEnergyGeneration++;
   // Aggregates arrive asynchronously. A new device must never inherit
   // the previous unit's totals while its cache is being populated.
   for (const id of ['today-out-kwh', 'today-in-kwh', 'today-diverted-kwh',
@@ -5000,6 +4976,50 @@ function clearEnergyKpis() {
     'e-today-charged-split', 'today-savings-row', 'lifetime-savings-row']) {
     show($(id), false);
   }
+}
+
+let _todayEnergyGeneration = 0;
+
+function renderTodayEnergy(e) {
+  // Today KPIs from energy aggregator
+  if (e?.today) {
+    $('today-out-kwh').textContent = fmtKwh(e.today.output_wh);
+    $('today-in-kwh').textContent  = fmtKwh(e.today.input_wh);
+    renderChargedSplit('today-charged-split', e.today);
+    // Excess-diversion line: show only when there's something to show.
+    // Threshold at 50Wh so a brief sensor blip doesn't surface the row;
+    // a real diversion session is kWh-scale.
+    const divWh = e.today.solar_charge_diverted_wh || 0;
+    const divRow = $('today-diverted-row');
+    const divEl = $('today-diverted-kwh');
+    if (divRow && divEl) {
+      if (divWh >= 50) {
+        divRow.hidden = false;
+        divEl.textContent = fmtKwh(divWh);
+      } else {
+        divRow.hidden = true;
+      }
+    }
+  }
+  // Cost savings row in the TODAY card. Server only populates this when
+  // the cost plan loads cleanly; keep the row hidden otherwise.
+  if (e) {
+    renderSavingsRow('today',
+      e.today_savings,
+      e.cost_plan?.currency || 'USD');
+  }
+
+}
+
+async function fetchTodayEnergy() {
+  const sn = activeJackeryDevice()?.device_sn;
+  if (!isCurrentDeviceRequest(sn) || isHomeMonitoring()) return;
+  const generation = _todayEnergyGeneration;
+  try {
+    const energy = await _dashboardReads.get(`/api/energy/today?device_sn=${encodeURIComponent(sn)}`);
+    if (generation !== _todayEnergyGeneration || !isCurrentDeviceRequest(sn) || energy.device_sn !== sn) return;
+    renderTodayEnergy(energy);
+  } catch (e) { console.warn('today energy fetch failed', e); }
 }
 
 function renderEnergyKpis(e) {
