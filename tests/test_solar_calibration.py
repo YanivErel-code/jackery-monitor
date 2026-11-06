@@ -39,6 +39,7 @@ def test_consistent_measured_energy_only_applies_half_the_bias():
 @pytest.mark.parametrize(('field', 'value'), [
     ('history_complete', False), ('soc_fit_excluded', True), ('ac_input_w', 200),
     ('system_soc', 85), ('battery_pct', 90), ('soc_source_known_buckets', 20),
+    ('soc_source_known_buckets', 59),
     ('soc_source_ts_min', DAY), ('solar_wh', float('nan')), ('ac_input_w', None),
 ])
 def test_one_usable_hour_is_insufficient(field, value):

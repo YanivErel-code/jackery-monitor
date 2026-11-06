@@ -49,7 +49,7 @@ def fit_intraday_solar_scale(
         known = row.get('soc_source_known_buckets')
         first = row.get('soc_source_ts_min')
         last = row.get('soc_source_ts_max')
-        if (not all(_finite(v) for v in (known, first, last)) or known < 55
+        if (not all(_finite(v) for v in (known, first, last)) or known < 60
                 or first < ts - 120 or last > ts + 3600):
             continue
         soc = row.get('system_soc', row.get('battery_pct'))
