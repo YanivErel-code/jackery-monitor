@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from forecast_calibration import SocDrainBand, fit_system_residual
+from solar_calibration import fit_intraday_solar_scale
 
 log = logging.getLogger("forecaster")
 
@@ -1716,15 +1717,22 @@ def _calibrated_load(hour: dict[str, Any], soc: float, capacity_wh: int, bands: 
         return prior
     base = float(hour["load_without_baseline_w"])
     duration = max(0.0, min(1.0, float(hour.get("duration_h", 1.0))))
+    matched_specific = False
     for band in sorted(bands, key=lambda value: value.get("source") == "pooled_discharge"):
+        pooled = band.get("source") == "pooled_discharge"
+        if pooled and matched_specific:
+            break  # A broad pool must not bypass a specific band exit.
         if band["min_soc"] <= soc <= band["max_soc"]:
+            matched_specific = matched_specific or not pooled
             load = base + band["baseline_w"]
             if (hour.get("solar_w") or 0) > load + additional_load_w:
                 break
             ending = soc + (float(hour.get("solar_w") or 0) - load - additional_load_w) * duration / capacity_wh * 100
             if band["min_soc"] <= ending <= band["max_soc"]:
                 return load
-            break
+            # A crossing can fit another overlapping band; do not give up
+            # merely because the first matching band ends at this boundary.
+            continue
     return base + float(hour.get("drain_baseline_prior_w") or 0)
 
 
@@ -2023,6 +2031,10 @@ def build_forecast(
     # curve (e.g. afternoon shade) as history accumulates.
     diurnal_shape = fit_diurnal_shape(energy_history, weather_hourly, k,
                                       utc_offset_seconds=utc_offset_seconds)
+    solar_intraday = fit_intraday_solar_scale(
+        energy_history, weather_hourly, k, diurnal_shape,
+        now_ts=now_ts, utc_offset_seconds=utc_offset_seconds,
+    )
     profile = fit_load_profile(energy_history, now_ts=now_ts,
                                car_load_w=car_load_w)
     # Per-device drain model: parasitic baseline (W) + percentage of
@@ -2111,7 +2123,10 @@ def build_forecast(
         # is a no-op until the per-hour factors are learned from history.
         lhod = ((interval_start + int(utc_offset_seconds)) % 86400) // 3600
         shape_factor = diurnal_shape.get(lhod, 1.0)
-        solar_w_uncapped = max(0.0, k * ghi * shape_factor)
+        same_day = ((interval_start + utc_offset_seconds) // 86400
+                    == (cutoff + utc_offset_seconds) // 86400)
+        intraday_scale = solar_intraday["scale"] if same_day else 1.0
+        solar_w_uncapped = max(0.0, k * ghi * shape_factor * intraday_scale)
         solar_w = solar_w_uncapped
         capped = False
         if solar_cap is not None and solar_w > solar_cap:
@@ -2171,6 +2186,7 @@ def build_forecast(
         # shade); < 1.0 = that local hour produces less than k*GHI would
         # predict (e.g. afternoon shade). Keyed by local hour-of-day.
         "diurnal_shape": {str(h): round(v, 3) for h, v in sorted(diurnal_shape.items())},
+        "solar_intraday_calibration": solar_intraday,
         # Learned charge ceiling (system-SOC plateau the BMS allows).
         # null = no cap (reaches full, or too little charge-cycle data).
         "charge_ceiling_pct": round(soc_ceiling, 1) if soc_ceiling is not None else None,

@@ -314,6 +314,7 @@ def monitor(isolated_data, monkeypatch):
         mod.forecast_calls.append(kw)
         sunrise = NOW // 3600 * 3600 + 8 * 3600
         return {"ready": True, "solar_coefficient": 4.2, "charge_efficiency": 0.9,
+                "solar_intraday_calibration": {"scale": 1.1, "eligible_hours": 2},
                 "forecast": [
                     {"ts": sunrise, "duration_h": 1, "solar_w": 0,
                      "load_w": 550, "predicted_soc": 30},
@@ -529,6 +530,7 @@ async def test_decision_keeps_exact_inputs_and_test_mode_does_not_toggle(monitor
     assert snapshot["weather"]["fetched_at"] == NOW - 30
     assert snapshot["weather"]["hourly"][0]["ghi_w_m2"] == 500
     assert snapshot["model"]["solar_coefficient"] == 4.2
+    assert snapshot["model"]["solar_intraday_calibration"] == {"scale": 1.1, "eligible_hours": 2}
     assert snapshot["baseline_forecast"][0]["predicted_soc"] == 30
     serialized = json.dumps(snapshot)
     assert "test-plug" not in serialized

@@ -2056,3 +2056,30 @@ def test_row_soc_telemetry_distinguishes_system_soc_from_battery_pct():
     assert stats["last_fit_caller"] == "fit_drain_model"
     assert win["battery_pct_fallbacks"] > 0, win
     assert win["system_soc_hits"] == 0, win
+
+
+def test_calibrated_discharge_can_cross_one_band_into_an_overlapping_band():
+    hour = {'solar_w': 0, 'load_w': 1000, 'load_without_baseline_w': 500,
+            'drain_baseline_prior_w': 500, 'duration_h': 1}
+    bands = [
+        {'min_soc': 40, 'max_soc': 60, 'baseline_w': 400},
+        {'min_soc': 30, 'max_soc': 50, 'baseline_w': 200},
+    ]
+    # At 41%, the first band's end would be outside its evidence range.
+    assert forecaster._calibrated_load(hour, 41, 30240, bands) == 700
+    # No interpolation/extrapolation outside every band's validated range.
+    assert forecaster._calibrated_load(hour, 30, 30240, bands) == 1000
+
+
+def test_intraday_solar_adjustment_never_changes_tomorrows_forecast(monkeypatch):
+    now = 1_790_000_000 // 86400 * 86400 + 12 * 3600
+    history = [{'ts': now - 48 * 3600, 'solar_w': 1000, 'output_w': 100, 'battery_pct': 40},
+               {'ts': now - 3600, 'solar_w': 1000, 'output_w': 100, 'battery_pct': 40}]
+    weather = [{'ts': now + 3600, 'ghi_w_m2': 100, 'cloud_cover_pct': 0},
+               {'ts': now + 25 * 3600, 'ghi_w_m2': 100, 'cloud_cover_pct': 0}]
+    monkeypatch.setattr(forecaster, 'fit_solar_coefficient', lambda *a: (4, 10))
+    monkeypatch.setattr(forecaster, 'fit_diurnal_shape', lambda *a, **kw: {})
+    monkeypatch.setattr(forecaster, 'fit_intraday_solar_scale', lambda *a, **kw: {'scale': 1.2})
+    result = forecaster.build_forecast(history, weather, 40, 30240, now_ts=now)
+    assert result['forecast'][0]['solar_w'] == 480
+    assert result['forecast'][1]['solar_w'] == 400
