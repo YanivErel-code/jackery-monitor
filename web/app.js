@@ -5789,6 +5789,12 @@ async function fetchForecast() {
 // (start→end SOC + solar kWh), with color + ⚠ marker when SOC
 // bottoms at 0. Pure transform of /api/forecast.
 // ============================================================
+function forecastIntervalHours(hour) {
+  if (hour?.duration_h == null) return 1; // Older API snapshots contain full hours.
+  const duration = Number(hour.duration_h);
+  return Number.isFinite(duration) ? Math.max(0, Math.min(1, duration)) : 0;
+}
+
 function renderForecastDayStrip(j) {
   const strip = $('forecast-day-strip');
   if (!strip) return;
@@ -5804,7 +5810,9 @@ function renderForecastDayStrip(j) {
   let currentKey = null;
   let current = null;
   for (const h of fc) {
-    const d = new Date(h.ts * 1000);
+    // Forecast timestamps are interval ENDS. Midnight closes the previous
+    // local day; its SOC and energy must not move into tomorrow's tile.
+    const d = new Date((h.ts - 1) * 1000);
     const key = d.toDateString(); // "Wed May 06 2026"
     if (key !== currentKey) {
       if (current) days.push(current);
@@ -5820,7 +5828,7 @@ function renderForecastDayStrip(j) {
       };
     }
     current.hours.push(h);
-    current.solarWh += Number(h.solar_w ?? 0);
+    current.solarWh += Number(h.solar_w ?? 0) * forecastIntervalHours(h);
     if (h.predicted_soc != null) {
       const s = Number(h.predicted_soc);
       if (s < current.minSoc) current.minSoc = s;
@@ -5875,7 +5883,7 @@ function renderForecastDayStrip(j) {
   // as `today_actual_solar_wh` on the response) so the "Today" label
   // reflects the FULL day's total, not just the remaining hours. Other
   // tiles stay forecast-only.
-  if (days.length > 0) {
+  if (days.length > 0 && days[0].key === new Date().toDateString()) {
     const todayActualWh = Number(j?.today_actual_solar_wh ?? 0);
     if (todayActualWh > 0) days[0].solarWh += todayActualWh;
   }
@@ -6012,15 +6020,18 @@ function renderTodayEnergyBudget(j) {
   let solarWh = 0;
   let loadWh = 0;
   let storedWh = 0;
+  let durationHours = 0;
   const rows = window.map((h, idx) => {
     const solar = Number(h.solar_w ?? 0);
     const load = Number(h.load_w ?? 0);
     const net = solar - load;
     const effNet = net > 0 ? net * eff : net;
-    solarWh += solar;
-    loadWh += load;
-    storedWh += effNet;
-    const dpp = effNet / cap * 100;
+    const duration = forecastIntervalHours(h);
+    durationHours += duration;
+    solarWh += solar * duration;
+    loadWh += load * duration;
+    storedWh += effNet * duration;
+    const dpp = effNet * duration / cap * 100;
     return {
       h: new Date(h.ts * 1000).toLocaleTimeString([], {hour: 'numeric'}),
       solar: Math.round(solar),
@@ -6050,9 +6061,9 @@ function renderTodayEnergyBudget(j) {
   };
   setText('tb-eff', eff.toFixed(2));
   setText('tb-solar-kwh', fmt1(solarWh / 1000));
-  setText('tb-solar-sub', `${rows.length} h, peak ${Math.round(Math.max(...rows.map(r => r.solar)))} W`);
+  setText('tb-solar-sub', `${fmt1(durationHours)} h remaining, peak ${Math.round(Math.max(...rows.map(r => r.solar)))} W`);
   setText('tb-load-kwh', fmt1(loadWh / 1000));
-  setText('tb-load-sub', `avg ${Math.round(loadWh / rows.length)} W`);
+  setText('tb-load-sub', `avg ${durationHours > 0 ? Math.round(loadWh / durationHours) : 0} W`);
   setText('tb-net-kwh', fmt1(storedWh / 1000));
   setText('tb-net-sub',
     `${(socEnd - socStart >= 0 ? '+' : '')}${(socEnd - socStart).toFixed(1)} pp `
