@@ -17,6 +17,8 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 _workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dashboard-read")
+# Small day-only reads cannot queue behind annual history scans.
+today_read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dashboard-today")
 
 
 class DashboardCache:

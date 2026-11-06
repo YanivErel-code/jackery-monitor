@@ -62,7 +62,7 @@ import solar_charge
 import weather_client
 from automation import AutomationEngine, AutomationError
 from cloud_client import PACK_CACHE_TTL_S
-from dashboard_cache import DashboardCache
+from dashboard_cache import DashboardCache, today_read_executor
 from device_client import (
     DeviceClient,
     DeviceClientError,
@@ -148,6 +148,7 @@ class AppState:
         self.device: DeviceInfo | None = None
         self.energy = EnergyDB()
         self.dashboard_cache = DashboardCache()
+        self.today_dashboard_cache = DashboardCache(ttl_s=10, executor=today_read_executor)
         self.last_status: dict[str, Any] | None = None
         self.last_update_ts: float | None = None
         self.history: deque[dict[str, Any]] = deque(maxlen=HISTORY_LIMIT)
@@ -776,6 +777,7 @@ def _sync_measurement_quality(now: float) -> None:
             device_sn, start, end, reason="Confirmed frozen cloud measurements")
         if result["archived_rows"]:
             state.dashboard_cache.clear()
+            state.today_dashboard_cache.clear()
             state.view_history_cache.clear()
             _param_fit_cache.pop((device_sn, "_history"), None)
             _charge_rate_cache.pop((state.account_generation, device_sn), None)
@@ -951,7 +953,8 @@ def _in_progress_savings_row() -> dict | None:
     }
 
 
-def _decorate_totals_with_savings(totals: dict, device_sn: str, *, energy_store=None) -> dict:
+def _decorate_totals_with_savings(totals: dict, device_sn: str, *, energy_store=None,
+                                 today_only=False) -> dict:
     """Add today_savings + lifetime_savings + cost_plan to a totals dict.
 
     The yearly SQL scan is expensive. Dashboard callers share a short
@@ -965,22 +968,37 @@ def _decorate_totals_with_savings(totals: dict, device_sn: str, *, energy_store=
         today_since = _start_of_day(int(time.time()))
         today_hist = [r for r in db.history(device_sn, hours=24, bucket_s=3600)
                       if (r.get("ts") or 0) >= today_since]
-        life_hist = db.history(device_sn, hours=24 * 365, bucket_s=3600)
+        life_hist = [] if today_only else db.history(device_sn, hours=24 * 365, bucket_s=3600)
         # Tack on the in-progress sliver — covers grid/output activity
         # since the last DB record() call when this aggregate is built.
         # Dashboard totals refresh at most every 30s; live SOC/power
         # updates remain independent of this historical-cost cache.
-        in_progress = _in_progress_savings_row()
+        in_progress = (_in_progress_savings_row()
+                       if state.device and state.device.device_sn == device_sn else None)
         if in_progress:
             today_hist.append(in_progress)
-            life_hist.append(in_progress)
+            if not today_only:
+                life_hist.append(in_progress)
         totals["today_savings"] = cost_module.today_savings(today_hist, plan, tz_offset)
-        totals["lifetime_savings"] = cost_module.lifetime_savings(life_hist, plan, tz_offset)
+        if not today_only:
+            totals["lifetime_savings"] = cost_module.lifetime_savings(life_hist, plan, tz_offset)
         totals["cost_plan"] = {"type": plan["type"],
                                "currency": plan.get("currency", "USD")}
     except Exception as e:
         log.debug("cost decoration failed: %s", e)
     return totals
+
+
+def _cached_today_totals(device_sn: str, *, wait=False,
+                         account_generation: int | None = None) -> dict | None:
+    generation = state.account_generation if account_generation is None else account_generation
+    key = ("today", generation, device_sn, energy_db._start_of_day(int(time.time())))
+    reader = state.energy.readonly_reader()
+    decorate = _decorate_totals_with_savings
+    return state.today_dashboard_cache.get(
+        key, lambda: decorate(reader.today_totals(device_sn), device_sn,
+                              energy_store=reader, today_only=True), wait=wait,
+    )
 
 
 def _cached_energy_totals(device_sn: str, *, wait=False,
@@ -1309,7 +1327,10 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     energy = None
     try:
         if view_sn and not is_home:
+            today = _cached_today_totals(view_sn, account_generation=generation)
             energy = _cached_energy_totals(view_sn, account_generation=generation)
+            if today is not None:
+                energy = {**(energy or {}), **today}
     except Exception as e:
         log.debug("energy totals lookup failed: %s", e)
 
@@ -3730,6 +3751,14 @@ def api_devices():
     }
 
 
+@app.get("/api/energy/today")
+def api_energy_today(device_sn: str | None = None):
+    """Today card only: bounded reads independent of lifetime calculations."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    return _cached_today_totals(device_sn, wait=True) if device_sn else {"device_sn": None}
+
+
 @app.get("/api/energy/totals")
 def api_energy_totals(device_sn: str | None = None):
     """Lifetime + today + 7d + 30d totals + dollar savings.
@@ -3758,6 +3787,7 @@ async def api_cost_set(req: Request):
     if saved is None:
         raise HTTPException(status_code=400, detail="invalid plan shape")
     state.dashboard_cache.clear()
+    state.today_dashboard_cache.clear()
     return {"plan": saved}
 
 
@@ -5077,6 +5107,7 @@ async def api_location_set(req: Request):
     # Bust the weather cache so the next forecast pulls for the new coords.
     weather_client.clear_cache()
     state.dashboard_cache.clear()
+    state.today_dashboard_cache.clear()
     return record
 
 
@@ -5133,6 +5164,7 @@ async def api_set_credentials(body: dict):
     state.last_status = None
     state.account_generation += 1
     state.dashboard_cache.clear()
+    state.today_dashboard_cache.clear()
     state.last_cloud_meta = {"api_family": api_family, "read_only": api_family == "home"}
     state.reset_live_history()
     # Kick a fresh connect so connection state updates fast
@@ -5157,6 +5189,7 @@ async def api_clear_credentials():
     state.last_status = None
     state.account_generation += 1
     state.dashboard_cache.clear()
+    state.today_dashboard_cache.clear()
     state.last_cloud_meta = None
     state.reset_live_history()
     state.last_update_ts = None

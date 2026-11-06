@@ -8,7 +8,7 @@ const vm = require('node:vm');
 const web = path.join(__dirname, '../web');
 const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
 
-async function bootHtml(source, { failHelper = false } = {}) {
+async function bootHtml(source, { failHelper = false, todayEnergy = null } = {}) {
   const elements = new Map();
   const queued = [];
   const intervals = [];
@@ -70,7 +70,8 @@ async function bootHtml(source, { failHelper = false } = {}) {
       fetches.push(url);
       const body = url === '/api/auth/status' ? { has_credentials: true, api_family: 'portable' }
         : url === '/api/location' ? { latitude: 1, longitude: 1 }
-          : url.startsWith('/api/forecast') ? { configured: false } : {};
+          : url.startsWith('/api/energy/today') ? (todayEnergy || {})
+            : url.startsWith('/api/forecast') ? { configured: false } : {};
       return { ok: true, json: async () => body };
     },
   });
@@ -96,7 +97,8 @@ async function bootHtml(source, { failHelper = false } = {}) {
   assert.equal(elements.get('battery-pct').textContent, '53');
   assert.equal(elements.get('conn-text').textContent, 'connected');
   assert.equal(elements.get('dev-sn').textContent, 'QA');
-  assert.equal(elements.get('today-out-kwh').textContent, '—');
+  assert.equal(elements.get('today-out-kwh').textContent, todayEnergy ? '1.25' : '—');
+  if (todayEnergy) assert.ok(fetches.some(url => url.startsWith('/api/energy/today')));
   assert.deepEqual(errors, []);
   return { fetches, sockets };
 }
@@ -113,4 +115,11 @@ test('complete current HTML boots with its compatibility helper', async () => {
 
 test('complete current HTML keeps monitoring when the helper fails to load', async () => {
   await bootHtml(html, { failHelper: true });
+});
+
+
+test('cold Today card paints from its fast endpoint before another status tick', async () => {
+  await bootHtml(html, { todayEnergy: { device_sn: 'QA', today: {
+    output_wh: 1250, input_wh: 2000, solar_wh: 1500, ac_input_wh: 500,
+  } } });
 });

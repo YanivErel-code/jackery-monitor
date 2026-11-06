@@ -133,10 +133,11 @@ function pageHarness() {
   const context = vm.createContext({
     Date, console: { warn() {}, debug() {} }, document: { visibilityState: 'visible' },
     activeTab: 'live', currentSn: null, home: false, lastStatus: null,
-    _pendingViewSwitch: null, _forecastGeneration: 0, energyRangeHours: 6,
+    _pendingViewSwitch: null, _forecastGeneration: 0, _todayEnergyGeneration: 0, energyRangeHours: 6,
     _eodLastFetchAt: 0, energyHistoryCache: null, elements,
     $: element, show: (el, on) => { if (el) el.hidden = !on; },
     drawEnergyChart: value => { context.chart = value; },
+    renderTodayEnergy: value => { context.todayPaint = value; },
   });
   context.activeJackeryDevice = () => context.currentSn ? { device_sn: context.currentSn } : null;
   context.isHomeMonitoring = () => context.home;
@@ -145,7 +146,7 @@ function pageHarness() {
   context._forecastReads = createKeyedLoader({ load, ttlMs: 30_000 });
   for (const name of ['isTabVisible', 'isCurrentDeviceRequest', 'fetchEnergyHistory',
     'fetchEnergyAllDevices', 'fetchForecast', 'fetchEodForecast', 'fetchBatteryPacks',
-    'clearEnergyKpis', 'applyStatus', 'connectWs', 'invalidateForecastRequests']) {
+    'clearEnergyKpis', 'fetchTodayEnergy', 'applyStatus', 'connectWs', 'invalidateForecastRequests']) {
     const start = appSource.search(new RegExp(`^(?:async )?function ${name}\\(`, 'm'));
     assert.notEqual(start, -1, `page function ${name} exists`);
     const end = appSource.indexOf('\n}', start) + 2;
@@ -298,4 +299,20 @@ test('page boot opens WS and installs recovery while bridge auth is still pendin
   assert.equal(calls[0], 'ws');
   assert.ok(calls.includes('interval'));
   assert.ok(intervals.some(({ callback, delay }) => callback === context.refreshSmartChargeRate && delay === 60000));
+});
+
+
+test('fast Today response cannot repaint after leaving and returning to a device', async () => {
+  const { context, requests } = pageHarness();
+  context.currentSn = 'A';
+  const pending = context.fetchTodayEnergy();
+  await Promise.resolve();
+  assert.equal(requests.length, 1);
+  context.clearEnergyKpis();
+  context.currentSn = 'B';
+  context.clearEnergyKpis();
+  context.currentSn = 'A';
+  requests[0].resolve({ device_sn: 'A', today: { output_wh: 999 } });
+  await pending;
+  assert.equal(context.todayPaint, undefined);
 });
