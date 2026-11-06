@@ -213,7 +213,16 @@ def fit_system_residual(
     now_ts: float,
     utc_offset_seconds: int = 0,
 ) -> SystemDrainFit | None:
-    """Learn the combined baseline, not separate main/pack physical losses."""
+    """Learn the combined baseline, not separate main/pack physical losses.
+
+    Twenty-point bands overlap by ten SOC points: a clean four-hour run
+    crossing 40% or 60% remains usable without widening the learned range.
+    Keep the five most recent independent nights, rather than mixing ten
+    nights across a changing operating regime. Evidence expires after seven
+    days; every receipt, pack-configuration, consistency and support-range
+    check still applies. An upper-quartile estimate plus endpoint uncertainty
+    remains conservative, and a high-drain outlier invalidates every band.
+    """
     timed_rows = [row for row in history if _finite(row.get("ts")) and row["ts"] <= now_ts]
     annotations: list[DischargeInterval] = []
     for row in sorted(timed_rows, key=lambda row: row["ts"]):
@@ -257,39 +266,38 @@ def fit_system_residual(
             current.append(interval)
     if current:
         runs.append(current)
+    observations: list[tuple[float, int, float, float, int]] = []
+    for run in runs:
+        for position in range(len(run) - 3):
+            window = run[position : position + 4]
+            dropped_wh = (window[0]["start_soc"] - window[-1]["end_soc"]) * capacity_wh / 100
+            output_wh = sum(interval["output_wh"] for interval in window)
+            baseline = (dropped_wh - output_wh * (1 + overhead_pct)) / 4
+            if dropped_wh < output_wh - capacity_wh * 0.01 or not -75 <= baseline <= 1000:
+                continue
+            observations.append((
+                baseline,
+                window[-1]["end_ts"],
+                min(min(interval["start_soc"], interval["end_soc"]) for interval in window),
+                max(max(interval["start_soc"], interval["end_soc"]) for interval in window),
+                (window[-1]["end_ts"] + utc_offset_seconds - 12 * 3600) // 86400,
+            ))
     bands: list[SocDrainBand] = []
     for minimum, maximum, required_days in (
         (20, 40, 3),
+        (30, 50, 3),
         (40, 60, 3),
+        (50, 70, 3),
         (60, 80, 3),
+        (70, 90, 3),
         (80, 95, 3),
         (40, 95, 5),
     ):
         by_day: dict[int, list[tuple[float, int, float, float]]] = defaultdict(list)
-        for run in runs:
-            for position in range(len(run) - 3):
-                window = run[position : position + 4]
-                if any(
-                    not minimum <= interval["start_soc"] <= maximum
-                    or not minimum <= interval["end_soc"] <= maximum
-                    for interval in window
-                ):
-                    continue
-                dropped_wh = (window[0]["start_soc"] - window[-1]["end_soc"]) * capacity_wh / 100
-                output_wh = sum(interval["output_wh"] for interval in window)
-                baseline = (dropped_wh - output_wh * (1 + overhead_pct)) / 4
-                if dropped_wh < output_wh - capacity_wh * 0.01 or not -75 <= baseline <= 1000:
-                    continue
-                day = (window[-1]["end_ts"] + utc_offset_seconds - 12 * 3600) // 86400
-                by_day[day].append(
-                    (
-                        baseline,
-                        window[-1]["end_ts"],
-                        min(min(interval["start_soc"], interval["end_soc"]) for interval in window),
-                        max(max(interval["start_soc"], interval["end_soc"]) for interval in window),
-                    )
-                )
-        nights = sorted(by_day.items())[-10:]
+        for baseline, end_ts, lower_soc, upper_soc, day in observations:
+            if minimum <= lower_soc <= upper_soc <= maximum:
+                by_day[day].append((baseline, end_ts, lower_soc, upper_soc))
+        nights = sorted(by_day.items())[-5:]
         evidence = [
             (
                 statistics.median(value[0] for value in observations),
@@ -301,7 +309,7 @@ def fit_system_residual(
         ]
         if (
             len(evidence) < required_days
-            or now_ts - max(value[1] for value in evidence) > 2 * 86400
+            or now_ts - max(value[1] for value in evidence) > 7 * 86400
         ):
             continue
         baselines = sorted(value[0] for value in evidence)
@@ -312,7 +320,18 @@ def fit_system_residual(
         uncertainty_w = capacity_wh * 0.005 / 4
         if upper - lower > consistency_limit:
             continue
-        if required_days == 5 and max(baselines) - upper > consistency_limit + uncertainty_w:
+        if max(baselines) - upper > consistency_limit + uncertainty_w:
+            continue
+        # New overlapping bands must also check crossing windows whose
+        # midpoint is in the band. Otherwise faster discharge can remove
+        # its own high-drain evidence by crossing an eligibility boundary.
+        oldest_night = nights[0][0]
+        if minimum in (30, 50, 70) and any(
+            day >= oldest_night
+            and baseline > upper + consistency_limit + uncertainty_w
+            and minimum <= (lower_soc + upper_soc) / 2 <= maximum
+            for baseline, _, lower_soc, upper_soc, day in observations
+        ):
             continue
         band: SocDrainBand = {
             "min_soc": min(value[2] for value in evidence) if required_days == 5 else minimum,
@@ -339,7 +358,7 @@ def fit_system_residual(
                 else:
                     coverage.append((start_soc, end_soc, newest))
             for start_soc, end_soc, newest in coverage:
-                if now_ts - newest <= 2 * 86400:
+                if now_ts - newest <= 7 * 86400:
                     bands.append(
                         {**band, "min_soc": start_soc, "max_soc": end_soc, "newest_run_ts": newest}
                     )

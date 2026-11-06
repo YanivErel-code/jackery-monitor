@@ -127,8 +127,10 @@ def test_inconsistent_night_residuals_do_not_relax_fallback():
     assert fitted(rows) is None
 
 
-def crossing_history(days=5):
-    rows = clean_history(days=days)
+def crossing_history(days=5, load=1500):
+    # Four hours span >20 SOC points: local overlapping bands cannot fit
+    # this evidence, so these fixtures still exercise the wider pooled fit.
+    rows = clean_history(days=days, load=load)
     for index, row in enumerate(rows):
         hour = index % 8
         row["calibration"]["start_soc"] += 20
@@ -144,7 +146,7 @@ def test_pooled_discharge_does_not_lose_evidence_at_arbitrary_soc_bin_edges():
     pooled = next(band for band in result["soc_bands"] if band.get("source") == "pooled_discharge")
     assert pooled["n_days"] == 5
     assert pooled["baseline_w"] == pytest.approx(177.8)
-    assert pooled["min_soc"] > 70
+    assert pooled["min_soc"] > 60
     assert pooled["max_soc"] == 85
 
 
@@ -155,8 +157,8 @@ def test_pooled_discharge_requires_five_independent_nights():
 def test_pooled_discharge_cannot_hide_a_recent_higher_drain_regime():
     rows = crossing_history(days=10)
     for hour, row in enumerate(rows[-8:]):
-        row["calibration"]["start_soc"] = 85 - hour * 1150 / CAPACITY * 100
-        row["calibration"]["end_soc"] = 85 - (hour + 1) * 1150 / CAPACITY * 100
+        row["calibration"]["start_soc"] = 85 - hour * 2400 / CAPACITY * 100
+        row["calibration"]["end_soc"] = 85 - (hour + 1) * 2400 / CAPACITY * 100
     assert fitted(rows, now=BASE + 10 * 86400) is None
 
 
@@ -177,7 +179,7 @@ def test_pooled_discharge_keeps_low_soc_and_bad_intervals_out():
 
 
 def test_pooled_discharge_cannot_fill_unobserved_gaps_between_soc_ranges():
-    rows = crossing_history(days=10)
+    rows = crossing_history(days=10, load=500)
     for row in rows[5 * 8 :]:
         row["calibration"]["start_soc"] -= 30
         row["calibration"]["end_soc"] -= 30
@@ -254,3 +256,29 @@ def test_interval_rejects_soc_recalibration_even_with_recent_receipts():
     ]
     packs = [(*row[:2], row[2] - (9 if row[0] >= BASE + 1830 else 0), *row[3:]) for row in packs]
     assert intervals(samples, packs)[BASE]["quality"] == "soc_jump"
+
+
+def test_clean_runs_crossing_40_percent_calibrate_only_the_overlapping_range():
+    rows = clean_history(days=3)
+    for index, row in enumerate(rows):
+        a = row['calibration']
+        a['start_soc'] -= 20
+        a['end_soc'] -= 20
+        if index % 8 >= 4:
+            a['quality'] = 'charging'
+    result = fitted(rows)
+    assert result is not None
+    band = next(b for b in result['soc_bands'] if (b['min_soc'], b['max_soc']) == (30, 50))
+    assert band['n_days'] == 3
+    assert band['baseline_w'] == pytest.approx(177.8)
+    assert all(b['min_soc'] >= 20 for b in result['soc_bands'])
+    assert fitted(rows[:16]) is None  # Two nights are still insufficient.
+
+
+def test_calibration_uses_recent_independent_nights_and_expires_after_a_week():
+    rows = clean_history(days=10)
+    result = fitted(rows, now=BASE + 10 * 86400)
+    assert result is not None
+    assert result['n_days'] == 5
+    assert fitted(rows, now=BASE + 14 * 86400) is not None
+    assert fitted(rows, now=BASE + 17 * 86400) is None
