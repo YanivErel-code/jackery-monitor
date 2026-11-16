@@ -258,6 +258,15 @@ def test_interval_rejects_soc_recalibration_even_with_recent_receipts():
     assert intervals(samples, packs)[BASE]["quality"] == "soc_jump"
 
 
+def test_low_soc_evidence_remains_excluded_from_empirical_drain_learning():
+    samples, packs = telemetry_fixture()
+    # Preserve the same metered discharge and fresh receipts, but move SOC
+    # into the unreliable low-reserve region of the Nov 15 discrepancy.
+    samples = [(*row[:4], row[4] - 48, *row[5:]) for row in samples]
+    packs = [(*row[:2], row[2] - 48, *row[3:]) for row in packs]
+    assert intervals(samples, packs)[BASE]["quality"] == "soc_range"
+
+
 def test_clean_runs_crossing_40_percent_calibrate_only_the_overlapping_range():
     rows = clean_history(days=3)
     for index, row in enumerate(rows):

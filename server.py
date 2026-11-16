@@ -48,6 +48,7 @@ import backup_discover
 import charge_rate
 import cost as cost_module
 import energy_db
+import forecast_guard
 import forecaster
 import inverter_watchdog
 import kasa_client
@@ -1990,6 +1991,7 @@ def _smart_charge_inputs(device_sn: str, now: float) -> tuple[dict, str | None]:
         "main_soc_source_ts": receipt(main_received),
         "main_soc_source": source(telemetry.get("soc_source")),
         "pack_count": len(packs), "pack_soc_pct": [soc(p.get("rb")) for p in packs],
+        "pack_sns": [str(p.get("deviceSn") or "") for p in packs],
         "pack_source_ts": receipt(pack_received),
         "pack_source": source(pack_meta.get("source")),
         "capacity_wh": None, "system_soc_pct": None,
@@ -2024,14 +2026,14 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w",
                      "output_w", "ac_battery_charge_w", "ac_wall_input_w", "ac_bypass_active",
                      "load_without_baseline_w", "drain_baseline_prior_w",
-                     "drain_baseline_applied_w")
+                     "drain_baseline_applied_w", "load_nowcast_applied", "nowcast_split")
     model_keys = ("solar_coefficient", "fit_samples", "diurnal_shape", "solar_intraday_calibration",
                   "charge_efficiency",
                   "ac_input_excludes_load", "ac_supply_limit_w",
                   "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
                   "solar_cap_w", "charge_ceiling_pct", "readiness", "drain_calibration",
-                  "pack_baseline_applied_w")
+                  "pack_baseline_applied_w", "load_nowcast")
     return {
         "version": 1, **inputs,
         "config": {k: cfg.get(k) for k in ("mode", "kasa_device_host", "target_sunrise_soc_pct", "reserve_soc_pct",
@@ -2184,7 +2186,19 @@ async def _smart_charge_evaluate(record: bool = True,
     tz_off = int(weather.get("utc_offset_seconds") or device_location.get_tz_offset() or 0)
     inputs["tz_offset_seconds"] = tz_off
     car_load_w = _car_load_w(device_sn)
+    lg_context = lg_thinq.planning_context(cfg, now_ts=now)
+    try:
+        evidence = state.energy.planning_evidence(device_sn, now_ts=now)
+    except Exception as error:
+        log.warning("smart_charge recent planning evidence unavailable: %s", error)
+        evidence = {"power": [], "previous_inputs": None}
+    nowcast_inputs = {
+        "recent_power": evidence["power"],
+        "load_hold_until_ts": (lg_context or {}).get("charge_not_before_ts"),
+        "appliance_active": bool((lg_context or {}).get("blocked_now")),
+    }
     fcast = forecaster.build_forecast(
+        **nowcast_inputs,
         **_ac_metering_settings(device_sn),
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
@@ -2201,6 +2215,7 @@ async def _smart_charge_evaluate(record: bool = True,
     # needed; with the floor on, predicted_sunrise_soc is at the target
     # by construction and the deficit math collapses to zero.
     baseline_fcast = forecaster.build_forecast(
+        **nowcast_inputs,
         **_ac_metering_settings(device_sn),
         energy_history=energy_hist,
         weather_hourly=weather["hourly"],
@@ -2247,11 +2262,16 @@ async def _smart_charge_evaluate(record: bool = True,
         return smart_charge.Plan(action="skip", reason="charging duration history unavailable",
                                  mode=cfg["mode"], decided_at=int(now), plan_feasible=False,
                                  warnings=["Charging duration history unavailable; no control command sent"])
-    lg_context = lg_thinq.planning_context(cfg, now_ts=now)
     if lg_context and lg_context["expected_finish_ts"]:
         lg_context["soc_at_finish_pct"] = lg_thinq.soc_at_finish(
             baseline_fcast, starting_soc, now_ts=now,
             finish_ts=lg_context["expected_finish_ts"])
+        lg_context["soc_at_finish_basis"] = (
+            "recent_metered_load_with_allowance" if baseline_fcast.get("load_nowcast")
+            else "historical_load_only")
+        if (baseline_fcast.get("load_nowcast")
+                and baseline_fcast["load_nowcast"]["until_ts"] < lg_context["expected_finish_ts"]):
+            lg_context["soc_at_finish_basis"] = "partial_recent_load_then_historical"
     plan = smart_charge.compute_plan(
         config=cfg, current_soc_pct=starting_soc,
         forecast=fcast, baseline_forecast=baseline_fcast,
@@ -2268,6 +2288,41 @@ async def _smart_charge_evaluate(record: bool = True,
         plan.action = "skip"
         plan.reason = "awaiting a complete, validated SOC trajectory"
     plan.lg_protection = lg_context
+    plan.load_nowcast = baseline_fcast.get("load_nowcast")
+    plan.energy_reconciliation = forecast_guard.reconcile_energy(
+        evidence["previous_inputs"], inputs, evidence["power"],
+        baseline_w=float(baseline_fcast.get("effective_parasitic_w") or 0),
+        overhead_pct=float(baseline_fcast.get("inverter_overhead_pct") or 0),
+    )
+    inputs["energy_reconciliation"] = plan.energy_reconciliation
+    warnings = list(plan.warnings or [])
+    reserve = cfg["reserve_soc_pct"]
+    blocked = bool((lg_context or {}).get("blocked_now"))
+    finish_soc = (lg_context or {}).get("soc_at_finish_pct")
+    at_risk = (starting_soc <= reserve
+               or (finish_soc is not None and finish_soc <= reserve)
+               or (plan.scheduled_min_soc_pct is not None and plan.scheduled_min_soc_pct < reserve))
+    if blocked and at_risk:
+        warnings.append("Reserve at risk while LG holds charging OFF: pause/defer the appliance "
+                        "or reduce other loads. Charging waits for LG to confirm OFF; "
+                        "the finish estimate is provisional.")
+    elif starting_soc <= reserve:
+        warnings.append("Battery is at or below reserve: reduce/defer large loads while charging recovers.")
+    if blocked and not plan.load_nowcast:
+        warnings.append("Recent load telemetry is unavailable; the appliance-finish SOC uses "
+                        "historical demand and may be optimistic. Reduce/defer loads near reserve.")
+    elif blocked and finish_soc is not None and lg_context.get("soc_at_finish_basis") == "partial_recent_load_then_historical":
+        warnings.append("Appliance finish exceeds the two-hour measured-load projection; later demand "
+                        "uses historical load. Recheck reserve and defer large loads if the cycle continues.")
+    if (baseline_fcast.get("solar_intraday_calibration") or {}).get("reason") == "severe_site_shortfall":
+        warnings.append("On-site solar is far below the weather-based model. Today's remaining solar "
+                        "is reduced temporarily; check panel connections/shading and defer large loads near reserve.")
+    if plan.energy_reconciliation["status"] == "discrepancy":
+        residual = plan.energy_reconciliation["unexplained_wh"] / 1000
+        warnings.append(f"SOC/power accounting is unresolved ({residual:+.2f} kWh beyond the modeled "
+                        "energy balance). SOC and metering are not independently confirmed; "
+                        "no physical loss parameter is learned from this diagnostic.")
+    plan.warnings = list(dict.fromkeys(warnings))
     if reason := lg_thinq.block_reason(cfg):
         plan.action = "off"
         plan.reason = reason
@@ -3927,6 +3982,12 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
                 "error_detail": str(weather["error"]),
                 "configured": True}
 
+    now = time.time()
+    cfg = smart_charge.get_config(device_sn)
+    lg_context = lg_thinq.planning_context(cfg, now_ts=now)
+    evidence = await asyncio.to_thread(reader.planning_evidence, device_sn, now_ts=now)
+    if not current_account():
+        return account_changed
     result = await asyncio.to_thread(
         forecaster.build_forecast,
         **_ac_metering_settings(device_sn),
@@ -3937,6 +3998,10 @@ async def _build_and_record_forecast(device_sn: str | None) -> dict:
         ac_charge_floor_pct=_smart_charge_floor_pct(device_sn),
         car_load_w=_car_load_w(device_sn),
         pack_count=_pack_count_for(device_sn),
+        now_ts=now,
+        recent_power=evidence["power"],
+        load_hold_until_ts=(lg_context or {}).get("charge_not_before_ts"),
+        appliance_active=bool((lg_context or {}).get("blocked_now")),
         utc_offset_seconds=int(weather.get("utc_offset_seconds")
                                or device_location.get_tz_offset() or 0),
     )

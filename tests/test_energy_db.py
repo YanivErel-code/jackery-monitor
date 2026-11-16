@@ -14,6 +14,28 @@ def db(tmp_path):
     return EnergyDB(str(tmp_path / "energy.db"))
 
 
+def test_planning_evidence_is_device_scoped_complete_and_causal(db, monkeypatch):
+    now = 1_790_000_000 // 60 * 60 + 20
+    # Snapshot retention must use the replay clock, not the machine's date.
+    monkeypatch.setattr(time, "time", lambda: now)
+    end = now // 60 * 60
+    with db._conn() as connection:
+        connection.executemany(
+            "INSERT INTO samples(device_sn,bucket,output_wh,last_source_ts,sample_count) "
+            "VALUES(?,?,?,?,30)",
+            [("MAIN", end - 60, 50, end - 10), ("MAIN", end, 20, now),
+             ("OTHER", end - 60, 99, end - 10), ("MAIN", end + 60, 99, end + 70)],
+        )
+    for serial, at in [("MAIN", now - 1200), ("MAIN", now - 180), ("OTHER", now - 1201)]:
+        db.record_smart_charge_decision(serial, {
+            "decided_at": at, "mode": "test", "action": "off"}, False,
+            input_snapshot={"captured_at": at, "device": serial})
+    evidence = db.planning_evidence("MAIN", now_ts=now)
+    assert len(evidence["power"]) == 1
+    assert evidence["power"][0]["output_wh"] == 50
+    assert evidence["previous_inputs"] == {"captured_at": now - 1200, "device": "MAIN"}
+
+
 @pytest.mark.parametrize("main_capacity_wh,pack_capacity_wh", [(5040, 5040), (5040, 0), (None, None)])
 def test_hourly_history_opt_in_exposes_fresh_discharge_quality_without_future_rows(
     db, main_capacity_wh, pack_capacity_wh,

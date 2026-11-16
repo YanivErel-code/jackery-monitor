@@ -588,3 +588,36 @@ async def test_details_keep_tick_trace_when_hourly_forecast_is_overwritten(monit
     assert details["forecast_trace"][0]["predicted_soc"] == 30
     assert details["input_snapshot"]["capacity_wh"] == 30240
     assert details["weather"][0]["ghi_w_m2"] == 500
+
+
+async def test_active_appliance_passes_recent_metered_demand_to_both_forecasts(monitor, monkeypatch):
+    samples = [{"bucket": NOW // 60 * 60 - minute * 60,
+                "output_wh": 50, "solar_wh": 10, "ac_input_wh": 0,
+                "last_source_ts": NOW // 60 * 60 - minute * 60 + 50,
+                "sample_count": 30} for minute in range(1, 16)]
+    monkeypatch.setattr(monitor.state.energy, "planning_evidence", lambda *a, **kw: {
+        "power": samples, "previous_inputs": None}, raising=False)
+    monkeypatch.setattr(monitor.lg_thinq, "planning_context", lambda *a, **kw: {
+        "expected_finish_ts": NOW + 1440, "charge_not_before_ts": NOW + 1740,
+        "timing_uncertain": False, "blocked_now": True})
+    monkeypatch.setattr(monitor.lg_thinq, "block_reason", lambda cfg: "LG appliance is running")
+    await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert len(monitor.forecast_calls) == 2
+    for call in monitor.forecast_calls:
+        assert call.get("recent_power") == samples
+        assert call.get("load_hold_until_ts") == NOW + 1740
+        assert call.get("appliance_active") is True
+
+
+async def test_low_reserve_during_lg_hold_has_actionable_load_guidance(monitor, monkeypatch):
+    monitor.state.last_status["battery_percent"] = 6
+    for pack in monitor.state.battery_packs_by_sn["MAIN"]:
+        pack["rb"] = 6
+    monkeypatch.setattr(monitor.lg_thinq, "planning_context", lambda *a, **kw: {
+        "expected_finish_ts": NOW + 1440, "charge_not_before_ts": NOW + 1740,
+        "timing_uncertain": False, "blocked_now": True})
+    monkeypatch.setattr(monitor.lg_thinq, "block_reason", lambda cfg: "LG appliance is running")
+    plan = await monitor._smart_charge_evaluate(device_sn="MAIN")
+    assert plan.action == "off"
+    assert any("pause" in warning.lower() for warning in plan.warnings or [])
+    monitor.toggle.assert_awaited_once_with("test-plug", False)

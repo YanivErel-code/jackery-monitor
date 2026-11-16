@@ -19,6 +19,7 @@ Storage path is configurable via JACKERY_DB env var.
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import os
 import sqlite3
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from automation_tables import AutomationTablesMixin
+from forecast_guard import PlanningEvidence
 from forecast_tables import ForecastTablesMixin
 from measurement_quality import SCHEMA as QUALITY_SCHEMA
 from measurement_quality import MeasurementQualityMixin, overlaps
@@ -1551,6 +1553,27 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                 (int(time.time()), cutoff),
             )
             return cur.rowcount
+
+    def planning_evidence(self, device_sn: str, *, now_ts: float) -> PlanningEvidence:
+        """Bounded, device-scoped completed power minutes and a ~20-minute SOC anchor."""
+        end = int(now_ts // 60 * 60)
+        with self._conn() as connection:
+            power = connection.execute(
+                "SELECT bucket,output_wh,solar_wh,ac_input_wh,last_source_ts,sample_count "
+                "FROM samples WHERE device_sn=? AND bucket>=? AND bucket<? ORDER BY bucket",
+                (device_sn, end - 32 * 60, end),
+            ).fetchall()
+            previous = connection.execute(
+                "SELECT input_snapshot_json FROM smart_charge_decisions "
+                "WHERE device_sn=? AND decided_at BETWEEN ? AND ? "
+                "AND input_snapshot_json IS NOT NULL ORDER BY ABS(decided_at-?) LIMIT 1",
+                (device_sn, int(now_ts - 1800), int(now_ts - 900), int(now_ts - 1200)),
+            ).fetchone()
+        return {
+            "power": [dict(zip(("bucket", "output_wh", "solar_wh", "ac_input_wh",
+                                  "last_source_ts", "sample_count"), row, strict=True)) for row in power],
+            "previous_inputs": json.loads(previous[0]) if previous else None,
+        }
 
     def history(self, device_sn: str, hours: int = 24,
                 bucket_s: int = 600,

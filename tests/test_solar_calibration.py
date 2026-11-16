@@ -63,8 +63,9 @@ def test_correction_expires_and_inconsistent_weather_does_not_create_a_trend():
     assert fitted(history, weather)['scale'] == 1
 
 
-@pytest.mark.parametrize(('ratio', 'expected'), [(1.8, 1.2), (0.5, 0.8), (1, 1)])
+@pytest.mark.parametrize(('ratio', 'expected'), [(1.8, 1.2), (0.5, 0.6), (1, 1)])
 def test_correction_is_bounded_and_does_not_adjust_an_unbiased_model(ratio, expected):
+    # Repeated severe shortfalls now follow site yield plus a 0.1 allowance.
     history, weather = fixture(ratio)
     assert fitted(history, weather)['scale'] == expected
 
@@ -73,3 +74,23 @@ def test_duplicate_hour_cannot_supply_independent_evidence():
     history, weather = fixture()
     history.append(deepcopy(history[0]))
     assert fitted(history, weather)['reason'] == 'duplicate_history'
+
+
+def test_repeated_severe_site_shortfall_is_not_discarded_as_an_outlier():
+    history, weather = fixture(0.3)
+    result = fitted(history, weather)
+    assert result['scale'] == pytest.approx(0.4)
+    assert result['reason'] == 'severe_site_shortfall'
+    assert result['observed_ratio'] == pytest.approx(0.3)
+
+
+def test_recent_recovery_replaces_an_older_same_day_solar_shortfall():
+    history, weather = fixture(0.5)
+    for hour in (10, 11):
+        row = deepcopy(history[-1])
+        ts = DAY + hour * 3600
+        row.update(ts=ts, solar_wh=2000, soc_source_ts_min=ts + 30,
+                   soc_source_ts_max=ts + 3570)
+        history.append(row)
+        weather.append({'ts': ts + 3600, 'ghi_w_m2': 500})
+    assert fitted(history, weather, now=DAY + 12 * 3600)['scale'] == 1

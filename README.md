@@ -237,6 +237,40 @@ prior, even when a calibration exists elsewhere. Each interval also reports
 `drain_baseline_applied_w`, preserved in smart-charge input snapshots.
 Charging targets, power limits, and controller modes are not retuned by this.
 
+Short-horizon planning additionally uses complete, fresh meter minutes. The
+larger five/fifteen-minute average retains cycling appliance demand, with a
+20% planning allowance during an LG hold (10% otherwise). This temporarily
+raises the total household load; it does not add a guessed appliance wattage
+or retrain the historical load profile. It expires after 15 minutes normally,
+30 minutes for an untimed hold, or the provisional finish plus its existing
+five-minute margin, capped at two hours before re-observation. The forecast
+splits at expiry so charging later in the hour cannot hide an earlier trough.
+Smart-charge decisions and the Forecast tab use the same observation rules.
+
+Same-day solar adjustment uses the two latest consecutive qualified daylight
+hours. Ordinary misses retain the half-bias, +/-20% correction. If both hours
+deliver less than 60% of the irradiance-based model, use their energy-weighted
+yield ratio plus a 0.1 allowance, floored at 0.2. This exposes a site-shortfall
+warning and reduces only today's remaining solar. It neither changes the
+global solar coefficient nor applies another cloud-cover factor. New evidence
+of recovery replaces old shortfalls; stale evidence expires after two hours.
+High SOC, AC competition, missing receipts and incomplete hours remain excluded.
+
+Smart-charge plans also expose `energy_reconciliation`: a signed SOC-versus-
+metered-energy residual over a comparable 15–30 minute interval, normally
+20 minutes. Endpoints must have fresh main/pack receipts, unchanged source
+types and matching pack identities; complete power minutes and no AC charging
+are required. Allow one whole system SOC point plus a boundary minute of
+power before warning. This is an **unresolved measurement reconciliation**,
+not independent proof of battery capacity, losses, SOC accuracy or a source
+switch. It never adjusts measured SOC or fits a physical loss coefficient.
+Existing drain-learning gates continue to exclude SOC below 20%. Comparable
+new snapshots need at least 15 minutes to accumulate after upgrading; legacy
+snapshots without pack identities are reported as unavailable. Raw evidence,
+source/pack identities, recent-load assumptions and diagnostics are retained
+with each decision. Reserve-risk warnings give load-deferral guidance while
+preserving the LG interlock and all user charging settings.
+
 Validation on 2026-10-13 uses a read-only NAS extract and as-of-only local replay.
 On two uncharged holdout nights, the legacy replay matched the saved predictions:
 October 11 improved from 34.7% to 40.4% versus 41.33% actual; October 13 improved
@@ -490,9 +524,13 @@ failure. No appliance power draw or physical running state is inferred from its 
 For powered-on devices with observed countdown progress, smart charging excludes
 windows before the **latest selected appliance's estimated finish plus five
 minutes**, including eligible partial hours without starting before that bound. It also
-estimates SOC at that finish using the existing no-charging forecast and records
-the timing inputs with the decision. This is not extra appliance-wattage learning:
-LG power draw is not invented or double-counted on top of the household load.
+estimates SOC at that finish using the no-charging forecast with recent metered
+household demand and its planning allowance, and records the timing and load
+inputs with the decision. Missing recent power evidence is explicitly warned
+as a historical-load-only estimate. LG power draw is not invented or
+double-counted on top of the household load. A projected reserve breach gives
+guidance to pause/defer the appliance or reduce other loads; the controller
+does not bypass the interlock to recover reserve.
 Every powered-on compartment must have a valid, recently decreasing countdown.
 No finish is assumed on the first reading, after an increase/reset, a stale gap,
 or when progress has not been seen for 120 seconds. A phase change with an unchanged
@@ -667,6 +705,7 @@ jackery-monitor/
 ├── crypto_util.py            Shared AES-256-GCM helper
 │
 ├── forecaster.py             Solar regression + load profile + SOC simulation
+├── forecast_guard.py         Recent-load planning + bounded SOC/power reconciliation
 ├── weather_client.py         Open-Meteo client (free, keyless)
 ├── smart_charge.py           Per-device smart-charge planner + config
 ├── cost.py                   TOU electricity rate plans + savings math

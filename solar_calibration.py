@@ -22,8 +22,10 @@ def fit_intraday_solar_scale(
 
     Require two complete daylight hours with fresh SOC receipts, headroom,
     no AC competition and consistently biased observed/model energy. Apply
-    half the energy-weighted bias, bounded to +/-20%. Two hours without a
-    qualified reading expire the correction. No cloud attenuation is added.
+    half the energy-weighted bias, bounded to +/-20% for ordinary misses.
+    Two consecutive severe shortfalls instead use measured yield plus a
+    0.1 ratio allowance, with a 0.2 floor. This temporary site-yield correction
+    never changes the global coefficient. No cloud attenuation is added.
     """
     result = {"scale": 1.0, "source": "base_model", "eligible_hours": 0,
               "reason": "insufficient_qualified_hours"}
@@ -67,20 +69,29 @@ def fit_intraday_solar_scale(
         if not _finite(ghi) or ghi < 100 or not _finite(shape) or shape <= 0:
             continue
         predicted = coefficient * ghi * shape
-        if predicted < 100 or not 0.4 <= measured / predicted <= 2:
+        if predicted < 100 or not 0 <= measured / predicted <= 2:
             continue
         pairs.append((measured, predicted, stamp + 3600))
+    # Recent independent hours describe current conditions; old clouds/shade
+    # must not suppress a recovery later in the day, or hide a new shortfall.
+    pairs = sorted(pairs, key=lambda pair: pair[2])[-2:]
     result['eligible_hours'] = len(pairs)
     if len(pairs) < 2:
         return result
     if now_ts - max(p[2] for p in pairs) > 2 * 3600:
         return {**result, 'reason': 'stale_observations'}
+    if pairs[1][2] - pairs[0][2] != 3600:
+        return {**result, 'reason': 'nonconsecutive_observations'}
     ratios = [actual / predicted for actual, predicted, _ in pairs]
     if max(ratios) - min(ratios) > 0.4:
         return {**result, 'reason': 'inconsistent_observations'}
     if not (min(ratios) >= 1.08 or max(ratios) <= 0.92):
         return {**result, 'reason': 'no_consistent_material_bias'}
     ratio = sum(p[0] for p in pairs) / sum(p[1] for p in pairs)
+    if max(ratios) < 0.6:
+        return {**result, 'scale': round(max(0.2, ratio + 0.1), 6),
+                'source': 'intraday_observations', 'reason': 'severe_site_shortfall',
+                'observed_ratio': round(ratio, 6)}
     scale = max(0.8, min(1.2, 1 + 0.5 * (ratio - 1)))
     return {**result, 'scale': round(scale, 6), 'source': 'intraday_observations',
             'reason': 'consistent_same_day_bias'}
