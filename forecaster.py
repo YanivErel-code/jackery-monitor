@@ -29,10 +29,12 @@ import logging
 import threading
 import time
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 from forecast_calibration import SocDrainBand, fit_system_residual
+from forecast_guard import LoadNowcast, PowerSample, fit_load_nowcast
 from solar_calibration import fit_intraday_solar_scale
 
 log = logging.getLogger("forecaster")
@@ -1978,6 +1980,32 @@ def forecast_readiness(
     }
 
 
+def _apply_load_nowcast(hours: list[dict[str, Any]], observation: LoadNowcast | None,
+                        overhead_pct: float) -> list[dict[str, Any]]:
+    """Raise total metered demand temporarily; split at its expiry to retain the trough."""
+    if observation is None:
+        return hours
+    out = []
+    for hour in hours:
+        end = hour["ts"]
+        start = end - hour["duration_h"] * 3600
+        until = observation["until_ts"]
+        boundaries = [start, until, end] if start < until < end else [start, end]
+        for begin, finish in pairwise(boundaries):
+            point = {**hour, "ts": finish, "duration_h": (finish - begin) / 3600}
+            if finish != end:
+                point["nowcast_split"] = True
+            output = observation["planning_output_w"]
+            uplift = max(0.0, output - hour["output_w"])
+            if begin < until and uplift >= max(100, hour["output_w"] * 0.2):
+                delta = uplift * (1 + overhead_pct)
+                point.update(output_w=output, load_w=hour["load_w"] + delta,
+                             load_without_baseline_w=hour["load_without_baseline_w"] + delta,
+                             load_nowcast_applied=True)
+            out.append(point)
+    return out
+
+
 def build_forecast(
     energy_history: list[dict[str, Any]],
     weather_hourly: list[dict[str, Any]],
@@ -1994,6 +2022,9 @@ def build_forecast(
     utc_offset_seconds: int = 0,
     ac_input_excludes_load: bool = False,
     ac_supply_limit_w: float | None = None,
+    recent_power: list[PowerSample] | None = None,
+    load_hold_until_ts: float | None = None,
+    appliance_active: bool = False,
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
@@ -2157,6 +2188,11 @@ def build_forecast(
         forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
         forecast_hours[-1]["drain_baseline_prior_w"] = prior_effective_parasitic_w
 
+    load_nowcast = fit_load_nowcast(
+        recent_power or [], now_ts=now_ts, appliance_active=appliance_active,
+        hold_until_ts=load_hold_until_ts,
+    )
+    forecast_hours = _apply_load_nowcast(forecast_hours, load_nowcast, overhead_pct)
     simulated = simulate_soc(
         starting_soc_pct, capacity_wh, forecast_hours,
         ac_charge_floor_pct=ac_charge_floor_pct,
@@ -2187,6 +2223,7 @@ def build_forecast(
         # predict (e.g. afternoon shade). Keyed by local hour-of-day.
         "diurnal_shape": {str(h): round(v, 3) for h, v in sorted(diurnal_shape.items())},
         "solar_intraday_calibration": solar_intraday,
+        "load_nowcast": load_nowcast,
         # Learned charge ceiling (system-SOC plateau the BMS allows).
         # null = no cap (reaches full, or too little charge-cycle data).
         "charge_ceiling_pct": round(soc_ceiling, 1) if soc_ceiling is not None else None,

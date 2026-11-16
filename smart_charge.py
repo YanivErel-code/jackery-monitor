@@ -69,6 +69,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from charge_rate import DEFAULT_CHARGE_W
+from forecast_guard import EnergyReconciliation, LoadNowcast
 
 log = logging.getLogger("smart_charge")
 
@@ -311,6 +312,8 @@ class Plan:
     remaining_charge_seconds: float | None = None
     retained_charge_until_ts: int | None = None
     schedule_policy: str | None = None
+    load_nowcast: LoadNowcast | None = None
+    energy_reconciliation: EnergyReconciliation | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -329,7 +332,7 @@ def _find_next_sunrise(forecast_hours: list[dict[str, Any]]) -> int | None:
     for h in forecast_hours:
         sun = (h.get("solar_w") or 0) > 0
         if seen_dark and sun:
-            return int(h["ts"]) - (3600 if "duration_h" in h else 0)
+            return round(h["ts"] - h.get("duration_h", 0) * 3600)
         if not sun:
             seen_dark = True
     return None
@@ -341,7 +344,7 @@ def _predicted_sunrise_soc(forecast_hours: list[dict[str, Any]],
     trough we're trying to keep above target. Returns None if the
     forecast doesn't span far enough to find it."""
     for i, h in enumerate(forecast_hours):
-        interval_start = int(h.get("ts") or 0) - (3600 if "duration_h" in h else 0)
+        interval_start = round((h.get("ts") or 0) - h.get("duration_h", 0) * 3600)
         if interval_start == sunrise_ts and i > 0:
             return float(forecast_hours[i - 1].get("predicted_soc") or 0)
     return None

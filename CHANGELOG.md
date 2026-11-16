@@ -10,6 +10,19 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Project short-horizon demand from fresh metered five/fifteen-minute averages
+  while an appliance is running, including an explicit planning allowance and
+  exact expiry boundary. Warn when reserve requires pausing/deferring loads;
+  preserve LG holds, charging settings and hourly prediction-accuracy targets.
+- Recognize repeated severe same-day solar shortfalls rather than rejecting
+  their yield ratios as outliers. Apply a temporary, bounded site-yield correction
+  using consecutive qualified hours, retain curtailment/freshness gates, and
+  replace old shortfalls when new evidence shows recovery. Do not retune the
+  global solar coefficient or double-attenuate clouds.
+- Expose bounded SOC/power energy-reconciliation diagnostics using fresh,
+  source-matched, pack-identified endpoints and complete uncharged meter minutes.
+  Preserve raw SOC and existing low-SOC drain-learning exclusions; label an
+  unexplained residual as unresolved rather than inventing physical losses.
 - Correct confirmed battery-side AC metering: fit complete AC hours without
   subtracting grid-bypassed output, and simulate charging without battery drain
   from bypassed loads. Cap battery charging at the configured shared outlet

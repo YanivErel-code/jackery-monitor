@@ -36,6 +36,18 @@ def test_record_forecast_skips_invalid(db):
     assert n == 1
 
 
+def test_subhour_load_expiry_cannot_overwrite_an_hourly_accuracy_target(db):
+    assert db.record_forecast("MAIN", 0, [
+        {"ts": 3600, "predicted_soc": 10},
+        {"ts": 4500, "predicted_soc": 8, "nowcast_split": True},
+        {"ts": 7200, "predicted_soc": 9},
+    ]) == 2
+    with db._conn() as connection:
+        rows = connection.execute(
+            "SELECT target,predicted_soc FROM forecast_predictions ORDER BY target").fetchall()
+    assert [tuple(row) for row in rows] == [(3600, 10), (7200, 9)]
+
+
 def test_prediction_accuracy_returns_matched_pairs(db):
     sn = "SN-ACC"
     db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")

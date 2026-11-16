@@ -37,6 +37,8 @@ class ForecastTablesMixin:
             soc = p.get("predicted_soc")
             if ts is None or soc is None:
                 continue
+            if p.get("nowcast_split"):
+                continue  # Keep sub-hour planning boundaries out of hourly accuracy joins.
             target = int(int(ts) // 3600) * 3600
             rows.append((device_sn, made_at_hour, target, float(soc)))
         if not rows:
