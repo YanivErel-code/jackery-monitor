@@ -1554,25 +1554,39 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             )
             return cur.rowcount
 
-    def planning_evidence(self, device_sn: str, *, now_ts: float) -> PlanningEvidence:
-        """Bounded, device-scoped completed power minutes and a ~20-minute SOC anchor."""
+    def planning_evidence(self, device_sn: str, *, now_ts: float,
+                          cumulative_window_s: int = 7200) -> PlanningEvidence:
+        """Bounded, device-scoped completed power minutes plus a ~20-minute SOC
+        anchor (short reconciliation) and a ~2-hour anchor (cumulative)."""
         end = int(now_ts // 60 * 60)
+        long_s = int(cumulative_window_s)
+        slack = long_s // 4
+
+        def anchor(connection, target: float, lo: float, hi: float):
+            row = connection.execute(
+                "SELECT input_snapshot_json FROM smart_charge_decisions "
+                "WHERE device_sn=? AND decided_at BETWEEN ? AND ? "
+                "AND input_snapshot_json IS NOT NULL ORDER BY ABS(decided_at-?) LIMIT 1",
+                (device_sn, int(lo), int(hi), int(target)),
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
         with self._conn() as connection:
             power = connection.execute(
                 "SELECT bucket,output_wh,solar_wh,ac_input_wh,last_source_ts,sample_count "
                 "FROM samples WHERE device_sn=? AND bucket>=? AND bucket<? ORDER BY bucket",
-                (device_sn, end - 32 * 60, end),
+                (device_sn, end - (long_s + slack) - 120, end),
             ).fetchall()
-            previous = connection.execute(
-                "SELECT input_snapshot_json FROM smart_charge_decisions "
-                "WHERE device_sn=? AND decided_at BETWEEN ? AND ? "
-                "AND input_snapshot_json IS NOT NULL ORDER BY ABS(decided_at-?) LIMIT 1",
-                (device_sn, int(now_ts - 1800), int(now_ts - 900), int(now_ts - 1200)),
-            ).fetchone()
+            previous = anchor(connection, now_ts - 1200, now_ts - 1800, now_ts - 900)
+            cumulative = anchor(connection, now_ts - long_s,
+                                now_ts - long_s - slack, now_ts - long_s + slack)
+        rows = [dict(zip(("bucket", "output_wh", "solar_wh", "ac_input_wh",
+                          "last_source_ts", "sample_count"), row, strict=True)) for row in power]
         return {
-            "power": [dict(zip(("bucket", "output_wh", "solar_wh", "ac_input_wh",
-                                  "last_source_ts", "sample_count"), row, strict=True)) for row in power],
-            "previous_inputs": json.loads(previous[0]) if previous else None,
+            "power": [row for row in rows if row["bucket"] >= end - 32 * 60],
+            "previous_inputs": previous,
+            "cumulative_power": rows,
+            "cumulative_previous_inputs": cumulative,
         }
 
     def history(self, device_sn: str, hours: int = 24,

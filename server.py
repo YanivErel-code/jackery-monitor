@@ -2075,6 +2075,47 @@ def _smart_charge_elapsed_on_seconds(device_sn: str, *, since: float, until: flo
                                             since=since, until=until)
 
 
+async def _smart_charge_verify_charging(device_sn: str, host: str | None, *, now: float,
+                                        soc_pct: float | None) -> dict:
+    """Did the open ON command actually produce AC input? Read-only.
+
+    On a not_charging verdict the plug is re-read (status only, never
+    toggled) so the warning can say whether the plug or the charger path
+    failed. Logged once per ON run."""
+    import charge_verify
+
+    with state.energy._conn() as connection:
+        decisions = connection.execute(
+            """SELECT decided_at, mode, action, executed FROM smart_charge_decisions
+               WHERE device_sn=? AND decided_at>=? AND decided_at<=?
+                 AND mode='active' AND executed=1 AND action IN ('on','off')
+               ORDER BY decided_at""", (device_sn, now - 86400, now)).fetchall()
+        on_since = charge_verify.commanded_on_since([dict(row) for row in decisions])
+        buckets = [] if on_since is None else [dict(row) for row in connection.execute(
+            """SELECT bucket, ac_input_wh, last_ac_input_w, last_source_ts FROM samples
+               WHERE device_sn=? AND bucket>=? ORDER BY bucket""",
+            (device_sn, int(on_since // 60 * 60)))]
+    verdict = charge_verify.assess(on_since=on_since, now=now, buckets=buckets, soc_pct=soc_pct)
+    if verdict["status"] != "not_charging":
+        return verdict
+    plug_is_on = None
+    if host:
+        try:
+            plug_is_on = (await kasa_client.status(host)).get("is_on")
+        except Exception as error:
+            verdict["plug_error"] = str(error)
+    verdict["plug_is_on"] = plug_is_on
+    verdict["warning"] = charge_verify.warning_text(verdict, plug_is_on)
+    logged = state.__dict__.setdefault("smart_charge_not_charging_logged", {})
+    if logged.get(device_sn) != on_since:
+        logged[device_sn] = on_since
+        log.warning("smart_charge %s: commanded ON since %s but no AC input for %.0f min "
+                    "(plug %s reports is_on=%s)", device_sn,
+                    time.strftime("%H:%M:%SZ", time.gmtime(on_since)),
+                    verdict["minutes_without_ac"], host, plug_is_on)
+    return verdict
+
+
 def _smart_charge_committed_until(device_sn: str, *, now: float, sunrise: float | None,
                                   config: dict, capacity_wh: int) -> int | None:
     """Recover only the still-active interval of a recent validated ON command."""
@@ -2295,6 +2336,30 @@ async def _smart_charge_evaluate(record: bool = True,
         overhead_pct=float(baseline_fcast.get("inverter_overhead_pct") or 0),
     )
     inputs["energy_reconciliation"] = plan.energy_reconciliation
+    # The short window's fixed allowance (~1 SOC point) hides a same-signed
+    # drift of up to ~900 W on a 30 kWh rig; the same allowance over ~2h
+    # exposes it. An unexplained EXTRA drop is unresolved accounting, so the
+    # interval is withheld from SOC-drain learning instead of raising the
+    # baseline. A negative residual (SOC fell less than modeled) usually means
+    # the model is high, and is exactly what learning needs to see: warn only.
+    cumulative = forecast_guard.reconcile_energy(
+        evidence.get("cumulative_previous_inputs"), inputs, evidence.get("cumulative_power") or [],
+        baseline_w=float(baseline_fcast.get("effective_parasitic_w") or 0),
+        overhead_pct=float(baseline_fcast.get("inverter_overhead_pct") or 0),
+        min_window_s=5400, max_window_s=9000,
+        output_allowance_pct=0.1, baseline_allowance_w=50, max_solar_wh=20,
+    )
+    inputs["energy_reconciliation_cumulative"] = cumulative
+    if cumulative["status"] == "discrepancy" and cumulative["unexplained_wh"] > 0 and record:
+        try:
+            state.energy.auto_exclude_learning_interval(
+                device_sn, cumulative["start_ts"], cumulative["end_ts"],
+                reason=(f"auto: cumulative SOC/power reconciliation unresolved "
+                        f"({cumulative['unexplained_wh']:+.0f} Wh beyond modeled "
+                        f"{cumulative['modeled_drop_wh']:.0f} Wh, tolerance "
+                        f"{cumulative['tolerance_wh']:.0f} Wh); raw evidence retained"))
+        except Exception as error:
+            log.warning("smart_charge learning exclusion failed: %s", error)
     warnings = list(plan.warnings or [])
     reserve = cfg["reserve_soc_pct"]
     blocked = bool((lg_context or {}).get("blocked_now"))
@@ -2322,6 +2387,13 @@ async def _smart_charge_evaluate(record: bool = True,
         warnings.append(f"SOC/power accounting is unresolved ({residual:+.2f} kWh beyond the modeled "
                         "energy balance). SOC and metering are not independently confirmed; "
                         "no physical loss parameter is learned from this diagnostic.")
+    elif cumulative["status"] == "discrepancy":
+        residual = cumulative["unexplained_wh"] / 1000
+        warnings.append(f"SOC/power accounting has drifted {residual:+.2f} kWh over the last "
+                        f"{(cumulative['end_ts'] - cumulative['start_ts']) / 3600:.1f} h beyond the "
+                        "modeled energy balance"
+                        + ("; this interval is excluded from drain learning."
+                           if residual > 0 else "; the modeled drain may be too high."))
     plan.warnings = list(dict.fromkeys(warnings))
     if reason := lg_thinq.block_reason(cfg):
         plan.action = "off"
@@ -2341,12 +2413,40 @@ async def _smart_charge_evaluate(record: bool = True,
     if generation != state.account_generation or not _portable_control_ready(device_sn):
         return None
     executed = False
+    if record and cfg["mode"] == "active" and cfg.get("kasa_device_host"):
+        # Close the loop on the PREVIOUS ON command before issuing the next
+        # one: an acknowledged plug toggle is not proof of charging.
+        try:
+            verification = await _smart_charge_verify_charging(
+                device_sn, cfg.get("kasa_device_host"), now=time.time(),
+                soc_pct=inputs.get("system_soc_pct"))
+        except Exception as error:
+            log.warning("smart_charge charging verification failed: %s", error)
+            verification = {"status": "error", "error": str(error)}
+        input_snapshot["charge_verification"] = verification
+        plan.charge_verification = verification
+        if verification.get("warning"):
+            plan.warnings = list(dict.fromkeys([*(plan.warnings or []), verification["warning"]]))
     if record and cfg["mode"] == "active" and plan.action in ("on", "off"):
         host = cfg.get("kasa_device_host")
         if host:
             try:
-                await kasa_client.set_state(host, plan.action == "on")
-                executed = True
+                result = await kasa_client.set_state(host, plan.action == "on")
+                reported = result.get("is_on") if isinstance(result, dict) else None
+                input_snapshot["actuation"] = {
+                    "host": host, "requested_on": plan.action == "on",
+                    "reported_is_on": reported, "at": time.time()}
+                # executed = the plug did not contradict the requested state
+                # after the command (previously: merely "no exception"; the
+                # read-back was discarded). A missing read-back stays
+                # "acknowledged". Physical charging is verified separately on
+                # the next tick (charge_verification).
+                executed = reported is None or bool(reported) == (plan.action == "on")
+                if not executed:
+                    log.warning("smart_charge: plug %s reported is_on=%s after %s command",
+                                host, reported, plan.action.upper())
+                    plan.warnings = list(dict.fromkeys([*(plan.warnings or []),
+                        f"Charging plug did not confirm {plan.action.upper()} (reported is_on={reported})."]))
             except lg_thinq.InterlockBlocked as error:
                 plan.action = "off"
                 plan.reason = str(error)

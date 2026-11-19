@@ -223,3 +223,38 @@ def test_public_forecast_applies_recent_demand_without_retraining_load_profile()
     assert updated["forecast"][-1]["output_w"] == original["forecast"][-1]["output_w"]
     assert updated["solar_coefficient"] == original["solar_coefficient"]
     assert updated["load_nowcast"]["source"] == "recent_metered_load"
+
+
+def test_same_signed_drift_hidden_per_window_is_caught_cumulatively():
+    """2026-11-18 06:00-08:01 UTC replay (30240 Wh, ~480 W output, 179 W
+    baseline): each 20-minute window stays inside the fixed one-SOC-point
+    allowance, but two hours of the same bias exceed it (~1 kWh)."""
+    soc_per_s = 8.0 / 7232  # 61.67% -> 53.67% across the interval
+    short = reconcile_energy(
+        snapshot(NOW - 1200, 50 + soc_per_s * 1200), snapshot(NOW, 50),
+        power(minutes=20, output=480, solar=0), baseline_w=179, overhead_pct=0.1)
+    assert short["status"] == "consistent"
+    assert 0 < short["unexplained_wh"] < short["tolerance_wh"]
+    previous, current = snapshot(NOW - 7232, 58), snapshot(NOW, 50)
+    rows = power(minutes=122, output=480, solar=0)
+    assert reconcile_energy(previous, current, rows, baseline_w=179,
+                            overhead_pct=0.1)["reason"] == "awaiting_matched_inputs"
+    cumulative = {"min_window_s": 5400, "max_window_s": 9000, "output_allowance_pct": 0.1,
+                  "baseline_allowance_w": 50, "max_solar_wh": 20}
+    result = reconcile_energy(previous, current, rows, baseline_w=179, overhead_pct=0.1,
+                              **cumulative)
+    assert result["status"] == "discrepancy"
+    assert result["observed_soc_drop_wh"] == pytest.approx(2419.2, abs=0.1)
+    assert result["unexplained_wh"] == pytest.approx(1003, abs=5)
+    assert result["tolerance_wh"] == pytest.approx(315 + 96.5 + 100.4, abs=2)
+    # Accumulated model error at a heavy load is not flagged (11-18 evening:
+    # ~2.8 kW for two hours, SOC fell ~550 Wh less than the default 10% overhead).
+    heavy = power(minutes=122, output=2800, solar=0)
+    modeled = 2800 * 7232 / 3600 * 1.1 + 179 * 7232 / 3600
+    drop_pct = (modeled - 556) / 30240 * 100
+    assert reconcile_energy(snapshot(NOW - 7232, 50 + drop_pct), current, heavy,
+                            baseline_w=179, overhead_pct=0.1,
+                            **cumulative)["status"] == "consistent"
+    assert reconcile_energy(previous, current, power(minutes=122, output=480, solar=60),
+                            baseline_w=179, overhead_pct=0.1,
+                            **cumulative)["reason"] == "solar_interval"
