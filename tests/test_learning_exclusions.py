@@ -85,3 +85,18 @@ def test_exclusion_rejects_invalid_intervals(tmp_path, start, end):
     db = EnergyDB(str(tmp_path / "energy.db"))
     with pytest.raises(ValueError):
         db.exclude_learning_interval("MAIN", start, end, reason="audit")
+
+
+def test_detector_exclusions_merge_and_never_override_a_restore(tmp_path):
+    db = EnergyDB(str(tmp_path / "energy.db"))
+    assert db.auto_exclude_learning_interval("MAIN", 3600, 10800, reason="auto")
+    # Re-evaluations every five minutes extend one row instead of adding many.
+    assert db.auto_exclude_learning_interval("MAIN", 3900, 11100, reason="auto")
+    with db._conn() as c:
+        rows = c.execute("SELECT start_ts,end_ts,status FROM learning_exclusions").fetchall()
+    assert [tuple(r) for r in rows] == [(3600, 11100, "excluded")]
+    db.restore_learning_interval("MAIN", 3600)
+    assert not db.auto_exclude_learning_interval("MAIN", 4200, 11400, reason="auto")
+    assert db.auto_exclude_learning_interval("MAIN", 20000, 27200, reason="auto")
+    with pytest.raises(ValueError):
+        db.auto_exclude_learning_interval("MAIN", 5, 5, reason="auto")

@@ -181,6 +181,38 @@ class MeasurementQualityMixin:
                 (device_sn, start, end, int(time.time()), reason),
             )
 
+    def auto_exclude_learning_interval(self: QualityHost, device_sn: str, start_ts: float,
+                                       end_ts: float, *, reason: str) -> bool:
+        """Detector path: merge into an overlapping exclusion instead of adding
+        one row per evaluation, and never override an interval a person restored."""
+        if (not device_sn or not reason or any(isinstance(value, bool)
+                or not isinstance(value, (int, float)) or not math.isfinite(value)
+                for value in (start_ts, end_ts)) or end_ts <= start_ts):
+            raise ValueError("invalid learning exclusion")
+        start, end = math.floor(start_ts / 60) * 60, math.ceil(end_ts / 60) * 60
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT start_ts,end_ts,status FROM learning_exclusions "
+                "WHERE device_sn=? AND start_ts<? AND end_ts>? ORDER BY start_ts",
+                (device_sn, end, start),
+            ).fetchall()
+            if any(row[2] == "restored" for row in rows):
+                return False
+            if rows:
+                connection.execute(
+                    "UPDATE learning_exclusions SET end_ts=MAX(end_ts,?) "
+                    "WHERE device_sn=? AND start_ts=?",
+                    (end, device_sn, rows[0][0]),
+                )
+                return True
+            connection.execute(
+                "INSERT INTO learning_exclusions(device_sn,start_ts,end_ts,detected_at,reason) "
+                "VALUES(?,?,?,?,?)",
+                (device_sn, start, end, int(time.time()), reason),
+            )
+            return True
+
     def restore_learning_interval(self: QualityHost, device_sn: str, start_ts: int) -> None:
         """Re-enable learning without changing the retained measurements."""
         with self._conn() as connection:

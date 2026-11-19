@@ -314,6 +314,8 @@ class Plan:
     schedule_policy: str | None = None
     load_nowcast: LoadNowcast | None = None
     energy_reconciliation: EnergyReconciliation | None = None
+    # Closed-loop check of the previous ON command (charge_verify.assess).
+    charge_verification: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

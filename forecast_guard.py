@@ -27,9 +27,14 @@ class BatteryInputs(TypedDict, total=False):
     pack_soc_pct: list[float]
 
 
-class PlanningEvidence(TypedDict):
+class PlanningEvidence(TypedDict, total=False):
     power: list[PowerSample]
     previous_inputs: BatteryInputs | None
+    # ~2h anchor for the cumulative check: a per-20-minute residual can stay
+    # inside its fixed one-SOC-point allowance while drifting the same way
+    # every window (2026-11-18: +120..+320 Wh per window, ~1 kWh over 2h).
+    cumulative_power: list[PowerSample]
+    cumulative_previous_inputs: BatteryInputs | None
 
 
 class LoadNowcast(TypedDict):
@@ -127,6 +132,11 @@ def reconcile_energy(
     *,
     baseline_w: float,
     overhead_pct: float,
+    min_window_s: float = 900,
+    max_window_s: float = 1800,
+    output_allowance_pct: float = 0.0,
+    baseline_allowance_w: float = 0.0,
+    max_solar_wh: float | None = None,
 ) -> EnergyReconciliation:
     """Bound a discharge residual using unchanged, fresh SOC sources and packs.
 
@@ -134,6 +144,15 @@ def reconcile_energy(
     power meter is correct. AC intervals are ineligible because the meter may
     exclude bypass load. Quantization allows one whole system SOC point plus
     one boundary minute of power; no residual is fitted as a physical loss.
+
+    The allowance does not grow with the window, so a longer window
+    (``min_window_s``/``max_window_s``) is the cumulative check: a bias
+    below one SOC point per 20 minutes is invisible to the short window
+    but accumulates past the same allowance within a couple of hours.
+    Over hours, model error (a default overhead percentage, the learned
+    baseline, solar charge losses) also accumulates, so the cumulative
+    caller adds ``output_allowance_pct`` of metered output and
+    ``baseline_allowance_w`` per hour, and rejects solar intervals.
     """
     unknown: EnergyReconciliation = {"status": "unavailable", "reason": "awaiting_matched_inputs"}
     if not previous:
@@ -152,7 +171,7 @@ def reconcile_energy(
         or not 0 <= overhead_pct <= 1
     ):
         return unknown
-    if not 900 <= end - start <= 1800 or capacity <= 0 or previous.get("capacity_wh") != capacity:
+    if not min_window_s <= end - start <= max_window_s or capacity <= 0 or previous.get("capacity_wh") != capacity:
         return unknown
     for snapshot in (previous, current):
         soc, stamp = snapshot.get("system_soc_pct"), snapshot["captured_at"]
@@ -194,6 +213,8 @@ def reconcile_energy(
         row["solar_wh"] * max(0, min(end, row["bucket"] + 60) - max(start, row["bucket"])) / 60
         for row in rows
     )
+    if max_solar_wh is not None and solar > max_solar_wh:
+        return {**unknown, "reason": "solar_interval"}
     modeled = output * (1 + overhead_pct) + baseline_w * (end - start) / 3600 - solar
     if modeled < 0:
         return {**unknown, "reason": "solar_surplus"}
@@ -201,7 +222,8 @@ def reconcile_energy(
     boundary = max(
         (row["output_wh"] * (1 + overhead_pct) + row["solar_wh"] for row in rows), default=0
     )
-    tolerance = capacity * 0.01 + boundary + baseline_w / 60
+    tolerance = (capacity * 0.01 + boundary + baseline_w / 60
+                 + output * output_allowance_pct + baseline_allowance_w * (end - start) / 3600)
     residual = observed - modeled
     return {
         "status": "discrepancy" if abs(residual) > tolerance else "consistent",
