@@ -247,10 +247,20 @@ def _format_starter_bundle(bundle: dict) -> str:
         lines.append("")
 
     accuracy = bundle.get("forecast_accuracy_summary") or {}
-    if accuracy:
-        lines.append("## Forecast accuracy by lead time (last 14d)")
+    excluded = bundle.get("forecast_accuracy_excluded_grid_charge_n") or 0
+    if accuracy or excluded:
+        window_h = bundle.get("forecast_accuracy_window_h")
+        window = f"targets in the last {window_h} h" if window_h else "recent targets"
+        lines.append(f"## Forecast accuracy by lead time ({window}, no grid charging in between)")
         for bucket, stats in accuracy.items():
-            lines.append(f"- {bucket}: n={stats.get('n')}, MAE {stats.get('mae')} pp")
+            lines.append(f"- {bucket}: n={stats.get('n')}, MAE {stats.get('mae')} pp, "
+                         f"bias {stats.get('bias_pp')} pp (predicted minus actual)")
+        if excluded:
+            lines.append(
+                f"- {excluded} prediction pairs are excluded because grid charging ran between "
+                "the forecast and its target. The stored forecast is the no-charge baseline, so "
+                "those pairs measure the charging, not model error. A lead-time bucket with no "
+                "row has no charge-free evidence; do not infer its accuracy.")
         lines.append("")
 
     decisions = bundle.get("recent_decisions") or []
@@ -400,7 +410,10 @@ QUERY_TOOLS: list[dict] = [
         "description": (
             "Predicted-vs-actual SOC pairs for past forecast targets. Each "
             "row: made_at (when prediction was made), target (when it "
-            "was for), lead_time_h, predicted_soc, actual_soc, error pp."
+            "was for), lead_time_h, predicted_soc, actual_soc, error pp, "
+            "grid_charge_wh. predicted_soc is the no-charge baseline: when "
+            "grid_charge_wh > 0, charging ran in between and the error is "
+            "not model error."
         ),
         "input_schema": {
             "type": "object",

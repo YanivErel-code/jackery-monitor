@@ -10,6 +10,10 @@ from cost import rate_at
 
 SOC_EPSILON = 1e-7
 SCHEDULE_POLICY = "overnight_first_v1"
+# A started charge run is held at least this long. Small top-ups otherwise end
+# with the 15-minute nowcast slot they began in and restart minutes later
+# (20 of 34 ON runs in the week to 2026-11-20 lasted 15 minutes or less).
+MIN_CHARGE_BLOCK_S = 45 * 60
 
 
 def _finite(value, *, minimum=None, maximum=None):
@@ -70,6 +74,7 @@ def build_schedule(
     unavailable,
     margin_seconds,
     committed_until_ts=None,
+    min_block_until_ts=None,
 ):
     """Prefer earliest low-rate overnight charging while preserving a valid SOC path."""
     inputs = {
@@ -88,6 +93,7 @@ def build_schedule(
         "unavailable": unavailable,
         "margin_seconds": margin_seconds,
         "committed_until_ts": committed_until_ts,
+        "min_block_until_ts": min_block_until_ts,
     }
     result = _build_schedule(**inputs, overnight_first=True)
     preference_relaxed = False
@@ -134,6 +140,7 @@ def _build_schedule(
     unavailable,
     margin_seconds,
     committed_until_ts,
+    min_block_until_ts,
     overnight_first,
 ):
     """Repair reserve and sunrise SOC before applying the requested slot preference.
@@ -246,6 +253,15 @@ def _build_schedule(
     retained_interval = None
     if committed_until_ts is not None:
         committed_until_ts = _finite(committed_until_ts)
+    if min_block_until_ts is not None and slots:
+        # The minimum block only moves charging earlier inside the cheapest
+        # remaining tariff tier; it never buys dearer energy than the plan
+        # would, and it obeys the same hold, budget and coverage gates below.
+        min_block_until_ts = _finite(min_block_until_ts)
+        current = next((slot for slot in slots if slot["start"] <= now < slot["end"]), None)
+        if current is not None and current["rate"] <= min(slot["rate"] for slot in slots):
+            committed_until_ts = max(committed_until_ts or min_block_until_ts, min_block_until_ts)
+    if committed_until_ts is not None:
         baseline_covered = (
             min(soc, *(hour["predicted_soc"] for hour in baseline)) >= reserve - SOC_EPSILON
             and baseline[-1]["predicted_soc"] >= target - SOC_EPSILON

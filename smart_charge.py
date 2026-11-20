@@ -730,7 +730,8 @@ def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
                  tz_offset_seconds: int = 0, now_ts: float | None = None,
                  forecast_unavailable_reason: str | None = None,
                  charge_not_before_ts: float | None = None, charging_unavailable: bool = False,
-                 elapsed_on_seconds: float = 0, committed_until_ts: float | None = None) -> Plan:
+                 elapsed_on_seconds: float = 0, committed_until_ts: float | None = None,
+                 min_block_until_ts: float | None = None) -> Plan:
     """Validate an interval-by-interval charge schedule before authorizing deferral.
 
     Legacy start-stamped fixtures remain readable, but their unvalidated plans
@@ -780,6 +781,7 @@ def compute_plan(*, config: dict[str, Any], current_soc_pct: float | None,
             charge_not_before_ts=charge_not_before_ts, unavailable=charging_unavailable,
             margin_seconds=SUNRISE_MARGIN_S,
             committed_until_ts=committed_until_ts,
+            min_block_until_ts=min_block_until_ts,
         )
     except (ValueError, TypeError, OverflowError) as error:
         plan.action = "skip"

@@ -99,3 +99,23 @@ def test_openai_tools_use_flattened_responses_api_shape():
         names.add(t["name"])
     assert "submit_algorithm_review" in names
     assert "query_samples" in names
+
+
+def test_accuracy_section_states_window_bias_and_grid_charge_exclusions():
+    bundle = _bundle_minimal()
+    bundle.update({
+        "forecast_accuracy_summary": {"≤6h": {"n": 517, "mae": 2.38, "bias_pp": -0.48}},
+        "forecast_accuracy_excluded_grid_charge_n": 19205,
+        "forecast_accuracy_window_h": 186,
+    })
+    text = claude_advisor._format_starter_bundle(bundle)
+    assert "targets in the last 186 h, no grid charging in between" in text
+    assert "≤6h: n=517, MAE 2.38 pp, bias -0.48 pp" in text
+    assert "19205 prediction pairs are excluded" in text
+
+
+def test_accuracy_section_reports_exclusions_even_with_no_charge_free_pairs():
+    bundle = _bundle_minimal()
+    bundle["forecast_accuracy_excluded_grid_charge_n"] = 500
+    text = claude_advisor._format_starter_bundle(bundle)
+    assert "500 prediction pairs are excluded" in text

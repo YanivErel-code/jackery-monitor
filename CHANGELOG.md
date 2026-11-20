@@ -10,6 +10,22 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Fixed
+- Summarise forecast accuracy only over prediction pairs with no grid charging
+  between the forecast and its target. The stored forecast is the no-charge
+  baseline, so charged pairs measured the charging, not the model. Each pair
+  now carries `grid_charge_wh` and `charge_free`; excluded pairs are counted.
+  The advisor summary scores about a week of pairs instead of the 500 newest
+  (roughly four hours of targets) and reports the window and signed bias.
+- Hold a started smart-charge run for at least 45 minutes while the current
+  rate is the cheapest remaining tier and the target is not already covered.
+  Off-peak top-ups no longer end with their 15-minute nowcast slot and restart
+  minutes later. Holds, the duration budget and dearer-rate hours are unchanged.
+- Verify that a commanded charge produces AC input. Record the plug read-back,
+  mark contradicted commands as not executed, and warn once per run when an ON
+  command yields no charging.
+- Add a two-hour SOC/power reconciliation that catches slow drift the short
+  check allows, and automatically exclude intervals where SOC fell more than
+  modeled from drain learning without overriding restored exclusions.
 - Project short-horizon demand from fresh metered five/fifteen-minute averages
   while an appliance is running, including an explicit planning allowance and
   exact expiry boundary. Warn when reserve requires pausing/deferring loads;
