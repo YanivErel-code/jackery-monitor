@@ -15,7 +15,12 @@ energy_db.py easier to navigate without changing any caller's API.
 from __future__ import annotations
 
 import time
+from bisect import bisect_left
 from collections.abc import Callable
+
+# AC input below this between a forecast and its target is metering noise,
+# not a charge session (same 20 Wh-per-hour order as the drain-fit gates).
+GRID_CHARGE_NOISE_WH = 50.0
 
 
 class ForecastTablesMixin:
@@ -73,7 +78,14 @@ class ForecastTablesMixin:
                             pack_capacity_wh: int | None = None) -> list[dict]:
         """Return predicted-vs-actual pairs for predictions whose target is
         in the past. Each entry has {made_at, target, predicted_soc,
-        actual_soc, lead_time_h, error}.
+        actual_soc, lead_time_h, error, grid_charge_wh, charge_free}.
+
+        The stored forecast is the no-charge baseline, so a pair is only a
+        fair test of the model when no grid charging happened between
+        `made_at` and `target`. `grid_charge_wh` is the AC input metered
+        in that span and `charge_free` is True when it is below
+        GRID_CHARGE_NOISE_WH. Summaries of model error must use
+        charge-free pairs; the rest measure the charging, not the model.
 
         `actual_soc` is capacity-weighted system SOC (main + expansion
         packs) when both `main_capacity_wh` and `pack_capacity_wh` are
@@ -119,6 +131,17 @@ class ForecastTablesMixin:
             packs_by_ts, ts_sorted = self._packs_in_target_range(
                 c, device_sn, rows, main_capacity_wh, pack_capacity_wh,
             )
+            charge_ts: list[int] = []
+            charge_wh: list[float] = [0.0]
+            if rows:
+                for bucket, wh in c.execute(
+                    """SELECT bucket, ac_input_wh FROM samples
+                        WHERE device_sn = ? AND bucket >= ? AND bucket < ?
+                          AND ac_input_wh > 0 ORDER BY bucket""",
+                    (device_sn, min(r[0] for r in rows), max(r[1] for r in rows)),
+                ):
+                    charge_ts.append(int(bucket))
+                    charge_wh.append(charge_wh[-1] + float(wh))
         out: list[dict] = []
         for r in rows:
             main_soc = r[3]
@@ -129,6 +152,8 @@ class ForecastTablesMixin:
                 packs_by_ts, ts_sorted,
                 main_capacity_wh, pack_capacity_wh,
             )
+            grid_charge_wh = (charge_wh[bisect_left(charge_ts, r[1])]
+                              - charge_wh[bisect_left(charge_ts, r[0])])
             out.append({
                 "made_at": r[0],
                 "target": r[1],
@@ -136,5 +161,7 @@ class ForecastTablesMixin:
                 "actual_soc": round(actual, 1),
                 "lead_time_h": round((r[1] - r[0]) / 3600, 1),
                 "error": round(abs(actual - float(r[2])), 1),
+                "grid_charge_wh": round(grid_charge_wh, 1),
+                "charge_free": grid_charge_wh < GRID_CHARGE_NOISE_WH,
             })
         return out

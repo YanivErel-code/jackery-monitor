@@ -102,6 +102,51 @@ def test_cheaper_final_hour_cannot_override_charging_constraints(constraint):
     assert result["warnings"]
 
 
+def flat(**overrides):
+    inputs = arguments(**overrides)
+    inputs["cost_plan"] = {"type": "flat", "rate_per_kwh": 0.25}
+    return inputs
+
+
+def test_minimum_block_keeps_a_started_run_on_in_the_cheapest_tier():
+    inputs = flat()
+    assert build_schedule(**inputs)["action"] == "off"
+    result = build_schedule(**inputs, min_block_until_ts=NOW + 1800)
+    assert result["action"] == "on"
+    assert result["planned_intervals"][0] == {"start": NOW, "end": NOW + 1800}
+    assert result["retained_charge_until_ts"] == NOW + 1800
+    assert result["scheduled_sunrise_soc_pct"] >= 30
+    assert result["plan_feasible"]
+
+
+def test_minimum_block_never_buys_at_a_dearer_rate_than_the_plan():
+    inputs = arguments()
+    fresh = build_schedule(**inputs)
+    result = build_schedule(**inputs, min_block_until_ts=NOW + 1800)
+    assert result["action"] == fresh["action"] == "off"
+    assert result["planned_intervals"] == fresh["planned_intervals"]
+    assert result["retained_charge_until_ts"] is None
+
+
+@pytest.mark.parametrize("updates", [
+    {"unavailable": True},
+    {"budget_seconds": 0},
+    {"charge_not_before_ts": NOW + 3600},
+    {"current_soc_pct": 100},
+    {"min_block_until_ts": NOW},
+])
+def test_minimum_block_obeys_holds_budget_coverage_and_expiry(updates):
+    inputs = {**flat(), "min_block_until_ts": NOW + 1800, **updates}
+    result = build_schedule(**inputs)
+    assert not any(item["start"] <= NOW < item["end"] for item in result["planned_intervals"])
+    assert result["retained_charge_until_ts"] is None
+
+
+def test_minimum_block_does_not_shorten_a_longer_committed_interval():
+    result = build_schedule(**flat(), committed_until_ts=NOW + 3000, min_block_until_ts=NOW + 600)
+    assert result["planned_intervals"][0] == {"start": NOW, "end": NOW + 3000}
+
+
 def test_committed_cheap_interval_ends_at_three_without_adding_peak_charging():
     now = NOW - 6 * 3600 - 15 * 60
     three_pm = now + 15 * 60

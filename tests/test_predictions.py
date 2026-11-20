@@ -73,6 +73,28 @@ def test_prediction_accuracy_returns_matched_pairs(db):
     assert row["error"] == 5.0
 
 
+def test_prediction_accuracy_flags_pairs_with_grid_charging_in_between(db):
+    # The stored forecast is the no-charge baseline. Charging between the
+    # forecast and its target makes the pair a measure of the charging.
+    sn = "SN-CHG"
+    db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")
+    now = time.time()
+    target = int((now - 3600) // 3600) * 3600
+    charged_made, clean_made = target - 3 * 3600, target - 3600
+    db.record_forecast(sn, charged_made, [{"ts": target, "predicted_soc": 20.0}])
+    db.record_forecast(sn, clean_made, [{"ts": target, "predicted_soc": 48.0}])
+    for ts in (target - 60, target + 60):
+        db.record(sn, ts, input_w=0, output_w=0, battery_pct=50, solar_w=0)
+    with db._conn() as c:
+        c.execute("INSERT INTO samples(device_sn, bucket, ac_input_wh) VALUES(?,?,?)",
+                  (sn, target - 2 * 3600, 900.0))
+    by_made = {row["made_at"]: row for row in db.prediction_accuracy(sn)}
+    assert by_made[charged_made]["grid_charge_wh"] == 900.0
+    assert by_made[charged_made]["charge_free"] is False
+    assert by_made[clean_made]["grid_charge_wh"] == 0
+    assert by_made[clean_made]["charge_free"] is True
+
+
 def test_prediction_accuracy_skips_predictions_without_actuals(db):
     sn = "SN-NOACT"
     db.upsert_device(sn, "Tester", 13, "Explorer 5000 Plus")

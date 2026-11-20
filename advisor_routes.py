@@ -40,6 +40,9 @@ log = logging.getLogger("jackery-monitor")
 # dropped, but `row_count` still reports the true match count so a
 # truncated answer can't be mistaken for a short one.
 _MAX_TOOL_ROWS = 500
+# Prediction pairs scored for the accuracy summary: about a week of hourly
+# targets on a multi-day horizon (1.4 s on the 30 kWh rig's NAS, on demand).
+ACCURACY_SUMMARY_PAIRS = 20000
 # Cap the samples lookback: history() filters only by hours-from-now,
 # so an old window would scan the entire table for a few rows.
 _MAX_LOOKBACK_HOURS = 24 * 45
@@ -175,15 +178,30 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
 
     accuracy_summary: dict[str, dict[str, float]] = {}
     accuracy_summary_post_fix: dict[str, dict[str, float]] = {}
+    accuracy_excluded_grid_charge = 0
+    accuracy_window_h = 0
     try:
+        # The default 500 most-recent pairs span only ~4 h of targets on an
+        # hourly forecast with a multi-day horizon, so the summary asks for
+        # enough pairs to cover about a week.
         samples_acc = state.energy.prediction_accuracy(
             device_sn,
+            limit=ACCURACY_SUMMARY_PAIRS,
             main_capacity_wh=main_wh,
             pack_capacity_wh=pack_wh,
         )
-        accuracy_summary = _bucket(samples_acc)
+        if samples_acc:
+            targets = [s["target"] for s in samples_acc]
+            accuracy_window_h = round((max(targets) - min(targets)) / 3600)
+        # The stored forecast is the no-charge baseline. Pairs with grid
+        # charging between forecast and target score the charging, not the
+        # model (36-48pp "MAE" on 2026-11-20 with 5-11 kWh/day charged), so
+        # only charge-free pairs are summarised.
+        charge_free = [s for s in samples_acc if s.get("charge_free", True)]
+        accuracy_excluded_grid_charge = len(samples_acc) - len(charge_free)
+        accuracy_summary = _bucket(charge_free)
         accuracy_summary_post_fix = _bucket(
-            [s for s in samples_acc
+            [s for s in charge_free
              if (s.get("made_at") or 0) >= FORECASTER_BREAKING_CHANGE_TS]
         )
     except Exception as e:
@@ -250,6 +268,7 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
                 "predicted_soc": round(p["predicted_soc"], 1),
                 "actual_soc": round(p["actual_soc"], 1),
                 "error": round(p["error"], 1),
+                "grid_charge_wh": p.get("grid_charge_wh"),
             })
         # Cap at most 60 rows so we don't blow the prompt budget.
         recent_predictions = recent_predictions[:60]
@@ -337,6 +356,8 @@ async def _build_advisor_bundle(state, helpers: AdvisorHelpers,
         # "current performance" when post-fix MAE is actually 8-15pp.
         "forecast_accuracy_summary": accuracy_summary_post_fix,
         "forecast_accuracy_summary_all_time": accuracy_summary,
+        "forecast_accuracy_excluded_grid_charge_n": accuracy_excluded_grid_charge,
+        "forecast_accuracy_window_h": accuracy_window_h,
         "forecaster_cutoff_ts": FORECASTER_BREAKING_CHANGE_TS,
         "forecaster_cutoff_iso": _iso(FORECASTER_BREAKING_CHANGE_TS),
         "recent_samples": recent_samples,
@@ -361,6 +382,53 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     """Return the rolling list of fixes the advisor needs to know about
     when interpreting historical samples / predictions / decisions."""
     return [
+        {
+            "ts_iso": "2026-11-20T19:00:00+00:00",
+            "subsystem": "advisor/smart_charge",
+            "summary": (
+                "FORECAST ACCURACY is now summarised only over prediction "
+                "pairs with no grid charging between made_at and target "
+                "(grid_charge_wh < 50). The stored forecast is the no-charge "
+                "baseline, so the earlier 36-48pp long-lead MAE measured "
+                "5-11 kWh/day of grid charging, not model error. It also "
+                "scored only the 500 newest pairs (~4 h of targets, not 14 "
+                "days); it now scores 20000 (about a week) and states the "
+                "window and signed bias. Replayed on 2026-11-20: charge-free "
+                "<=6h n=517 MAE 2.4pp bias -0.5pp; <=24h n=278 MAE 11.5pp "
+                "bias -9.4pp (forecast too low). Excluded pairs are counted; "
+                "an absent lead bucket means no charge-free evidence, not "
+                "good or bad accuracy. MINIMUM CHARGE BLOCK: "
+                "a started ON run is held 45 min while the current rate is "
+                "the cheapest remaining tier and the target is not already "
+                "covered. Before this, off-peak top-ups ended with their "
+                "15-minute nowcast slot and restarted minutes later (20 of "
+                "34 ON runs <= 15 min). Peak-rate reserve bursts are "
+                "unchanged and may still be 15 min by design."
+            ),
+        },
+        {
+            "ts_iso": "2026-11-19T19:01:00+00:00",
+            "subsystem": "smart_charge/reconciliation",
+            "summary": (
+                "CHARGE VERIFICATION: executed=True used to mean only that "
+                "the Kasa call did not raise. The plug read-back is now "
+                "stored (input_snapshot.actuation), a contradicted command "
+                "is executed=False, and every active tick records "
+                "charge_verification (idle/pending/charging/not_charging/"
+                "telemetry_unavailable) for the open ON run; not_charging "
+                "re-reads the plug and warns once per run. The 2026-11-18 "
+                "ON-without-AC intervals (15:01 and 23:09 UTC) predate this; "
+                "their physical cause is undetermined and the two units do "
+                "not share a circuit. CUMULATIVE RECONCILIATION: a ~2h "
+                "SOC/power check (energy_reconciliation_cumulative) now "
+                "catches slow same-signed drift the 15-30 min check allows, "
+                "and auto-excludes intervals where SOC fell MORE than "
+                "modeled from drain learning. 2026-11-18 06:00-08:15 UTC "
+                "(packs' SOC fell ~2.3x faster than their metered output; "
+                "likely BMS SOC re-estimation) is excluded manually. Do NOT "
+                "re-file either 2026-11-18 anomaly."
+            ),
+        },
         {
             "ts_iso": "2026-09-23T17:30:00+00:00",
             "subsystem": "forecaster/advisor",
@@ -1144,6 +1212,9 @@ def _make_advisor_query_fn(state, helpers: AdvisorHelpers, device_sn: str):
                     "predicted_soc": round(p.get("predicted_soc", 0), 1),
                     "actual_soc": round(p.get("actual_soc", 0), 1),
                     "error_pp": round(p.get("error", 0), 1),
+                    # > 0 means grid charging ran in between: the no-charge
+                    # forecast is not comparable to this actual.
+                    "grid_charge_wh": p.get("grid_charge_wh"),
                 })
             return {"rows": out[:_MAX_TOOL_ROWS], "row_count": len(out),
                     "truncated": len(out) > _MAX_TOOL_ROWS}

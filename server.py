@@ -2163,6 +2163,36 @@ def _smart_charge_committed_until(device_sn: str, *, now: float, sunrise: float 
     return None
 
 
+def _smart_charge_min_block_until(device_sn: str, *, now: float, sunrise: float | None,
+                                  config: dict) -> int | None:
+    """End of the minimum charge block for the ON run still in progress.
+
+    Only a run whose latest executed command is a fresh ON for this sunrise
+    cycle qualifies. The schedule decides whether to honour it (cheapest
+    tariff tier, no hold, budget left, target not already covered)."""
+    from smart_charge_schedule import MIN_CHARGE_BLOCK_S
+
+    if not sunrise or config.get("mode") != "active" or not config.get("kasa_device_host"):
+        return None
+    executed = ("FROM smart_charge_decisions WHERE device_sn=? AND decided_at>=? AND decided_at<=? "
+                "AND mode='active' AND executed=1 AND action")
+    with state.energy._conn() as connection:
+        latest = connection.execute(
+            f"SELECT decided_at, action, sunrise_ts {executed} IN ('on','off') "
+            "ORDER BY decided_at DESC LIMIT 1", (device_sn, now - 600, now)).fetchone()
+        if not latest or latest["action"] != "on" or latest["sunrise_ts"] != sunrise:
+            return None
+        last_off = connection.execute(
+            f"SELECT MAX(decided_at) {executed}='off'", (device_sn, now - 86400, now)).fetchone()[0]
+        on_since = connection.execute(
+            f"SELECT MIN(decided_at) {executed}='on'",
+            (device_sn, max(now - 86400, (last_off or 0) + 1), now)).fetchone()[0]
+    if on_since is None:
+        return None
+    until = int(min(on_since + MIN_CHARGE_BLOCK_S, sunrise))
+    return until if until > now else None
+
+
 async def _smart_charge_evaluate(record: bool = True,
                                  device_sn: str | None = None):
     """Pull the inputs the smart-charge module needs, compute a Plan, and
@@ -2298,6 +2328,8 @@ async def _smart_charge_evaluate(record: bool = True,
             device_sn, since=sunrise - 86400, until=now) if sunrise else 0)
         committed_until_ts = _smart_charge_committed_until(
             device_sn, now=now, sunrise=sunrise, config=cfg, capacity_wh=capacity)
+        min_block_until_ts = _smart_charge_min_block_until(
+            device_sn, now=now, sunrise=sunrise, config=cfg)
     except Exception as error:
         log.warning("smart_charge duration history unavailable; skipping control: %s", error)
         return smart_charge.Plan(action="skip", reason="charging duration history unavailable",
@@ -2324,6 +2356,7 @@ async def _smart_charge_evaluate(record: bool = True,
         charging_unavailable=(lg_context or {}).get("timing_uncertain", False),
         elapsed_on_seconds=elapsed_on_seconds,
         committed_until_ts=committed_until_ts,
+        min_block_until_ts=min_block_until_ts,
     )
     if plan.trajectory_validated is False:
         plan.action = "skip"

@@ -133,6 +133,52 @@ def retained_until(monitor):
         config=monitor.smart_charge.get_config("MAIN"), capacity_wh=30240)
 
 
+def on_run(monitor, *offsets, action="on", sunrise=NOW + 8 * 3600):
+    for offset in offsets:
+        monitor.state.energy.record_smart_charge_decision("MAIN", {
+            "decided_at": NOW - offset, "mode": "active", "action": action,
+            "sunrise_ts": sunrise}, executed=True)
+
+
+def min_block_until(monitor, **overrides):
+    arguments = {"now": NOW, "sunrise": NOW + 8 * 3600,
+                 "config": monitor.smart_charge.get_config("MAIN"), **overrides}
+    return monitor._smart_charge_min_block_until("MAIN", **arguments)
+
+
+def test_minimum_block_runs_from_the_start_of_the_open_on_run(monitor):
+    on_run(monitor, 900, 600, 300)
+    assert min_block_until(monitor) == NOW - 900 + 45 * 60
+
+
+def test_minimum_block_restarts_after_an_executed_off(monitor):
+    on_run(monitor, 3000)
+    on_run(monitor, 1200, action="off")
+    on_run(monitor, 300)
+    assert min_block_until(monitor) == NOW - 300 + 45 * 60
+
+
+def test_minimum_block_expires_and_never_extends_a_long_run(monitor):
+    on_run(monitor, 3000, 300)
+    assert min_block_until(monitor) is None
+
+
+def test_minimum_block_needs_a_fresh_executed_on_for_this_sunrise_and_config(monitor):
+    assert min_block_until(monitor) is None
+    on_run(monitor, 300)
+    assert min_block_until(monitor, now=NOW + 400) is None
+    assert min_block_until(monitor, sunrise=NOW + 9 * 3600) is None
+    assert min_block_until(monitor, config={
+        **monitor.smart_charge.get_config("MAIN"), "mode": "test"}) is None
+    on_run(monitor, 100, action="off")
+    assert min_block_until(monitor) is None
+
+
+def test_minimum_block_is_capped_at_sunrise(monitor):
+    on_run(monitor, 300, sunrise=NOW + 600)
+    assert min_block_until(monitor, sunrise=NOW + 600) == NOW + 600
+
+
 def test_recent_successful_on_recovers_its_committed_interval_after_restart(monitor):
     committed_record(monitor)
     assert retained_until(monitor) == NOW + 1800
