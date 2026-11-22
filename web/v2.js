@@ -79,14 +79,19 @@
     rules: { tabs: 'automation', first: 'automation', title: 'Rules & plugs' },
     settings: { tabs: 'settings,device,logs', first: 'settings', title: 'Settings' },
   };
+  // Native pages register here (v2_history.js etc.); a registered page
+  // replaces its framed classic screen.
+  const pages = {};
   let framed = null;
+  let current = null;
   function route() {
     const name = location.hash.slice(1);
-    const page = name === 'charging' || CLASSIC[name] ? name : 'live';
-    $('page-live').hidden = page !== 'live';
-    $('page-charging').hidden = page !== 'charging';
-    $('page-classic').hidden = !CLASSIC[page];
-    if (CLASSIC[page] && framed !== page) {
+    const page = name === 'charging' || pages[name] || CLASSIC[name] ? name : 'live';
+    const classic = CLASSIC[page] && !pages[page];
+    for (const node of document.querySelectorAll('main > [id^="page-"]')) {
+      node.hidden = node.id !== (classic ? 'page-classic' : 'page-' + page);
+    }
+    if (classic && framed !== page) {
       framed = page;
       const c = CLASSIC[page];
       $('classic-frame').title = c.title;
@@ -96,8 +101,10 @@
       if (a.dataset.page === page) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
     }
-    window.scrollTo(0, 0);
+    if (current !== page) window.scrollTo(0, 0);
+    current = page;
     drawCharts();
+    if (pages[page]) pages[page].show();
   }
   window.addEventListener('hashchange', route);
 
@@ -360,6 +367,7 @@
       f.svg.append(svgEl('line', { class: i ? 'gridline' : 'axis', x1: f.box.l, x2: f.box.r, y1: f.Y(v), y2: f.Y(v) }));
       f.svg.append(svgEl('text', { x: f.box.l - 6, y: f.Y(v) + 4, 'text-anchor': 'end' }, f.yLabel(v)));
     }
+    if (!stepH) return;            // caller draws its own x labels
     const step = stepH * 3600 * (f.W < 520 ? 2 : 1);
     const offset = tz() % step;
     for (let t = Math.ceil((f.x0 + offset) / step) * step - offset; t <= f.x1; t += step) {
@@ -433,14 +441,14 @@
     svg.append(svgEl('polyline', { class: 's-grid', points: path(f, powerRows, 'ac_input_w') }));
     svg.append(svgEl('polyline', { class: 's-solar', points: path(f, powerRows, 'solar_w') }));
   }
-  function drawCharts() { drawBattery(); drawPower(); }
+  function drawCharts() { drawBattery(); drawPower(); if (pages[current]?.draw) pages[current].draw(); }
   let resizeTimer = null;
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawCharts, 150); });
 
-  for (const btn of document.querySelectorAll('.seg button')) {
+  for (const btn of document.querySelectorAll('.seg button[data-hours]')) {
     btn.addEventListener('click', () => {
       powerHours = Number(btn.dataset.hours);
-      for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-pressed', String(b === btn));
+      for (const b of document.querySelectorAll('.seg button[data-hours]')) b.setAttribute('aria-pressed', String(b === btn));
       loadHistory();
     });
   }
@@ -476,7 +484,10 @@
     status = data;
     renderStatus();
     renderAttention();
-    if (firstDevice || previous !== deviceSn()) { loadOverview(); loadHistory(); }
+    if (firstDevice || previous !== deviceSn()) {
+      loadOverview(); loadHistory();
+      if (pages[current]) pages[current].show(true);
+    }
   }
   function connect() {
     const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
@@ -491,6 +502,13 @@
       setTimeout(connect, 3000);
     };
   }
+
+  // Shared with the per-page scripts loaded after this one.
+  window.V2 = {
+    $, el, svgEl, num, pct, watts, usd, clock, tz, getJson, deviceSn, frame, axes, path,
+    status: () => status,
+    register(name, page) { pages[name] = page; if (location.hash.slice(1) === name) route(); },
+  };
 
   route();
   getJson('/api/status').then(applyStatus).catch(() => {});

@@ -24,6 +24,16 @@ limitations still apply; a major version is not a hardware safety guarantee.
 - V2's History, Rules & plugs and Settings pages keep the V2 menu: they frame
   the classic screens (`/classic?embed=1&tabs=…`) without the classic top bar,
   restyled with V2's colours and following its light/dark choice.
+- V2 History page, built natively: totals for today / 7 days / 30 days /
+  lifetime, energy by day (solar, grid, used) with 14/30/90-day ranges and
+  records, a day-by-day table, the 5-day no-charge battery forecast, saved
+  sunrise forecasts against what happened, and a per-device table.
+
+### Fixed
+- Service worker offline fallback no longer hands the default view's shell to
+  the classic frame or to script requests.
+
+### Added
 - `GET /api/v2/overview` builds that page's data from the latest saved
   smart-charge decision. The projected battery curve re-integrates the saved
   no-charge forecast plus planned charging and is labelled approximate.

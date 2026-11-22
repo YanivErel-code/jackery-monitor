@@ -14,13 +14,14 @@
 // standard cache + FastAPI's Last-Modified header handle revalidation
 // fine, and a stale CSS in the SW cache once cost us a "phantom Confirm
 // password field on the login page" debugging spiral.
-const CACHE = 'jackery-shell-v8';
+const CACHE = 'jackery-shell-v9';
 const SHELL = [
   '/',
   '/v2',
   '/classic',
   '/static/app.js',
   '/static/v2.js',
+  '/static/v2_history.js',
   '/static/dashboard_requests.js',
   '/static/icon.svg',
   '/manifest.webmanifest',
@@ -61,6 +62,12 @@ self.addEventListener('fetch', (event) => {
         }
         return resp;
       })
-      .catch(() => caches.match(req).then((c) => c || caches.match('/')))
+      // Offline: the cached copy of this exact file, else (for a page load
+      // only) the cached shell of the same view. Never hand an HTML shell
+      // to a script request or the wrong view to the classic frame.
+      .catch(() => caches.match(req, { ignoreSearch: true }).then((c) => {
+        if (c || req.mode !== 'navigate') return c || Response.error();
+        return caches.match('/');
+      }))
   );
 });
