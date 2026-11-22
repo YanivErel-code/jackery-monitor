@@ -132,7 +132,7 @@ def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     css = client.get("/static/v2.css").text
     used = set(re.findall(r"var\(--([a-z0-9-]+)", css))
     for theme in ("light", "dark"):
-        block = re.search(r':root\[data-theme="%s"\] \{(.*?)\n\}' % theme, css, re.S).group(1)
+        block = re.search(r':root\[data-theme="' + theme + r'"\] \{(.*?)\n\}', css, re.S).group(1)
         assert used <= set(re.findall(r"--([a-z0-9-]+):", block)), theme
     assert 'id="classic-frame"' in v2 and "classList.add('embed')" in classic
     spec = next(s for s in client.get("/api/settings").json()["settings"] if s["key"] == "default_ui_version")
