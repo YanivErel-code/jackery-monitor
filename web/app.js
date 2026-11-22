@@ -525,6 +525,15 @@ document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => switchTab(tab.dataset.tab));
 });
 
+// Embedded in V2: show only the tabs V2 asked for (?tabs=energy,forecast).
+if (document.documentElement.classList.contains('embed')) {
+  const wanted = (new URLSearchParams(location.search).get('tabs') || '').split(',').filter(t => VALID_TABS.has(t));
+  if (wanted.length) {
+    document.querySelectorAll('.tab').forEach(t => { t.hidden = !wanted.includes(t.dataset.tab); });
+    document.querySelector('.tabs')?.classList.toggle('single', wanted.length === 1);
+  }
+}
+
 function switchTab(name, opts = {}) {
   if (!VALID_TABS.has(name)) return;
   if (isHomeMonitoring() && ['energy', 'forecast', 'automation'].includes(name)) name = 'live';

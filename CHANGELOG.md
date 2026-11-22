@@ -21,6 +21,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
 - V2 is the default at `/`. Settings → Default view (`default_ui_version`,
   saved on the server) switches the default to the classic view; `/v2` and
   `/classic` always open theirs, and each links to the other.
+- V2's History, Rules & plugs and Settings pages keep the V2 menu: they frame
+  the classic screens (`/classic?embed=1&tabs=…`) without the classic top bar,
+  restyled with V2's colours and following its light/dark choice.
 - `GET /api/v2/overview` builds that page's data from the latest saved
   smart-charge decision. The projected battery curve re-integrates the saved
   no-charge forecast plus planned charging and is labelled approximate.

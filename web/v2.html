@@ -33,11 +33,11 @@
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg><span>Live</span></a>
     <a class="nav-item" href="#charging" data-page="charging">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><span>Charging</span></a>
-    <a class="nav-item" href="/classic#energy">
+    <a class="nav-item" href="#history" data-page="history">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg><span>History</span></a>
-    <a class="nav-item" href="/classic#automation">
+    <a class="nav-item" href="#rules" data-page="rules">
       <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v4a5 5 0 0 0 5 5h4"/></svg><span>Rules &amp; plugs</span></a>
-    <a class="nav-item" href="/classic#settings">
+    <a class="nav-item" href="#settings" data-page="settings">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 18h2"/><path d="M10 18h10"/><circle cx="8" cy="18" r="2"/><path d="M4 12h16"/></svg><span>Settings</span></a>
   </nav>
   <aside class="tools" aria-label="View options">
@@ -48,7 +48,7 @@
       </div>
       <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
       <a id="use-v1" class="btn" href="/classic">Open classic view</a>
-      <p class="side-note">History, Rules &amp; plugs and Settings open in the classic view for now. To make classic the default, use Settings → Default view.</p>
+      <p class="side-note">History, Rules &amp; plugs and Settings still use the classic screens. To make classic the default, use Settings → Default view.</p>
   </aside>
 
   <main>
@@ -178,7 +178,7 @@
       <section class="card">
         <div class="card-head">
           <h2>Rates and charging, next 24 hours</h2>
-          <a href="/classic#settings">Edit rates</a>
+          <a href="#settings">Edit rates</a>
         </div>
         <div class="strip-wrap">
           <div id="strip" class="strip"></div>
@@ -189,14 +189,20 @@
 
       <div class="grid2">
         <section class="card">
-          <div class="card-head"><h2>Last 24 hours</h2><a href="/classic#automation">All decisions</a></div>
+          <div class="card-head"><h2>Last 24 hours</h2><a href="#rules">All decisions</a></div>
           <div id="activity" class="rows"></div>
         </section>
         <section class="card">
-          <div class="card-head"><h2>Your settings</h2><a href="/classic#automation">Edit</a></div>
+          <div class="card-head"><h2>Your settings</h2><a href="#rules">Edit</a></div>
           <div id="settings-list" class="rows"></div>
         </section>
       </div>
+    </div>
+
+    <!-- History, Rules & plugs and Settings: the classic screens, framed so
+         this menu stays in place. -->
+    <div id="page-classic" class="page-embed" hidden>
+      <iframe id="classic-frame" title="Classic screens"></iframe>
     </div>
   </main>
 </div>

@@ -2732,3 +2732,26 @@ body.home-monitoring footer { display: none !important; }
 .lg-monitoring-warning { grid-column: 1 / -1; border: 1px solid #b78024; background: rgba(245, 158, 11, .1); color: var(--text); border-radius: var(--radius-sm); padding: 14px; overflow-wrap: anywhere; }
 .lg-monitoring-warning p { margin: 8px 0 0; font-size: 13px; line-height: 1.5; }
 .tab-dot.lg-alert-dot { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .15); }
+
+/* ---------- embedded in the V2 dashboard (/classic?embed=1) ---------- */
+.embed .topbar { display: none; }
+.embed .tab[hidden] { display: none; }
+.embed .tabs.single { display: none; }
+.embed main { padding-top: 16px; }
+/* Same look as V2: its tokens, heading face and flat cards. */
+.embed[data-theme="dark"] {
+  --bg: #0E1116; --bg-elev: #171C23; --bg-elev-2: #222933; --border: #262D37; --border-soft: #222933;
+  --text: #E8ECF1; --text-dim: #A3ADBA; --text-mute: #A3ADBA;
+}
+.embed[data-theme="light"] {
+  --bg: #F3F5F7; --bg-elev: #FFFFFF; --bg-elev-2: #EEF2F6; --border: #E3E7EC; --border-soft: #EEF1F4;
+  --text: #0F172A; --text-dim: #475569; --text-mute: #5B6778;
+  --accent: #15803D; --accent-2: #1D4ED8; --accent-3: #B45309; --danger: #B91C1C;
+  --danger-soft: rgba(185,28,28,.10);
+  --shadow-card: none;
+  color-scheme: light;
+}
+.embed[data-theme="dark"] { color-scheme: dark; }
+.embed h2 { font-family: 'Space Grotesk', var(--font-sans); font-weight: 600; }
+.embed .card { box-shadow: none; background: var(--bg-elev); }
+.embed body::before { display: none; }

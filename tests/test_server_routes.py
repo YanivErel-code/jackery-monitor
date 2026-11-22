@@ -115,7 +115,13 @@ def test_root_opens_v2_by_default_and_classic_once_saved_as_default(client):
 def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     classic = client.get("/classic").text
     assert 'href="/v2"' in classic and 'id="default-ui"' in classic
-    assert 'href="/classic"' in client.get("/v2").text
+    v2 = client.get("/v2").text
+    assert 'href="/classic"' in v2
+    # History, Rules & plugs and Settings stay inside V2's menu (framed
+    # classic screens) instead of navigating away from it.
+    for page in ("history", "rules", "settings"):
+        assert f'href="#{page}" data-page="{page}"' in v2
+    assert 'id="classic-frame"' in v2 and "classList.add('embed')" in classic
     spec = next(s for s in client.get("/api/settings").json()["settings"] if s["key"] == "default_ui_version")
     assert (spec["default"], spec["min"], spec["max"], spec["control"]) == (2, 1, 2, "custom")
 
