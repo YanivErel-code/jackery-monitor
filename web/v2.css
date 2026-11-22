@@ -69,6 +69,8 @@ button { cursor: pointer; }
 
 main { grid-column: 2; grid-row: 1 / 3; min-width: 0; padding: 28px 32px 40px; }
 .page { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+.page-embed { margin: -28px -32px -40px; }
+.page-embed iframe { display: block; width: 100%; height: 100vh; border: 0; background: var(--bg); }
 .page-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
 
 /* ---------- cards ---------- */
@@ -197,6 +199,8 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .tools .device-box select { flex: 1; min-width: 140px; }
   .tools .btn { flex: 1; min-height: 44px; font-size: 13px; }
   .tools .side-note { display: none; }
+  .page-embed { margin: 0 -16px -96px; }
+  .page-embed iframe { height: calc(100vh - 150px - env(safe-area-inset-bottom)); }
   .status h2 { font-size: 20px; }
   .big span { font-size: 44px; }
   .next-title { font-size: 24px; }

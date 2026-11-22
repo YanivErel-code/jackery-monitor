@@ -73,14 +73,30 @@
   });
   applyTheme(document.documentElement.dataset.theme || 'light');
 
+  // Pages V2 has not rebuilt yet show the classic screens in a frame.
+  const CLASSIC = {
+    history: { tabs: 'energy,forecast', first: 'energy', title: 'History' },
+    rules: { tabs: 'automation', first: 'automation', title: 'Rules & plugs' },
+    settings: { tabs: 'settings,device,logs', first: 'settings', title: 'Settings' },
+  };
+  let framed = null;
   function route() {
-    const page = location.hash === '#charging' ? 'charging' : 'live';
+    const name = location.hash.slice(1);
+    const page = name === 'charging' || CLASSIC[name] ? name : 'live';
     $('page-live').hidden = page !== 'live';
     $('page-charging').hidden = page !== 'charging';
+    $('page-classic').hidden = !CLASSIC[page];
+    if (CLASSIC[page] && framed !== page) {
+      framed = page;
+      const c = CLASSIC[page];
+      $('classic-frame').title = c.title;
+      $('classic-frame').src = '/classic?embed=1&tabs=' + c.tabs + '#' + c.first;
+    }
     for (const a of document.querySelectorAll('.nav-item[data-page]')) {
       if (a.dataset.page === page) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
     }
+    window.scrollTo(0, 0);
     drawCharts();
   }
   window.addEventListener('hashchange', route);
