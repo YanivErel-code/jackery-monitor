@@ -134,6 +134,15 @@
     for (const [id, v] of [['now-solar', solar], ['now-grid', grid], ['now-home', home]]) {
       $(id).classList.toggle('zero', !v);
     }
+    // Dots travel only on lines carrying power; more watts, faster dot.
+    for (const [name, w] of [['solar', solar], ['grid', grid], ['home', home]]) {
+      const on = (w ?? 0) > 5;
+      $('flow-line-' + name).classList.toggle('on', on);
+      const dot = $('flow-dot-' + name);
+      dot.setAttribute('visibility', on ? 'visible' : 'hidden');
+      if (on) dot.firstElementChild.setAttribute('dur', Math.max(0.7, 3.2 - w / 1200).toFixed(2) + 's');
+    }
+    $('flow-soc').textContent = pct(soc);
     const net = (num(t.input_power_w) ?? 0) - (home ?? 0);
     const filling = net > 20, draining = net < -20;
     $('now-net').classList.toggle('filling', filling);

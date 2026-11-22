@@ -34,6 +34,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
   switch, add, find, remove, Kasa account), battery rules, and AI insights.
   Switching a controller's plug by hand warns that it ignores the laundry hold.
 
+- V2 Live page shows the animated power flow again: solar and grid into the
+  battery, battery to the home, with a dot travelling along each line that is
+  carrying power (faster for more watts; still when reduced motion is set).
 - V2 Settings page, built natively, in seven sections: General (default view,
   location, runtime numbers), Rates (flat or time-of-day editor with presets),
   AI (provider, keys, models), Laundry (LG status and account), Backup (status,
