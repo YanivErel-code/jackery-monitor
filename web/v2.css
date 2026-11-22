@@ -137,6 +137,18 @@ input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--btn); }
   .f-control { flex: 1 1 100%; } .f-row.check .f-control { flex: none; }
   .f-control select { flex: 1; min-width: 0; }
 }
+.stack-lg { display: flex; flex-direction: column; gap: 20px; }
+.seg.wrap { flex-wrap: wrap; align-self: flex-start; }
+.seg button[aria-selected="true"] { background: var(--card); color: var(--ink); }
+table.edit input { min-height: 40px; width: 100%; min-width: 70px; text-align: left; }
+table.edit td { padding: 6px 6px 6px 0; }
+td.wrap { white-space: normal; text-align: left; min-width: 220px; }
+td.left, th.left { text-align: left; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+label.inline { display: flex; align-items: center; gap: 8px; }
+.tag { padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--info-bg); color: var(--info-text); }
+.tag.warning { background: var(--warn-bg); color: var(--warn-text); } .tag.error { background: var(--alert-bg); color: var(--alert-text); }
+.update-bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 16px; background: var(--warn-bg); color: var(--warn-text); border-bottom: 1px solid var(--warn-border); font-weight: 600; }
 .btn.small { min-height: 36px; padding: 0 12px; font-size: 13px; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
 .rows { display: flex; flex-direction: column; }

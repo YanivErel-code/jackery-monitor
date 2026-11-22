@@ -21,6 +21,7 @@ Docker: see docker-compose.yml
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -5017,11 +5018,13 @@ def api_v2_overview(device_sn: str | None = None):
                    for d in lg_thinq.monitor.public_status().get("devices") or []}
     except Exception:
         aliases = {}
-    return ui_overview.build_overview(
+    overview = ui_overview.build_overview(
         now=now, device_sn=device_sn, decision=decision, snapshot=snapshot,
         config=smart_charge.get_config(device_sn), cost_plan=cost_module.get_plan(),
         tz_offset_seconds=tz_off, decision_rows=list(reversed(rows)),
         hourly_rows=hourly, day_start=day_start, appliance_aliases=aliases)
+    # Lets an open page notice a deploy and reload itself.
+    return {**overview, "ui_build": ui_build()}
 
 
 @app.get("/api/smart_charge/analytics")
@@ -6558,15 +6561,46 @@ async def api_backup_setup_restore_run(body: dict):
 
 # Static UI. Two dashboards ship side by side: "/" opens whichever one the
 # `default_ui_version` setting names; /v2 and /classic always open theirs.
-def _shell(name: str) -> FileResponse:
-    # A cached shell may otherwise outlive its scripts across deployment.
-    # Revalidation still allows storage and the SW's offline fallback.
-    return FileResponse(WEB_DIR / name, headers={"Cache-Control": "no-cache"})
+_SHELL_CACHE: dict[str, tuple[float, bytes, str]] = {}
+
+
+def ui_build() -> str:
+    """Short id that changes whenever any file under web/ changes. Stamped
+    into asset URLs and the V2 shell, so a page left open (or a cache in
+    front of us) can never pair a new shell with old scripts."""
+    stamp = max(p.stat().st_mtime for p in WEB_DIR.iterdir() if p.is_file())
+    cached = _SHELL_CACHE.get("__build__")
+    if cached and cached[0] == stamp:
+        return cached[2]
+    digest = hashlib.sha256()
+    for path in sorted(WEB_DIR.iterdir()):
+        if path.is_file():
+            digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    build = digest.hexdigest()[:12]
+    _SHELL_CACHE.clear()
+    _SHELL_CACHE["__build__"] = (stamp, b"", build)
+    return build
+
+
+def _shell(name: str) -> Response:
+    build = ui_build()
+    cached = _SHELL_CACHE.get(name)
+    if not cached:
+        html = (WEB_DIR / name).read_text(encoding="utf-8")
+        html = re.sub(r'(/static/[\w.-]+\.(?:js|css))"', rf'\1?v={build}"', html)
+        cached = (0.0, html.replace("__UI_BUILD__", build).encode("utf-8"), build)
+        _SHELL_CACHE[name] = cached
+    # Revalidate on every load; the ETag still allows a cheap 304.
+    return Response(cached[1], media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-cache", "ETag": f'"{name}-{build}"'})
 
 
 @app.get("/")
-def index():
-    return _shell("v2.html" if user_settings.get("default_ui_version") == 2 else "index.html")
+def index(ui: str | None = None):
+    # "?ui=v1" is the link the first V2 release used for the classic tabs;
+    # pages still open from that release keep working.
+    classic = ui == "v1" or user_settings.get("default_ui_version") != 2
+    return _shell("index.html" if classic else "v2.html")
 
 
 @app.get("/v2")

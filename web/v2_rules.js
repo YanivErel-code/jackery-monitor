@@ -348,5 +348,6 @@
     loadPlugs(); loadAccount(); loadRules(); loadInsights(); pollReview();
   }
 
+  window.V2.forms = { send, say, run };
   window.V2.register('rules', { show: load });
 })();

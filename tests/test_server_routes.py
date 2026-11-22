@@ -82,7 +82,8 @@ def client(app):
 # ---------- auth flow + middleware ----------
 
 @pytest.mark.parametrize("path", ["/", "/v2", "/classic", "/sw.js", "/static/app.js", "/static/v2.js",
-                                  "/static/v2_history.js"])
+                                  "/static/v2_history.js",
+                                  "/static/v2_rules.js", "/static/v2_settings.js"])
 def test_dashboard_shell_revalidates_after_deployment(client, path):
     """HTML and scripts must not age independently across a deployment."""
     response = client.get(path)
@@ -126,7 +127,7 @@ def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     import re
     for src in re.findall(r'<script src="([^"]+)"', v2):
         assert client.get(src).status_code == 200, src
-    assert 'id="page-history"' in v2 and 'id="page-rules"' in v2
+    assert all(f'id="page-{name}"' in v2 for name in ("history", "rules", "settings"))
     # A colour token used but not defined renders as nothing (an invisible
     # button, in one case), so every var() must exist in both themes.
     css = client.get("/static/v2.css").text
@@ -137,6 +138,29 @@ def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     assert 'id="classic-frame"' in v2 and "classList.add('embed')" in classic
     spec = next(s for s in client.get("/api/settings").json()["settings"] if s["key"] == "default_ui_version")
     assert (spec["default"], spec["min"], spec["max"], spec["control"]) == (2, 1, 2, "custom")
+
+
+def test_shells_stamp_asset_urls_with_the_build_and_report_it(client, app):
+    """A new shell must never run against cached old scripts: asset URLs
+    change with the build, and the overview reports the build so an open
+    page can reload itself after a deploy."""
+    import re
+    build = app.ui_build()
+    assert re.fullmatch(r"[0-9a-f]{12}", build)
+    for path in ("/v2", "/classic"):
+        html = client.get(path).text
+        assets = re.findall(r'"(/static/[^"]+\.(?:js|css)[^"]*)"', html)
+        assert assets and all(a.endswith(f"?v={build}") for a in assets), assets
+        assert client.get(assets[0]).status_code == 200
+    assert f'name="ui-build" content="{build}"' in client.get("/v2").text
+    assert "__UI_BUILD__" not in client.get("/v2").text
+    sn = app.state.device.device_sn if app.state.device else "MOCK"
+    assert client.get("/api/v2/overview", params={"device_sn": sn}).json()["ui_build"] == build
+
+
+def test_first_release_classic_links_still_open_the_classic_view(client):
+    assert client.get("/?ui=v1").text == client.get("/classic").text
+    assert client.get("/").text == client.get("/v2").text
 
 
 def test_v2_overview_answers_before_any_decision_exists(client, app):
