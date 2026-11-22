@@ -81,7 +81,7 @@ def client(app):
 
 # ---------- auth flow + middleware ----------
 
-@pytest.mark.parametrize("path", ["/", "/v2", "/sw.js", "/static/app.js", "/static/v2.js"])
+@pytest.mark.parametrize("path", ["/", "/v2", "/classic", "/sw.js", "/static/app.js", "/static/v2.js"])
 def test_dashboard_shell_revalidates_after_deployment(client, path):
     """HTML and scripts must not age independently across a deployment."""
     response = client.get(path)
@@ -99,13 +99,25 @@ def test_v2_dashboard_is_behind_the_same_auth_gate(unauth_client):
     assert unauth_client.get("/api/v2/overview").status_code == 401
 
 
-def test_classic_page_forwards_to_v2_only_by_browser_choice(client):
-    """The V1/V2 choice lives in localStorage, so "/" always serves the
-    classic shell and the shell itself decides whether to forward."""
-    html = client.get("/").text
-    assert "localStorage.getItem('jackery_ui') === 'v2'" in html
-    assert 'id="use-v2"' in html
-    assert 'id="use-v1"' in client.get("/v2").text
+def test_root_opens_v2_by_default_and_classic_once_saved_as_default(client):
+    """"/" follows the saved default; /v2 and /classic always open theirs."""
+    v2, classic = client.get("/v2").text, client.get("/classic").text
+    assert 'id="page-live"' in v2 and 'id="tab-live"' in classic
+    assert client.get("/").text == v2
+    r = client.post("/api/settings", json={"default_ui_version": 1})
+    assert r.status_code == 200 and r.json()["settings"]["default_ui_version"] == 1
+    assert client.get("/").text == classic
+    assert client.get("/v2").text == v2
+    client.post("/api/settings", json={"default_ui_version": 2})
+    assert client.get("/").text == v2
+
+
+def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
+    classic = client.get("/classic").text
+    assert 'href="/v2"' in classic and 'id="default-ui"' in classic
+    assert 'href="/classic"' in client.get("/v2").text
+    spec = next(s for s in client.get("/api/settings").json()["settings"] if s["key"] == "default_ui_version")
+    assert (spec["default"], spec["min"], spec["max"], spec["control"]) == (2, 1, 2, "custom")
 
 
 def test_v2_overview_answers_before_any_decision_exists(client, app):

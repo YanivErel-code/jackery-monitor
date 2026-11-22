@@ -33,11 +33,11 @@
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg><span>Live</span></a>
     <a class="nav-item" href="#charging" data-page="charging">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><span>Charging</span></a>
-    <a class="nav-item" href="/?ui=v1#energy">
+    <a class="nav-item" href="/classic#energy">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg><span>History</span></a>
-    <a class="nav-item" href="/?ui=v1#automation">
+    <a class="nav-item" href="/classic#automation">
       <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v4a5 5 0 0 0 5 5h4"/></svg><span>Rules &amp; plugs</span></a>
-    <a class="nav-item" href="/?ui=v1#settings">
+    <a class="nav-item" href="/classic#settings">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 18h2"/><path d="M10 18h10"/><circle cx="8" cy="18" r="2"/><path d="M4 12h16"/></svg><span>Settings</span></a>
   </nav>
   <aside class="tools" aria-label="View options">
@@ -47,8 +47,8 @@
         <div class="conn"><span id="conn-dot" class="dot"></span><span id="conn-text">Connecting…</span></div>
       </div>
       <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
-      <button id="use-v1" class="btn" type="button">Switch to classic view</button>
-      <p class="side-note">History, Rules &amp; plugs and Settings open in the classic view for now.</p>
+      <a id="use-v1" class="btn" href="/classic">Open classic view</a>
+      <p class="side-note">History, Rules &amp; plugs and Settings open in the classic view for now. To make classic the default, use Settings → Default view.</p>
   </aside>
 
   <main>
@@ -77,6 +77,11 @@
           <div class="bar-labels">
             <span id="bat-reserve-label" hidden></span>
             <span id="bat-target-label" hidden></span>
+          </div>
+          <div class="rows">
+            <div class="row"><span>Lowest before sunrise</span><b id="bat-low">—</b></div>
+            <div class="row"><span id="bat-sunrise-label">At sunrise</span><b id="bat-sunrise">—</b></div>
+            <div class="row"><span id="bat-time-label">At the current rate</span><b id="bat-time">—</b></div>
           </div>
           <details id="packs" hidden>
             <summary>Battery packs</summary>
@@ -173,7 +178,7 @@
       <section class="card">
         <div class="card-head">
           <h2>Rates and charging, next 24 hours</h2>
-          <a href="/?ui=v1#settings">Edit rates</a>
+          <a href="/classic#settings">Edit rates</a>
         </div>
         <div class="strip-wrap">
           <div id="strip" class="strip"></div>
@@ -184,11 +189,11 @@
 
       <div class="grid2">
         <section class="card">
-          <div class="card-head"><h2>Last 24 hours</h2><a href="/?ui=v1#automation">All decisions</a></div>
+          <div class="card-head"><h2>Last 24 hours</h2><a href="/classic#automation">All decisions</a></div>
           <div id="activity" class="rows"></div>
         </section>
         <section class="card">
-          <div class="card-head"><h2>Your settings</h2><a href="/?ui=v1#automation">Edit</a></div>
+          <div class="card-head"><h2>Your settings</h2><a href="/classic#automation">Edit</a></div>
           <div id="settings-list" class="rows"></div>
         </section>
       </div>

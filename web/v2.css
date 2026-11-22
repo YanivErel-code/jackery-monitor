@@ -63,8 +63,8 @@ button { cursor: pointer; }
 .conn { display: flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
 .dot.ok { background: var(--ok); }
-.btn { min-height: 44px; padding: 0 14px; border: 1px solid var(--ctl-border); border-radius: 8px; background: var(--card); font-weight: 600; }
-.btn:hover { background: var(--nav-active); }
+.btn { display: flex; align-items: center; justify-content: center; color: var(--ink); min-height: 44px; padding: 0 14px; border: 1px solid var(--ctl-border); border-radius: 8px; background: var(--card); font-weight: 600; }
+.btn:hover { background: var(--nav-active); text-decoration: none; }
 .side-note { font-size: 12px; color: var(--muted); padding: 0 4px; }
 
 main { grid-column: 2; grid-row: 1 / 3; min-width: 0; padding: 28px 32px 40px; }
