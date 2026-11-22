@@ -93,11 +93,41 @@
 
         <section class="card">
           <h3>Right now</h3>
-          <div class="rows">
-            <div class="row"><span><i class="sw solar"></i>Solar in</span><b id="now-solar">—</b></div>
-            <div class="row"><span><i class="sw grid"></i>Grid in</span><b id="now-grid">—</b></div>
-            <div class="row"><span><i class="sw home"></i>Home using</span><b id="now-home">—</b></div>
-          </div>
+          <!-- Power flow: a dot travels along each line that is carrying
+               power, faster for more watts. v2.js sets the numbers, shows or
+               hides each dot and sets its speed. -->
+          <svg id="flow" class="flow" viewBox="0 0 360 236" role="img" aria-label="Power flow between solar, grid, battery and home">
+            <defs>
+              <path id="flow-path-solar" d="M 62 56 L 180 118"></path>
+              <path id="flow-path-grid" d="M 62 180 L 180 118"></path>
+              <path id="flow-path-home" d="M 180 118 L 298 118"></path>
+            </defs>
+            <line id="flow-line-solar" class="flow-line" x1="62" y1="56" x2="180" y2="118"></line>
+            <line id="flow-line-grid" class="flow-line" x1="62" y1="180" x2="180" y2="118"></line>
+            <line id="flow-line-home" class="flow-line" x1="180" y1="118" x2="298" y2="118"></line>
+            <circle id="flow-dot-solar" class="flow-dot solar" r="5" visibility="hidden"><animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#flow-path-solar"></mpath></animateMotion></circle>
+            <circle id="flow-dot-grid" class="flow-dot grid" r="5" visibility="hidden"><animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#flow-path-grid"></mpath></animateMotion></circle>
+            <circle id="flow-dot-home" class="flow-dot home" r="5" visibility="hidden"><animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#flow-path-home"></mpath></animateMotion></circle>
+
+            <circle class="flow-node solar" cx="62" cy="56" r="26"></circle>
+            <g class="flow-icon" transform="translate(50 44)"><circle cx="12" cy="12" r="4.5"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></g>
+            <text class="flow-name" x="62" y="20" text-anchor="middle">Solar</text>
+            <text id="now-solar" class="flow-watts" x="62" y="102" text-anchor="middle">—</text>
+
+            <circle class="flow-node grid" cx="62" cy="180" r="26"></circle>
+            <g class="flow-icon" transform="translate(50 168)"><path d="M13 2L5 14h6l-1 8 8-12h-6z"></path></g>
+            <text class="flow-name" x="62" y="144" text-anchor="middle">Grid</text>
+            <text id="now-grid" class="flow-watts" x="62" y="226" text-anchor="middle">—</text>
+
+            <circle class="flow-node battery" cx="180" cy="118" r="38"></circle>
+            <text class="flow-name" x="180" y="68" text-anchor="middle">Battery</text>
+            <text id="flow-soc" class="flow-soc" x="180" y="125" text-anchor="middle">—</text>
+
+            <circle class="flow-node home" cx="298" cy="118" r="26"></circle>
+            <g class="flow-icon" transform="translate(286 106)"><path d="M3 11l9-8 9 8"></path><path d="M5 10v10h14V10"></path></g>
+            <text class="flow-name" x="298" y="82" text-anchor="middle">Home</text>
+            <text id="now-home" class="flow-watts" x="298" y="164" text-anchor="middle">—</text>
+          </svg>
           <div id="now-net" class="net"><span id="now-net-text">—</span><b id="now-net-w"></b></div>
         </section>
 

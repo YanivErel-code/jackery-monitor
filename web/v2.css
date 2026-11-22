@@ -182,6 +182,21 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
 .net { display: flex; justify-content: space-between; gap: 8px; padding: 10px 12px; border-radius: 8px; background: var(--info-bg); color: var(--info-text); font-weight: 600; }
 .net.filling { background: var(--mid-bg); color: var(--mid-text); }
 
+/* ---------- power flow ---------- */
+.flow { display: block; width: 100%; max-width: 420px; height: auto; margin: 0 auto; }
+.flow-line { stroke: var(--track); stroke-width: 6; stroke-linecap: round; }
+.flow-line.on { stroke: var(--border); }
+.flow-node { fill: var(--card); stroke-width: 3; }
+.flow-node.solar { stroke: var(--amber); } .flow-node.grid { stroke: var(--blue); }
+.flow-node.battery { stroke: var(--ok); } .flow-node.home { stroke: var(--text2); }
+.flow-dot.solar { fill: var(--amber); } .flow-dot.grid { fill: var(--blue); } .flow-dot.home { fill: var(--ink); }
+.flow-icon { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.flow text { font-family: Inter, system-ui, sans-serif; fill: var(--text3); font-size: 12px; }
+.flow .flow-watts { fill: var(--ink); font: 600 15px 'Space Grotesk', sans-serif; }
+.flow .flow-watts.zero { fill: var(--muted); font-weight: 500; }
+.flow .flow-soc { fill: var(--ink); font: 600 22px 'Space Grotesk', sans-serif; }
+@media (prefers-reduced-motion: reduce) { .flow-dot { display: none; } .flow-line.on { stroke: var(--text3); } }
+
 /* ---------- charts ---------- */
 .chart { display: block; width: 100%; height: 260px; }
 .chart text { font: 11px Inter, system-ui, sans-serif; fill: var(--text3); }
