@@ -89,6 +89,19 @@ def test_laundry_hold_names_the_appliance_and_flags_reserve_risk():
     assert out["laundry"]["blocked"] is True and out["laundry"]["names"] == "the dryer"
 
 
+def test_laundry_hold_without_a_finish_estimate_still_explains_the_risk():
+    lg = {"blocked_now": True, "expected_finish_ts": None, "charge_not_before_ts": None,
+          "appliances": [{"device_id": "d1", "activity": "active"}, {"device_id": "w1", "activity": "active"}]}
+    proj = {"scheduled_sunrise_soc_pct": 0.0, "scheduled_min_soc_pct": 0.0, "reserve_soc_pct": 10.0,
+            "plan_feasible": False, "warnings": ["Reserve 10% cannot be maintained by this plan"]}
+    head = _overview(snapshot=_snapshot(lg_protection=lg, schedule_projection=proj, planned_intervals=[]),
+                     appliance_aliases={"d1": "Dryer", "w1": "Washer"})["headline"]
+    assert head["title"] == "Charging is on hold while the dryer and washer run."
+    assert head["detail"] == ("The battery is on course to fall below the 10% reserve before charging "
+                              "can resume. Pause the appliance or reduce other loads.")
+    assert head["tone"] == "alert"
+
+
 def test_charging_headline_distinguishes_cheap_from_peak_charging():
     on = _decision(action="on", executed=True)
     cheap = _overview(decision=on, snapshot=_snapshot(

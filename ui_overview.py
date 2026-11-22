@@ -216,10 +216,14 @@ def headline(*, mode: str, decision: dict | None, snapshot: dict, blocks: list[d
         at_finish = _num(lg.get("soc_at_finish_pct"))
         if at_finish is not None:
             detail.append(f"The battery should be at about {at_finish:.0f}% by then.")
-        if reserve_risk:
+        if reserve_risk and at_finish is not None:
             detail.append(f"That is below the {reserve:.0f}% reserve.")
+        elif reserve_risk:
+            detail.append(f"The battery is on course to fall below the {reserve:.0f}% reserve before charging "
+                          "can resume. Pause the appliance or reduce other loads.")
+        names = _names(lg, aliases)
         return {"state": "hold", "tone": "alert" if reserve_risk else "warn",
-                "title": f"Charging is on hold while {_names(lg, aliases)} runs.",
+                "title": f"Charging is on hold while {names} {'run' if ' and ' in names or ',' in names else 'runs'}.",
                 "detail": " ".join(detail)}
     if decision.get("action") == "on" and decision.get("executed"):
         current = next((b for b in blocks if b["start"] <= now < b["end"]), blocks[0] if blocks else None)
