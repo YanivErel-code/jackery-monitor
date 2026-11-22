@@ -2786,6 +2786,7 @@ function renderSettingsFields(specs) {
   const fields = $('settings-fields');
   fields.innerHTML = '';
   for (const s of specs) {
+    if (s.control === 'custom') continue;   // has its own control elsewhere
     const row = document.createElement('div');
     row.className = 'settings-row';
     const k = escapeHtml(s.key);
@@ -4206,12 +4207,31 @@ function renderDevicePicker(devices, selectedId) {
 // ============================================================
 // RECONNECT
 // ============================================================
-// Classic ↔ V2 is a per-browser preference; index.html reads it before
-// first paint and forwards to /v2.
-$('use-v2')?.addEventListener('click', () => {
-  try { localStorage.setItem('jackery_ui', 'v2'); } catch (e) { /* storage blocked */ }
-  location.href = '/v2';
-});
+// Which dashboard opens at "/" is a server setting (default_ui_version).
+const defaultUiSelect = $('default-ui');
+if (defaultUiSelect) {
+  const note = $('default-ui-status');
+  fetch('/api/settings').then(r => r.json()).then(j => {
+    const spec = (j.settings || []).find(s => s.key === 'default_ui_version');
+    if (spec) defaultUiSelect.value = String(spec.value);
+  }).catch(() => {});
+  defaultUiSelect.addEventListener('change', async () => {
+    note.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ default_ui_version: Number(defaultUiSelect.value) }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      note.textContent = defaultUiSelect.value === '1'
+        ? 'Saved. The classic view now opens by default.'
+        : 'Saved. The new dashboard now opens by default.';
+    } catch (err) {
+      note.textContent = `Save failed: ${err.message || err}`;
+    }
+  });
+}
 
 $('logout')?.addEventListener('click', async () => {
   if (!confirm('Sign out of the Jackery Monitor?')) return;

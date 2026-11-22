@@ -18,9 +18,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
   next charge, protections, a 24-hour rate strip, the last day's changes and
   the settings in everyday wording. Light and dark themes; phone layout with a
   bottom bar. History, Rules & plugs and Settings still open in the classic view.
-- Per-browser choice between the two: "New view" in the classic top bar,
-  "Switch to classic view" in V2. Stored in `localStorage`; `/?ui=v1` opens the
-  classic view once without changing the choice.
+- V2 is the default at `/`. Settings → Default view (`default_ui_version`,
+  saved on the server) switches the default to the classic view; `/v2` and
+  `/classic` always open theirs, and each links to the other.
 - `GET /api/v2/overview` builds that page's data from the latest saved
   smart-charge decision. The projected battery curve re-integrates the saved
   no-charge forecast plus planned charging and is labelled approximate.

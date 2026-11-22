@@ -59,7 +59,7 @@
   const deviceSn = () => status?.device?.device_sn || null;
   const snQuery = () => (deviceSn() ? '?device_sn=' + encodeURIComponent(deviceSn()) : '');
 
-  // ---------- theme, version switch, navigation ----------
+  // ---------- theme and navigation ----------
   function applyTheme(theme) {
     document.documentElement.dataset.theme = theme;
     const dark = theme === 'dark';
@@ -72,11 +72,6 @@
     applyTheme(next);
   });
   applyTheme(document.documentElement.dataset.theme || 'light');
-
-  $('use-v1').addEventListener('click', () => {
-    try { localStorage.setItem('jackery_ui', 'v1'); } catch (e) { /* private mode */ }
-    location.href = '/';
-  });
 
   function route() {
     const page = location.hash === '#charging' ? 'charging' : 'live';
@@ -104,6 +99,10 @@
     $('bat-kwh').textContent = soc != null && capacity
       ? (soc / 100 * capacity / 1000).toFixed(1) + ' of ' + (capacity / 1000).toFixed(1) + ' kWh' : '';
     $('bat-fill').style.width = (soc ?? 0) + '%';
+
+    const toFull = num(t.time_to_full_h), toEmpty = num(t.time_remaining_h);
+    const hours = (h) => (h < 1 ? Math.round(h * 60) + ' min' : h.toFixed(1) + ' hours');
+    $('bat-time').textContent = toFull ? 'Full in ' + hours(toFull) : toEmpty ? 'Empty in ' + hours(toEmpty) : 'Holding steady';
 
     const solar = num(t.solar_input_w), grid = num(t.ac_input_w), home = num(t.output_power_w);
     $('now-solar').textContent = watts(solar);
@@ -209,6 +208,10 @@
       $('bat-' + key).style.left = $('bat-' + key + '-label').style.left = v + '%';
       $('bat-' + key + '-label').textContent = label + ' ' + Math.round(v) + '%';
     }
+
+    $('bat-low').textContent = pct(o.plan.min_soc_pct);
+    $('bat-sunrise').textContent = pct(o.plan.sunrise_soc_pct);
+    if (o.plan.sunrise_ts) $('bat-sunrise-label').textContent = 'At sunrise, ' + clock(o.plan.sunrise_ts);
 
     const g = o.grid_today;
     $('cost-total').textContent = usd(g.cost);

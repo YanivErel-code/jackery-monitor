@@ -4,16 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Jackery Monitor</title>
-  <script>
-    // Per-browser choice between this classic view and the V2 dashboard.
-    // "?ui=v1" opens the classic view once without changing the choice,
-    // which is how V2 links to the tabs it has not replaced yet.
-    try {
-      if (localStorage.getItem('jackery_ui') === 'v2' && !/[?&]ui=v1\b/.test(location.search)) {
-        location.replace('/v2');
-      }
-    } catch (e) { /* storage blocked: stay on the classic view */ }
-  </script>
 
   <!-- PWA -->
   <link rel="manifest" href="/manifest.webmanifest" />
@@ -103,7 +93,7 @@
         <span id="conn-dot" class="conn-dot"></span>
         <span id="conn-text">connecting…</span>
       </span>
-      <button id="use-v2" class="btn btn-ghost" title="Switch to the new dashboard. You can switch back from its menu.">New view</button>
+      <a id="use-v2" class="btn btn-ghost" href="/v2" title="Open the new dashboard">New view</a>
       <button id="reconnect" class="btn btn-ghost" title="Re-scan and reconnect">Reconnect</button>
       <button id="logout" class="btn btn-ghost" title="Sign out">Sign out</button>
     </div>
@@ -1481,6 +1471,26 @@
       </nav>
 
       <div data-settings-group="general">
+      <section class="card device-card" id="settings-card-default-view">
+        <div class="card-header">
+          <h2>Default view</h2>
+          <span id="default-ui-status" class="hint" role="status"></span>
+        </div>
+        <p class="hint" style="margin:6px 0 12px">
+          Which dashboard opens when you go to this site. Saved on the server, so it applies to every browser. The other one stays one click away.
+        </p>
+        <div class="settings-row">
+          <label class="settings-label" for="default-ui">
+            <span class="settings-label-text">Open by default</span>
+          </label>
+          <div class="settings-control">
+            <select id="default-ui">
+              <option value="2">New dashboard (V2)</option>
+              <option value="1">Classic view (V1)</option>
+            </select>
+          </div>
+        </div>
+      </section>
       <section class="card device-card collapsible" id="settings-card-runtime" data-settings-collapse-key="runtime">
         <div class="card-header collapsible-header">
           <h2>Runtime settings</h2>

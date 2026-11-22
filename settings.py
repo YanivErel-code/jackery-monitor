@@ -30,6 +30,17 @@ SETTINGS_PATH = os.environ.get("JACKERY_SETTINGS_FILE", "/data/settings.json")
 # `type` must be `int`. (We keep it scalar-only on purpose — keeps the UI
 # trivial.) min/max are inclusive bounds enforced on save.
 SCHEMA: dict[str, dict[str, Any]] = {
+    "default_ui_version": {
+        "env": "JACKERY_DEFAULT_UI_VERSION",
+        "default": 2,
+        "type": "int",
+        "min": 1,
+        "max": 2,
+        "label": "Default view",
+        "hint": "Which dashboard opens at the site root: 2 = new dashboard, 1 = classic.",
+        # Rendered as its own picker in Settings, not as a number field.
+        "control": "custom",
+    },
     "poll_interval_s": {
         "env": "POLL_INTERVAL_S",
         "default": 2,

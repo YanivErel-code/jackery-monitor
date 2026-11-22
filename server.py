@@ -6556,19 +6556,27 @@ async def api_backup_setup_restore_run(body: dict):
     return result
 
 
-# Static UI
-@app.get("/")
-def index():
+# Static UI. Two dashboards ship side by side: "/" opens whichever one the
+# `default_ui_version` setting names; /v2 and /classic always open theirs.
+def _shell(name: str) -> FileResponse:
     # A cached shell may otherwise outlive its scripts across deployment.
     # Revalidation still allows storage and the SW's offline fallback.
-    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(WEB_DIR / name, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/")
+def index():
+    return _shell("v2.html" if user_settings.get("default_ui_version") == 2 else "index.html")
 
 
 @app.get("/v2")
 def index_v2():
-    # The redesigned dashboard. Which one opens at "/" is a per-browser
-    # choice kept in localStorage; index.html forwards here when it is "v2".
-    return FileResponse(WEB_DIR / "v2.html", headers={"Cache-Control": "no-cache"})
+    return _shell("v2.html")
+
+
+@app.get("/classic")
+def index_classic():
+    return _shell("index.html")
 
 
 # PWA manifest + service worker MUST live at the site root for the browser
