@@ -454,10 +454,28 @@
   }
 
   // ---------- loading ----------
+  // A page left open across a deploy would keep running old code against a
+  // new server. Reload when the server reports a different build, unless the
+  // user is in the middle of typing; then offer it instead.
+  const BUILD = document.querySelector('meta[name="ui-build"]')?.content || '';
+  function checkBuild(serverBuild) {
+    if (!serverBuild || !BUILD || BUILD === '__UI_BUILD__' || serverBuild === BUILD) return;
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || '');
+    // Reload at most once per build, so a cache that keeps handing back the
+    // old shell cannot trap the page in a reload loop.
+    let tried = null;
+    try { tried = sessionStorage.getItem('jackery_reloaded_for'); } catch (e) { /* private mode */ }
+    if (typing || tried === serverBuild) { $('update-bar').hidden = false; return; }
+    try { sessionStorage.setItem('jackery_reloaded_for', serverBuild); } catch (e) { $('update-bar').hidden = false; return; }
+    location.reload();
+  }
+  $('update-now').addEventListener('click', () => location.reload());
+
   async function loadOverview() {
     if (!deviceSn()) return;
     try {
       overview = await getJson('/api/v2/overview' + snQuery());
+      checkBuild(overview.ui_build);
       renderOverview();
     } catch (e) {
       $('hl-badge').className = 'badge warn';

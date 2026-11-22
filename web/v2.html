@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Jackery Monitor</title>
+  <meta name="ui-build" content="__UI_BUILD__" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
   <link rel="apple-touch-icon" href="/static/icon.svg" />
@@ -26,6 +27,7 @@
   <link rel="stylesheet" href="/static/v2.css" />
 </head>
 <body>
+<div id="update-bar" class="update-bar" hidden><span>A newer version of this page is ready.</span><button id="update-now" class="btn small" type="button">Reload</button></div>
 <div class="shell">
   <nav class="side" aria-label="Main">
     <div class="brand"><span class="brand-dot"></span>Jackery Monitor</div>
@@ -48,7 +50,7 @@
       </div>
       <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
       <a id="use-v1" class="btn" href="/classic">Open classic view</a>
-      <p class="side-note">Settings still uses the classic screens. To make classic the default, use Settings → Default view.</p>
+      <p class="side-note">To make the classic view the default, use Settings → Default view.</p>
   </aside>
 
   <main>
@@ -353,8 +355,176 @@
       </section>
     </div>
 
-    <!-- Settings: the classic screens, framed so
-         this menu stays in place. -->
+    <!-- ================= SETTINGS ================= -->
+    <div id="page-settings" class="page" hidden>
+      <header class="page-head">
+        <h1>Settings</h1>
+        <div id="settings-sub" class="muted"></div>
+      </header>
+      <div class="seg wrap" role="tablist" aria-label="Settings sections" id="set-tabs">
+        <button type="button" role="tab" data-sec="general" aria-selected="true">General</button>
+        <button type="button" role="tab" data-sec="rates" aria-selected="false">Rates</button>
+        <button type="button" role="tab" data-sec="ai" aria-selected="false">AI</button>
+        <button type="button" role="tab" data-sec="laundry" aria-selected="false">Laundry</button>
+        <button type="button" role="tab" data-sec="backup" aria-selected="false">Backup</button>
+        <button type="button" role="tab" data-sec="device" aria-selected="false">Device</button>
+        <button type="button" role="tab" data-sec="logs" aria-selected="false">Logs</button>
+      </div>
+
+      <div data-sec="general" class="stack-lg">
+        <section class="card">
+          <h2>Default view</h2>
+          <p class="muted">Which dashboard opens when you go to this site. Applies to every browser.</p>
+          <div class="f-row"><label class="f-label" for="set-default-ui"><b>Open by default</b></label>
+            <div class="f-control"><select id="set-default-ui"><option value="2">New dashboard</option><option value="1">Classic view</option></select></div></div>
+          <span id="default-msg" class="form-msg" role="status"></span>
+        </section>
+        <section class="card">
+          <h2>Location</h2>
+          <p class="muted">Used for the weather and sunrise times behind the solar forecast.</p>
+          <p id="loc-current"></p>
+          <div class="inline-form">
+            <label>Search for a town<input id="loc-q" type="text" autocomplete="off"></label>
+            <button id="loc-search" class="btn" type="button">Search</button>
+          </div>
+          <div id="loc-results" class="items"></div>
+          <span id="loc-msg" class="form-msg" role="status"></span>
+        </section>
+        <section class="card">
+          <h2>How the app runs</h2>
+          <p class="muted">These take effect within a few seconds of saving. No restart is needed.</p>
+          <div id="runtime-form" class="form"></div>
+          <div class="form-foot"><button id="runtime-save" class="btn primary" type="button">Save</button><span id="runtime-msg" class="form-msg" role="status"></span></div>
+        </section>
+      </div>
+
+      <div data-sec="rates" class="stack-lg" hidden>
+        <section class="card">
+          <h2>Electricity rates</h2>
+          <p class="muted">Used to pick the cheapest charging hours and to price what you buy and save.</p>
+          <div class="f-row"><label class="f-label" for="rate-type"><b>Kind of plan</b></label>
+            <div class="f-control"><select id="rate-type"><option value="flat">One price all day</option><option value="tou">Price changes by time of day</option></select></div></div>
+          <div class="f-row" id="rate-flat-row"><label class="f-label" for="rate-flat"><b>Price</b></label>
+            <div class="f-control"><input id="rate-flat" type="number" step="0.01" min="0" inputmode="decimal"><span class="f-unit">$ per kWh</span></div></div>
+          <div id="rate-tou" hidden>
+            <div class="table-wrap"><table id="rate-table" class="edit">
+              <thead><tr><th scope="col" class="left">Name</th><th scope="col" class="left">From hour</th><th scope="col" class="left">To hour</th><th scope="col" class="left">$ per kWh</th><th scope="col" class="left">Months (empty = all year)</th><th scope="col"><span class="sr">Remove</span></th></tr></thead>
+              <tbody></tbody></table></div>
+            <p class="muted small">Hours are 0 to 24 on a 24-hour clock; "from 21 to 24" means 9 PM to midnight. Months are numbers, such as 6,7,8,9.</p>
+            <button id="rate-add" class="btn small" type="button">Add a time band</button>
+          </div>
+          <div class="f-row"><label class="f-label" for="rate-preset"><b>Start from a ready-made plan</b><span>Fills in the form. Nothing is saved until you press Save.</span></label>
+            <div class="f-control"><select id="rate-preset"></select></div></div>
+          <div class="form-foot"><button id="rate-save" class="btn primary" type="button">Save rates</button><span id="rate-msg" class="form-msg" role="status"></span></div>
+        </section>
+      </div>
+
+      <div data-sec="ai" class="stack-lg" hidden>
+        <section class="card">
+          <h2>AI provider</h2>
+          <p class="muted">Used for the review on the Rules &amp; plugs page and the optional explanation on each charging decision.</p>
+          <div class="f-row"><label class="f-label" for="ai-provider"><b>Use</b></label>
+            <div class="f-control"><select id="ai-provider"><option value="anthropic">Claude (Anthropic)</option><option value="openai">ChatGPT (OpenAI)</option></select></div></div>
+          <span id="provider-msg" class="form-msg" role="status"></span>
+        </section>
+        <section class="card" data-ai="anthropic">
+          <h2>Claude (Anthropic)</h2>
+          <p class="ai-key muted"></p>
+          <div class="inline-form">
+            <label>API key<input class="ai-key-input" type="password" autocomplete="off" placeholder="Paste a new key to replace"></label>
+            <button class="btn ai-key-save" type="button">Save key</button>
+            <button class="btn ai-key-remove" type="button" hidden>Remove key</button>
+          </div>
+          <div class="form ai-models"></div>
+          <div class="form-foot"><button class="btn primary ai-models-save" type="button">Save model choices</button><span class="form-msg ai-msg" role="status"></span></div>
+        </section>
+        <section class="card" data-ai="openai">
+          <h2>ChatGPT (OpenAI)</h2>
+          <p class="ai-key muted"></p>
+          <div class="inline-form">
+            <label>API key<input class="ai-key-input" type="password" autocomplete="off" placeholder="Paste a new key to replace"></label>
+            <button class="btn ai-key-save" type="button">Save key</button>
+            <button class="btn ai-key-remove" type="button" hidden>Remove key</button>
+          </div>
+          <div class="form ai-models"></div>
+          <div class="form-foot"><button class="btn primary ai-models-save" type="button">Save model choices</button><span class="form-msg ai-msg" role="status"></span></div>
+        </section>
+      </div>
+
+      <div data-sec="laundry" class="stack-lg" hidden>
+        <section class="card">
+          <div class="card-head"><h2>LG washer and dryer</h2><button id="lg-refresh" class="btn small" type="button">Check now</button></div>
+          <p class="muted">Read-only: the app watches whether they are running so it can hold charging. It never sends them commands. Choose which appliances hold charging on the Rules &amp; plugs page.</p>
+          <p id="lg-state"></p>
+          <div id="lg-devices" class="items"></div>
+          <details>
+            <summary>Connect or replace the LG account</summary>
+            <div class="inline-form">
+              <label>LG personal access token<input id="lg-token" type="password" autocomplete="off"></label>
+              <label>Country code<input id="lg-country" type="text" maxlength="2" autocomplete="off" value="US" style="width: 80px"></label>
+              <button id="lg-save" class="btn" type="button">Save and connect</button>
+            </div>
+            <p class="muted small">Create a token at connect-pat.lgthinq.com.</p>
+          </details>
+          <span id="lg-msg" class="form-msg" role="status"></span>
+        </section>
+      </div>
+
+      <div data-sec="backup" class="stack-lg" hidden>
+        <section class="card">
+          <div class="card-head"><h2>Backups</h2>
+            <div class="item-side"><button id="bk-test" class="btn small" type="button">Test connection</button><button id="bk-run" class="btn small" type="button">Back up now</button></div></div>
+          <p id="bk-state"></p>
+          <span id="bk-msg" class="form-msg" role="status"></span>
+          <h3>Recent backups</h3>
+          <div class="table-wrap"><table id="bk-table"><thead><tr><th scope="col">When</th><th scope="col">Result</th><th scope="col">Size</th><th scope="col">Took</th></tr></thead><tbody></tbody></table></div>
+          <p class="muted">To change where backups go, or to restore from one, <a href="/classic#settings">open the classic backup screen</a>. Restoring replaces this app's data, so it stays a deliberate step there.</p>
+        </section>
+      </div>
+
+      <div data-sec="device" class="stack-lg" hidden>
+        <section class="card">
+          <div class="card-head"><h2>This device</h2>
+            <div class="item-side"><button id="dev-reconnect" class="btn small" type="button">Reconnect</button><button id="dev-pause" class="btn small" type="button">Pause updates for 10 minutes</button></div></div>
+          <div id="dev-info" class="rows"></div>
+          <span id="dev-msg" class="form-msg" role="status"></span>
+        </section>
+        <section class="card">
+          <h2>Battery size</h2>
+          <p class="muted">Worked out from the model and the packs attached. Set a number only if that is wrong.</p>
+          <div class="f-row"><label class="f-label" for="dev-capacity"><b>Total capacity</b><span id="dev-capacity-auto"></span></label>
+            <div class="f-control"><input id="dev-capacity" type="number" min="500" max="200000" step="1" inputmode="numeric" placeholder="automatic"><span class="f-unit">Wh</span></div></div>
+          <div class="form-foot"><button id="dev-capacity-save" class="btn primary" type="button">Save battery size</button><span id="cap-msg" class="form-msg" role="status"></span></div>
+        </section>
+        <section class="card">
+          <h2>AC auto recovery</h2>
+          <div class="f-row check"><label class="f-label" for="dev-watchdog"><b>Turn AC back on after an overload trip</b><span>If the inverter trips, the app switches the AC output off and on to recover it.</span></label>
+            <div class="f-control"><input id="dev-watchdog" type="checkbox"></div></div>
+          <span id="wd-msg" class="form-msg" role="status"></span>
+        </section>
+        <section class="card">
+          <h2>What the app has learned</h2>
+          <p class="muted">Measured from your own usage and used by the forecast.</p>
+          <div id="dev-params" class="items"></div>
+          <span id="param-msg" class="form-msg" role="status"></span>
+        </section>
+        <section class="card">
+          <h2>Accounts</h2>
+          <div id="dev-account" class="items"></div>
+          <span id="acct-msg" class="form-msg" role="status"></span>
+        </section>
+      </div>
+
+      <div data-sec="logs" class="stack-lg" hidden>
+        <section class="card">
+          <div class="card-head"><h2>Activity log</h2>
+            <div class="item-side"><label class="inline"><input id="log-problems" type="checkbox"> Problems only</label><button id="log-refresh" class="btn small" type="button">Refresh</button></div></div>
+          <div class="table-wrap"><table id="log-table"><thead><tr><th scope="col" class="left">Time</th><th scope="col" class="left">Kind</th><th scope="col" class="left">What happened</th></tr></thead><tbody></tbody></table></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Fallback frame for any page without a native version. -->
     <div id="page-classic" class="page-embed" hidden>
       <iframe id="classic-frame" title="Classic screens"></iframe>
     </div>
@@ -363,5 +533,6 @@
 <script src="/static/v2.js"></script>
 <script src="/static/v2_history.js"></script>
 <script src="/static/v2_rules.js"></script>
+<script src="/static/v2_settings.js"></script>
 </body>
 </html>

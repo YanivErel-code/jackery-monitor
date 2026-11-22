@@ -34,7 +34,21 @@ limitations still apply; a major version is not a hardware safety guarantee.
   switch, add, find, remove, Kasa account), battery rules, and AI insights.
   Switching a controller's plug by hand warns that it ignores the laundry hold.
 
+- V2 Settings page, built natively, in seven sections: General (default view,
+  location, runtime numbers), Rates (flat or time-of-day editor with presets),
+  AI (provider, keys, models), Laundry (LG status and account), Backup (status,
+  history, test, back up now), Device (info, battery size, AC auto recovery,
+  learned values, accounts) and Logs. Changing the backup destination and
+  restoring remain on the classic backup screen.
+- The V2 shell and the classic shell stamp every script and stylesheet URL with
+  a build id, and an open V2 page reloads itself once when the server reports a
+  different build.
+
 ### Fixed
+- A V2 page left open across a deploy kept running old code against the new
+  server (History opened Live; tabs did nothing). See the build id above.
+- `/?ui=v1`, the classic-tab link used by the first V2 release, opens the
+  classic view again.
 - Service worker offline fallback no longer hands the default view's shell to
   the classic frame or to script requests.
 
