@@ -81,7 +81,8 @@ def client(app):
 
 # ---------- auth flow + middleware ----------
 
-@pytest.mark.parametrize("path", ["/", "/v2", "/classic", "/sw.js", "/static/app.js", "/static/v2.js"])
+@pytest.mark.parametrize("path", ["/", "/v2", "/classic", "/sw.js", "/static/app.js", "/static/v2.js",
+                                  "/static/v2_history.js"])
 def test_dashboard_shell_revalidates_after_deployment(client, path):
     """HTML and scripts must not age independently across a deployment."""
     response = client.get(path)
@@ -121,6 +122,11 @@ def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     # classic screens) instead of navigating away from it.
     for page in ("history", "rules", "settings"):
         assert f'href="#{page}" data-page="{page}"' in v2
+    # Every script the V2 shell loads must be one the server actually has.
+    import re
+    for src in re.findall(r'<script src="([^"]+)"', v2):
+        assert client.get(src).status_code == 200, src
+    assert 'id="page-history"' in v2
     assert 'id="classic-frame"' in v2 and "classList.add('embed')" in classic
     spec = next(s for s in client.get("/api/settings").json()["settings"] if s["key"] == "default_ui_version")
     assert (spec["default"], spec["min"], spec["max"], spec["control"]) == (2, 1, 2, "custom")

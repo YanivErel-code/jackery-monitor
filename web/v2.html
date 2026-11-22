@@ -48,7 +48,7 @@
       </div>
       <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
       <a id="use-v1" class="btn" href="/classic">Open classic view</a>
-      <p class="side-note">History, Rules &amp; plugs and Settings still use the classic screens. To make classic the default, use Settings → Default view.</p>
+      <p class="side-note">Rules &amp; plugs and Settings still use the classic screens. To make classic the default, use Settings → Default view.</p>
   </aside>
 
   <main>
@@ -199,7 +199,83 @@
       </div>
     </div>
 
-    <!-- History, Rules & plugs and Settings: the classic screens, framed so
+    <!-- ================= HISTORY ================= -->
+    <div id="page-history" class="page" hidden>
+      <header class="page-head">
+        <h1>History</h1>
+        <div id="history-sub" class="muted"></div>
+      </header>
+
+      <div id="hist-tiles" class="grid4"></div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Energy by day</h2>
+          <div class="seg" role="group" aria-label="Days shown" id="hist-range">
+            <button type="button" data-days="14" aria-pressed="false">14 days</button>
+            <button type="button" data-days="30" aria-pressed="true">30 days</button>
+            <button type="button" data-days="90" aria-pressed="false">90 days</button>
+          </div>
+        </div>
+        <div class="legend">
+          <span><i class="lg blk solar"></i>From solar</span>
+          <span><i class="lg blk charge"></i>From the grid</span>
+          <span><i class="lg line"></i>Used by the home</span>
+        </div>
+        <svg id="chart-daily" class="chart" role="img" aria-label="Solar and grid energy in, and energy used, per day"></svg>
+        <div id="hist-records" class="grid3 plain"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Day by day</h2>
+          <button id="hist-more" class="btn small" type="button" aria-expanded="false">Show all days</button>
+        </div>
+        <div class="table-wrap">
+          <table id="hist-table">
+            <thead><tr><th scope="col">Day</th><th scope="col">Solar</th><th scope="col">Grid</th><th scope="col">Used</th><th scope="col">Battery low – high</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Battery forecast, next 5 days</h2>
+          <span id="fc-where" class="muted small"></span>
+        </div>
+        <p class="muted">This is the battery level if no grid charging happened. Planned charging is on the Charging page.</p>
+        <div class="legend">
+          <span><i class="lg line"></i>Battery without grid charging</span>
+          <span><i class="lg blk solar"></i>Expected solar</span>
+        </div>
+        <svg id="chart-forecast" class="chart" role="img" aria-label="Forecast battery level and expected solar for the next five days"></svg>
+        <div id="fc-days" class="grid5"></div>
+      </section>
+
+      <section class="card">
+        <h2>How good were the sunrise forecasts?</h2>
+        <p class="muted">Each evening at sunset the forecast for the next sunrise is saved, then compared with what happened. The forecast assumes no grid charging, so nights when the charger ran end higher than forecast.</p>
+        <div class="table-wrap">
+          <table id="acc-table">
+            <thead><tr><th scope="col">Night of</th><th scope="col">Forecast at sunset</th><th scope="col">Actual at sunrise</th><th scope="col">Off by</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" id="hist-devices-card" hidden>
+        <h2>All devices</h2>
+        <div class="table-wrap">
+          <table id="dev-table">
+            <thead><tr><th scope="col">Device</th><th scope="col">Used today</th><th scope="col">Used, 30 days</th><th scope="col">Solar, 30 days</th><th scope="col">Solar, lifetime</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Rules & plugs and Settings: the classic screens, framed so
          this menu stays in place. -->
     <div id="page-classic" class="page-embed" hidden>
       <iframe id="classic-frame" title="Classic screens"></iframe>
@@ -207,5 +283,6 @@
   </main>
 </div>
 <script src="/static/v2.js"></script>
+<script src="/static/v2_history.js"></script>
 </body>
 </html>
