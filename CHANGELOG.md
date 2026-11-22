@@ -29,6 +29,11 @@ limitations still apply; a major version is not a hardware safety guarantee.
   records, a day-by-day table, the 5-day no-charge battery forecast, saved
   sunrise forecasts against what happened, and a per-device table.
 
+- V2 Rules & plugs page, built natively: grid charging and excess-solar
+  settings in everyday wording with explicit Save buttons, smart plugs (status,
+  switch, add, find, remove, Kasa account), battery rules, and AI insights.
+  Switching a controller's plug by hand warns that it ignores the laundry hold.
+
 ### Fixed
 - Service worker offline fallback no longer hands the default view's shell to
   the classic frame or to script requests.
