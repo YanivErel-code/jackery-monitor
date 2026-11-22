@@ -4,6 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Jackery Monitor</title>
+  <script>
+    // Per-browser choice between this classic view and the V2 dashboard.
+    // "?ui=v1" opens the classic view once without changing the choice,
+    // which is how V2 links to the tabs it has not replaced yet.
+    try {
+      if (localStorage.getItem('jackery_ui') === 'v2' && !/[?&]ui=v1\b/.test(location.search)) {
+        location.replace('/v2');
+      }
+    } catch (e) { /* storage blocked: stay on the classic view */ }
+  </script>
 
   <!-- PWA -->
   <link rel="manifest" href="/manifest.webmanifest" />
@@ -93,6 +103,7 @@
         <span id="conn-dot" class="conn-dot"></span>
         <span id="conn-text">connecting…</span>
       </span>
+      <button id="use-v2" class="btn btn-ghost" title="Switch to the new dashboard. You can switch back from its menu.">New view</button>
       <button id="reconnect" class="btn btn-ghost" title="Re-scan and reconnect">Reconnect</button>
       <button id="logout" class="btn btn-ghost" title="Sign out">Sign out</button>
     </div>

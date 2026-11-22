@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Jackery Monitor</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Jackery" />
+  <script>
+    // Apply the saved theme before first paint; fall back to the system setting.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('jackery_theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/v2.css" />
+</head>
+<body>
+<div class="shell">
+  <nav class="side" aria-label="Main">
+    <div class="brand"><span class="brand-dot"></span>Jackery Monitor</div>
+    <a class="nav-item" href="#live" data-page="live">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg><span>Live</span></a>
+    <a class="nav-item" href="#charging" data-page="charging">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><span>Charging</span></a>
+    <a class="nav-item" href="/?ui=v1#energy">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg><span>History</span></a>
+    <a class="nav-item" href="/?ui=v1#automation">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v4a5 5 0 0 0 5 5h4"/></svg><span>Rules &amp; plugs</span></a>
+    <a class="nav-item" href="/?ui=v1#settings">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 18h2"/><path d="M10 18h10"/><circle cx="8" cy="18" r="2"/><path d="M4 12h16"/></svg><span>Settings</span></a>
+  </nav>
+  <aside class="tools" aria-label="View options">
+      <div class="device-box">
+        <label for="device">Device</label>
+        <select id="device"></select>
+        <div class="conn"><span id="conn-dot" class="dot"></span><span id="conn-text">Connecting…</span></div>
+      </div>
+      <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
+      <button id="use-v1" class="btn" type="button">Switch to classic view</button>
+      <p class="side-note">History, Rules &amp; plugs and Settings open in the classic view for now.</p>
+  </aside>
+
+  <main>
+    <!-- ================= LIVE ================= -->
+    <div id="page-live" class="page">
+      <header class="page-head">
+        <h1>Live</h1>
+        <div id="clock" class="muted"></div>
+      </header>
+
+      <section class="card status" aria-live="polite">
+        <span id="hl-badge" class="badge">Loading</span>
+        <h2 id="hl-title">Loading the plan…</h2>
+        <p id="hl-detail"></p>
+      </section>
+
+      <div class="grid3">
+        <section class="card">
+          <h3>Battery</h3>
+          <div class="big"><span id="bat-pct">—</span><small id="bat-kwh"></small></div>
+          <div class="bar" id="bat-bar" role="img" aria-label="Battery level">
+            <div id="bat-fill" class="bar-fill"></div>
+            <div id="bat-reserve" class="bar-mark" hidden></div>
+            <div id="bat-target" class="bar-mark" hidden></div>
+          </div>
+          <div class="bar-labels">
+            <span id="bat-reserve-label" hidden></span>
+            <span id="bat-target-label" hidden></span>
+          </div>
+          <details id="packs" hidden>
+            <summary>Battery packs</summary>
+            <div id="packs-list" class="rows"></div>
+          </details>
+        </section>
+
+        <section class="card">
+          <h3>Right now</h3>
+          <div class="rows">
+            <div class="row"><span><i class="sw solar"></i>Solar in</span><b id="now-solar">—</b></div>
+            <div class="row"><span><i class="sw grid"></i>Grid in</span><b id="now-grid">—</b></div>
+            <div class="row"><span><i class="sw home"></i>Home using</span><b id="now-home">—</b></div>
+          </div>
+          <div id="now-net" class="net"><span id="now-net-text">—</span><b id="now-net-w"></b></div>
+        </section>
+
+        <section class="card">
+          <h3>Grid cost today</h3>
+          <div class="big"><span id="cost-total">—</span><small id="cost-kwh"></small></div>
+          <div id="cost-tiers" class="rows"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Battery, last 6 hours and next 18</h2>
+          <div class="legend">
+            <span><i class="lg line"></i>Measured</span>
+            <span><i class="lg dash"></i>Forecast (approximate)</span>
+            <span><i class="lg blk charge"></i>Grid charging</span>
+            <span><i class="lg blk peak"></i>Peak rate</span>
+            <span><i class="lg blk mid"></i>Partial-peak</span>
+          </div>
+        </div>
+        <svg id="chart-battery" class="chart" role="img" aria-label="Battery level, measured and forecast"></svg>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Live power</h2>
+          <div class="seg" role="group" aria-label="Time range">
+            <button type="button" data-hours="1" aria-pressed="false">1 hour</button>
+            <button type="button" data-hours="6" aria-pressed="true">6 hours</button>
+            <button type="button" data-hours="24" aria-pressed="false">24 hours</button>
+          </div>
+        </div>
+        <div class="legend">
+          <span><i class="lg line solar"></i>Solar in</span>
+          <span><i class="lg line grid"></i>Grid in</span>
+          <span><i class="lg line"></i>Home using</span>
+        </div>
+        <svg id="chart-power" class="chart" role="img" aria-label="Solar, grid and home power"></svg>
+      </section>
+
+      <div class="grid2">
+        <section class="card">
+          <h2>Outputs</h2>
+          <div id="outputs" class="rows"></div>
+          <p id="outputs-msg" class="muted small" role="status"></p>
+        </section>
+        <section class="card">
+          <h2>Needs attention</h2>
+          <div id="attention" class="stack"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- ================= CHARGING ================= -->
+    <div id="page-charging" class="page" hidden>
+      <header class="page-head">
+        <h1>Charging</h1>
+        <div id="charging-sub" class="muted"></div>
+      </header>
+
+      <div class="grid2">
+        <section class="card">
+          <h3>Next charge</h3>
+          <div id="next-title" class="next-title">—</div>
+          <p id="next-detail"></p>
+          <div class="stats">
+            <div><span>Now</span><b id="stat-now">—</b></div>
+            <div><span>Lowest before sunrise</span><b id="stat-low">—</b></div>
+            <div><span>At sunrise</span><b id="stat-sunrise">—</b></div>
+          </div>
+          <p id="next-nocharge" class="muted"></p>
+        </section>
+        <section class="card">
+          <h3>Protections</h3>
+          <div id="protections" class="stack"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Rates and charging, next 24 hours</h2>
+          <a href="/?ui=v1#settings">Edit rates</a>
+        </div>
+        <div class="strip-wrap">
+          <div id="strip" class="strip"></div>
+          <div id="strip-charge" class="strip-charge"></div>
+          <div id="strip-axis" class="strip-axis"></div>
+        </div>
+      </section>
+
+      <div class="grid2">
+        <section class="card">
+          <div class="card-head"><h2>Last 24 hours</h2><a href="/?ui=v1#automation">All decisions</a></div>
+          <div id="activity" class="rows"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>Your settings</h2><a href="/?ui=v1#automation">Edit</a></div>
+          <div id="settings-list" class="rows"></div>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/v2.js"></script>
+</body>
+</html>

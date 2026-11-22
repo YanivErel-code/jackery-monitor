@@ -9,6 +9,22 @@ limitations still apply; a major version is not a hardware safety guarantee.
 
 ## [Unreleased]
 
+### Added
+- V2 dashboard at `/v2`, alongside the classic view. Live opens with a
+  plain-language status line ("Not charging. Next charge starts at 12 AM.",
+  "Charging is on hold while the dryer runs.", "No grid charging needed."),
+  then battery, live power, today's grid cost by rate tier, and one chart of
+  measured and projected battery level over the rate bands. Charging shows the
+  next charge, protections, a 24-hour rate strip, the last day's changes and
+  the settings in everyday wording. Light and dark themes; phone layout with a
+  bottom bar. History, Rules & plugs and Settings still open in the classic view.
+- Per-browser choice between the two: "New view" in the classic top bar,
+  "Switch to classic view" in V2. Stored in `localStorage`; `/?ui=v1` opens the
+  classic view once without changing the choice.
+- `GET /api/v2/overview` builds that page's data from the latest saved
+  smart-charge decision. The projected battery curve re-integrates the saved
+  no-charge forecast plus planned charging and is labelled approximate.
+
 ### Fixed
 - Summarise forecast accuracy only over prediction pairs with no grid charging
   between the forecast and its target. The stored forecast is the no-charge

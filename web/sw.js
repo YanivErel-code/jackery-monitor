@@ -14,10 +14,12 @@
 // standard cache + FastAPI's Last-Modified header handle revalidation
 // fine, and a stale CSS in the SW cache once cost us a "phantom Confirm
 // password field on the login page" debugging spiral.
-const CACHE = 'jackery-shell-v6';
+const CACHE = 'jackery-shell-v7';
 const SHELL = [
   '/',
+  '/v2',
   '/static/app.js',
+  '/static/v2.js',
   '/static/dashboard_requests.js',
   '/static/icon.svg',
   '/manifest.webmanifest',
