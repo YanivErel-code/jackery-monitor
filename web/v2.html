@@ -35,10 +35,12 @@
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg><span>Live</span></a>
     <a class="nav-item" href="#charging" data-page="charging">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><span>Charging</span></a>
+    <a class="nav-item" href="#forecast" data-page="forecast">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.5 1.5M17.6 17.6l1.5 1.5M4.9 19.1l1.5-1.5M17.6 6.4l1.5-1.5"/></svg><span>Forecast</span></a>
     <a class="nav-item" href="#history" data-page="history">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></svg><span>History</span></a>
     <a class="nav-item" href="#rules" data-page="rules">
-      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v4a5 5 0 0 0 5 5h4"/></svg><span>Rules &amp; plugs</span></a>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v4a5 5 0 0 0 5 5h4"/></svg><span>Rules<span class="wide"> &amp; plugs</span></span></a>
     <a class="nav-item" href="#settings" data-page="settings">
       <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 18h2"/><path d="M10 18h10"/><circle cx="8" cy="18" r="2"/><path d="M4 12h16"/></svg><span>Settings</span></a>
   </nav>
@@ -231,6 +233,63 @@
       </div>
     </div>
 
+    <!-- ================= FORECAST ================= -->
+    <div id="page-forecast" class="page" hidden>
+      <header class="page-head">
+        <h1>Forecast</h1>
+        <div id="forecast-sub" class="muted"></div>
+      </header>
+
+      <div id="sun-tiles" class="grid4"></div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Solar power, next 5 days</h2>
+          <span id="sun-note" class="muted small"></span>
+        </div>
+        <div class="legend">
+          <span><i class="lg blk solar"></i>Expected solar power</span>
+        </div>
+        <svg id="chart-solar" class="chart" role="img" aria-label="Expected solar power, hour by hour, for the next five days"></svg>
+        <div id="sun-days" class="grid5"></div>
+      </section>
+
+      <section class="card">
+        <h2>Solar by day: last week and the days ahead</h2>
+        <div class="legend">
+          <span><i class="lg blk solar"></i>Measured</span>
+          <span><i class="lg blk solar-fc"></i>Forecast</span>
+        </div>
+        <svg id="chart-sunweek" class="chart" role="img" aria-label="Measured solar energy for the last seven days and forecast solar energy for the days ahead"></svg>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Battery forecast, next 5 days</h2>
+          <span id="fc-where" class="muted small"></span>
+        </div>
+        <p class="muted">This is the battery level if no grid charging happened. Planned charging is on the Charging page.</p>
+        <div class="legend">
+          <span><i class="lg line"></i>Battery without grid charging</span>
+          <span><i class="lg blk solar"></i>Expected solar</span>
+        </div>
+        <svg id="chart-forecast" class="chart" role="img" aria-label="Forecast battery level and expected solar for the next five days"></svg>
+        <div id="fc-days" class="grid5"></div>
+      </section>
+
+      <section class="card">
+        <h2>How good were the sunrise forecasts?</h2>
+        <p class="muted">Each evening at sunset the forecast for the next sunrise is saved, then compared with what happened. The forecast assumes no grid charging, so nights when the charger ran end higher than forecast.</p>
+        <div class="table-wrap">
+          <table id="acc-table">
+            <thead><tr><th scope="col">Night of</th><th scope="col">Forecast at sunset</th><th scope="col">Actual at sunrise</th><th scope="col">Off by</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+
     <!-- ================= HISTORY ================= -->
     <div id="page-history" class="page" hidden>
       <header class="page-head">
@@ -266,31 +325,6 @@
         <div class="table-wrap">
           <table id="hist-table">
             <thead><tr><th scope="col">Day</th><th scope="col">Solar</th><th scope="col">Grid</th><th scope="col">Used</th><th scope="col">Battery low – high</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h2>Battery forecast, next 5 days</h2>
-          <span id="fc-where" class="muted small"></span>
-        </div>
-        <p class="muted">This is the battery level if no grid charging happened. Planned charging is on the Charging page.</p>
-        <div class="legend">
-          <span><i class="lg line"></i>Battery without grid charging</span>
-          <span><i class="lg blk solar"></i>Expected solar</span>
-        </div>
-        <svg id="chart-forecast" class="chart" role="img" aria-label="Forecast battery level and expected solar for the next five days"></svg>
-        <div id="fc-days" class="grid5"></div>
-      </section>
-
-      <section class="card">
-        <h2>How good were the sunrise forecasts?</h2>
-        <p class="muted">Each evening at sunset the forecast for the next sunrise is saved, then compared with what happened. The forecast assumes no grid charging, so nights when the charger ran end higher than forecast.</p>
-        <div class="table-wrap">
-          <table id="acc-table">
-            <thead><tr><th scope="col">Night of</th><th scope="col">Forecast at sunset</th><th scope="col">Actual at sunrise</th><th scope="col">Off by</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>

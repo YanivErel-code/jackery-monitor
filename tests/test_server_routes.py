@@ -127,7 +127,7 @@ def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     import re
     for src in re.findall(r'<script src="([^"]+)"', v2):
         assert client.get(src).status_code == 200, src
-    assert all(f'id="page-{name}"' in v2 for name in ("history", "rules", "settings"))
+    assert all(f'id="page-{name}"' in v2 for name in ("forecast", "history", "rules", "settings"))
     # A colour token used but not defined renders as nothing (an invisible
     # button, in one case), so every var() must exist in both themes.
     css = client.get("/static/v2.css").text

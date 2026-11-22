@@ -365,7 +365,7 @@
     svg.replaceChildren();
     const W = svg.clientWidth || 800, H = 260;
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-    const box = { l: 44, r: W - 12, t: 12, b: H - 44 };
+    const box = { l: 56, r: W - 12, t: 12, b: H - 44 };
     const X = (ts) => box.l + (ts - x0) / (x1 - x0) * (box.r - box.l);
     const Y = (v) => box.b - v / yMax * (box.b - box.t);
     return { svg, W, H, box, X, Y, yMax, yLabel, x0, x1 };
@@ -374,14 +374,26 @@
     for (let i = 0; i <= 4; i++) {
       const v = f.yMax * i / 4;
       f.svg.append(svgEl('line', { class: i ? 'gridline' : 'axis', x1: f.box.l, x2: f.box.r, y1: f.Y(v), y2: f.Y(v) }));
-      f.svg.append(svgEl('text', { x: f.box.l - 6, y: f.Y(v) + 4, 'text-anchor': 'end' }, f.yLabel(v)));
+      f.svg.append(svgEl('text', { x: f.box.l - 8, y: f.Y(v) + 4, 'text-anchor': 'end' }, f.yLabel(v)));
     }
     if (!stepH) return;            // caller draws its own x labels
     const step = stepH * 3600 * (f.W < 520 ? 2 : 1);
     const offset = tz() % step;
     for (let t = Math.ceil((f.x0 + offset) / step) * step - offset; t <= f.x1; t += step) {
-      f.svg.append(svgEl('text', { x: f.X(t), y: f.H - 8, 'text-anchor': 'middle' }, clock(t)));
+      f.svg.append(xLabel(f, f.X(t), clock(t)));
     }
+  }
+  // A label under the x axis, kept inside the chart at either end.
+  function xLabel(f, x, text, cls) {
+    const anchor = x > f.box.r - 26 ? 'end' : x < f.box.l + 26 ? 'start' : 'middle';
+    return svgEl('text', { class: cls || '', x: anchor === 'end' ? Math.min(x + 12, f.W - 2) : x, y: f.H - 8, 'text-anchor': anchor }, text);
+  }
+  // Smallest axis top that covers `peak` and splits into four round steps.
+  function niceMax(peak) {
+    for (let scale = 0.01; scale < 1e7; scale *= 10) {
+      for (const step of [1, 2, 2.5, 5]) if (step * scale * 4 >= peak) return step * scale * 4;
+    }
+    return peak;
   }
   const path = (f, rows, key) => rows.filter((r) => num(r[key]) != null)
     .map((r) => f.X(r.ts).toFixed(1) + ',' + f.Y(Math.min(r[key], f.yMax)).toFixed(1)).join(' ');
@@ -441,8 +453,7 @@
       return;
     }
     const peak = Math.max(500, ...powerRows.map((r) => Math.max(r.solar_w || 0, r.ac_input_w || 0, r.output_w || 0)));
-    const unit = peak > 4000 ? 2000 : peak > 2000 ? 1000 : 500;
-    const yMax = Math.ceil(peak / unit / 4) * unit * 4;
+    const yMax = niceMax(peak);
     const x1 = powerRows[powerRows.length - 1].ts;
     const f = frame(svg, x1 - powerHours * 3600, x1, yMax, (v) => (v >= 1000 ? (v / 1000) + ' kW' : v + ' W'));
     axes(f, powerHours === 1 ? 0.25 : powerHours === 6 ? 1 : 4);
@@ -532,7 +543,7 @@
 
   // Shared with the per-page scripts loaded after this one.
   window.V2 = {
-    $, el, svgEl, num, pct, watts, usd, clock, tz, getJson, deviceSn, frame, axes, path,
+    $, el, svgEl, num, pct, watts, usd, clock, tz, getJson, deviceSn, frame, axes, path, niceMax, xLabel,
     status: () => status,
     register(name, page) { pages[name] = page; if (location.hash.slice(1) === name) route(); },
   };

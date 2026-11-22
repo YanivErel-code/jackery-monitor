@@ -1,10 +1,11 @@
 /* Jackery Monitor — V2 History page: totals, energy by day, the 5-day
- * no-charge forecast and how the saved sunrise forecasts turned out.
+ * no-charge forecast and how the saved sunrise forecasts turned out — and the
+ * V2 Forecast page (solar first), which shares the same data.
  * Read-only; everything comes from the same endpoints the classic Energy
  * and Forecast tabs use. */
 (function () {
   'use strict';
-  const { $, el, svgEl, num, pct, usd, clock, tz, getJson, deviceSn, frame, axes } = window.V2;
+  const { $, el, svgEl, num, pct, usd, clock, tz, getJson, deviceSn, frame, axes, niceMax, xLabel } = window.V2;
 
   let daily = [];
   let days = 30;
@@ -48,9 +49,7 @@
       return;
     }
     const peak = Math.max(1, ...rows.map((r) => Math.max((r.solar_kwh || 0) + (r.grid_kwh || 0), r.consumed_kwh || 0)));
-    const unit = peak > 40 ? 20 : peak > 20 ? 10 : peak > 8 ? 5 : 2;
-    const yMax = Math.ceil(peak / unit) * unit;
-    const f = frame(svg, 0, rows.length, yMax, (v) => v + ' kWh');
+    const f = frame(svg, 0, rows.length, niceMax(peak), (v) => v + ' kWh');
     axes(f, 0);
     const slot = (f.box.r - f.box.l) / rows.length, w = Math.max(2, slot * 0.62);
     rows.forEach((r, i) => {
@@ -61,7 +60,7 @@
     svg.append(svgEl('polyline', { class: 's-home', points: rows.map((r, i) => f.X(i + 0.5).toFixed(1) + ',' + f.Y(r.consumed_kwh || 0).toFixed(1)).join(' ') }));
     const every = Math.ceil(rows.length / Math.max(2, Math.floor((f.box.r - f.box.l) / 70)));
     rows.forEach((r, i) => {
-      if ((rows.length - 1 - i) % every === 0) svg.append(svgEl('text', { x: f.X(i + 0.5), y: f.H - 8, 'text-anchor': 'middle' }, shortDay(dayDate(r.date))));
+      if ((rows.length - 1 - i) % every === 0) svg.append(xLabel(f, f.X(i + 0.5), shortDay(dayDate(r.date))));
     });
   }
 
@@ -129,6 +128,87 @@
       tile(longDay(tsDate(dayStart(d) + 43200)), v.solar.toFixed(1) + ' kWh solar',
         v.low <= 0.5 ? 'Would run empty without charging' : 'Low of ' + pct(v.low) + ' without charging', v.low <= low)));
     drawForecast();
+    renderSolar(byDay);
+  }
+
+  // ---------- solar forecast ----------
+  const sky = (cloud) => (cloud == null ? '' : cloud < 25 ? 'Mostly sunny' : cloud < 60 ? 'Partly cloudy' : cloud < 85 ? 'Mostly cloudy' : 'Overcast');
+  let sunDays = [];
+  function renderSolar(byDay) {
+    const rows = forecast?.forecast || [];
+    const today = rows.length ? localDay(rows[0].ts - (rows[0].duration_h || 0) * 1800) : null;
+    const extra = new Map();
+    for (const r of rows) {
+      const d = localDay(r.ts - (r.duration_h || 0) * 1800), x = extra.get(d) || { cloud: 0, hours: 0, peak: 0 };
+      if ((r.ghi_w_m2 || 0) > 0 && num(r.cloud_cover_pct) != null) { x.cloud += r.cloud_cover_pct * (r.duration_h || 0); x.hours += r.duration_h || 0; }
+      x.peak = Math.max(x.peak, r.solar_w || 0);
+      extra.set(d, x);
+    }
+    const soFar = (num(forecast?.today_actual_solar_wh) ?? 0) / 1000;
+    sunDays = [...byDay.entries()].slice(0, 5).map(([d, v]) => {
+      const x = extra.get(d) || {};
+      return { day: d, isToday: d === today, forecast: v.solar, soFar: d === today ? soFar : 0, cloud: x.hours ? x.cloud / x.hours : null, peak: x.peak || 0 };
+    });
+    const ready = forecast?.ready && sunDays.length;
+    $('forecast-sub').textContent = forecast?.weather_stale ? 'The weather data is out of date' : '';
+    const t = sunDays[0], tomorrow = sunDays[1];
+    const ahead = sunDays.slice(1).reduce((a, d) => (!a || d.forecast > a.forecast ? d : a), null);
+    $('sun-tiles').replaceChildren(...(ready ? [
+      ['Solar expected today', (t.soFar + t.forecast).toFixed(1) + ' kWh', t.soFar.toFixed(1) + ' kWh so far, ' + t.forecast.toFixed(1) + ' kWh still to come'],
+      ['Tomorrow', tomorrow ? tomorrow.forecast.toFixed(1) + ' kWh' : '—', tomorrow ? sky(tomorrow.cloud) : ''],
+      ['Best day ahead', ahead ? ahead.forecast.toFixed(1) + ' kWh' : '—', ahead ? longDay(tsDate(dayStart(ahead.day) + 43200)) : ''],
+      ['Next 5 days in total', sunDays.reduce((a, d) => a + d.forecast, 0).toFixed(1) + ' kWh', 'Your best recent hour was ' + ((forecast.solar_recent_peak_w || 0) / 1000).toFixed(1) + ' kW'],
+    ] : [['Solar forecast', 'Not ready', forecast && !forecast.configured ? 'Set a location in Settings.' : 'It needs a day or so of readings first.']]).map(([label, value, note]) =>
+      el('section', { class: 'card' }, el('h3', { text: label }), el('div', { class: 'mid-num', text: value }), el('div', { class: 'muted small', text: note }))));
+    $('sun-days').replaceChildren(...sunDays.map((d) => tile(longDay(tsDate(dayStart(d.day) + 43200)) + (d.isToday ? ' (rest of today)' : ''),
+      d.forecast.toFixed(1) + ' kWh', [sky(d.cloud), 'peak ' + (d.peak / 1000).toFixed(1) + ' kW'].filter(Boolean).join(' · '))));
+    drawSolar(); drawSunWeek();
+  }
+  function dayLines(svg, f, x0, x1) {
+    for (let d = localDay(x0) + 1; dayStart(d) < x1; d++) {
+      const x = f.X(dayStart(d));
+      svg.append(svgEl('line', { class: 'gridline', x1: x, x2: x, y1: f.box.t, y2: f.box.b }));
+      if (f.box.r - x > 40) svg.append(svgEl('text', { x: x + 4, y: f.H - 8 }, tsDate(dayStart(d) + 43200).toLocaleDateString('en-US', { weekday: 'short' })));
+    }
+  }
+  function drawSolar() {
+    const svg = $('chart-solar');
+    if (!svg.clientWidth) return;
+    const rows = (forecast?.forecast || []).filter((r) => num(r.ts) != null);
+    if (!forecast?.ready || !rows.length) {
+      svg.replaceChildren(svgEl('text', { class: 'empty', x: '50%', y: '50%', 'text-anchor': 'middle' }, 'The solar forecast is not ready yet.'));
+      return;
+    }
+    const x0 = rows[0].ts - (rows[0].duration_h || 0) * 3600, x1 = rows[rows.length - 1].ts;
+    const peak = Math.max(500, ...rows.map((r) => r.solar_w || 0));
+    const f = frame(svg, x0, x1, niceMax(peak), (v) => (v / 1000) + ' kW');
+    axes(f, 0);
+    dayLines(svg, f, x0, x1);
+    // Each row is stamped with the end of its hour; draw the hour's power at its middle.
+    const pts = rows.map((r) => f.X(r.ts - (r.duration_h || 0) * 1800).toFixed(1) + ',' + f.Y(r.solar_w || 0).toFixed(1));
+    svg.append(svgEl('polygon', { class: 'area-sun', points: f.X(x0) + ',' + f.box.b + ' ' + pts.join(' ') + ' ' + f.X(x1) + ',' + f.box.b }));
+    svg.append(svgEl('polyline', { class: 'line-sun', points: pts.join(' ') }));
+    $('sun-note').textContent = rows.some((r) => r.solar_capped) ? 'Some hours are capped at what your panels have actually reached.' : '';
+  }
+  function drawSunWeek() {
+    const svg = $('chart-sunweek');
+    if (!svg.clientWidth) return;
+    const past = daily.slice(-8).map((r) => ({ label: shortDay(dayDate(r.date)), iso: r.date, measured: r.solar_kwh || 0, forecast: 0 }));
+    const iso = (d) => { const x = tsDate(dayStart(d) + 43200); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
+    const bars = past.filter((p) => !sunDays.some((d) => iso(d.day) === p.iso)).slice(-7);
+    for (const d of sunDays) bars.push({ label: d.isToday ? 'Today' : shortDay(tsDate(dayStart(d.day) + 43200)), measured: d.soFar, forecast: d.forecast, today: d.isToday });
+    if (!bars.length) { svg.replaceChildren(svgEl('text', { class: 'empty', x: '50%', y: '50%', 'text-anchor': 'middle' }, 'Nothing to show yet.')); return; }
+    const peak = Math.max(1, ...bars.map((b) => b.measured + b.forecast));
+    const f = frame(svg, 0, bars.length, niceMax(peak), (v) => v + ' kWh');
+    axes(f, 0);
+    const slot = (f.box.r - f.box.l) / bars.length, w = Math.max(4, slot * 0.6), skip = Math.ceil(bars.length / Math.max(2, Math.floor((f.box.r - f.box.l) / 58)));
+    bars.forEach((b, i) => {
+      const x = f.X(i + 0.5) - w / 2;
+      if (b.measured > 0) svg.append(svgEl('rect', { class: 'bar-solar', x, y: f.Y(b.measured), width: w, height: f.box.b - f.Y(b.measured) }));
+      if (b.forecast > 0) svg.append(svgEl('rect', { class: 'bar-solar-fc', x, y: f.Y(b.measured + b.forecast), width: w, height: f.Y(b.measured) - f.Y(b.measured + b.forecast) }));
+      if (b.today || (bars.length - 1 - i) % skip === 0) svg.append(xLabel(f, f.X(i + 0.5), b.label, b.today ? 'today-mark' : ''));
+      if (slot > 44) svg.append(svgEl('text', { x: f.X(i + 0.5), y: f.Y(b.measured + b.forecast) - 5, 'text-anchor': 'middle' }, (b.measured + b.forecast).toFixed(1)));
+    });
   }
 
   function renderAccuracy(rows) {
@@ -158,12 +238,12 @@
 
   function load(force) {
     const sn = deviceSn();
-    if (!sn || (!force && loadedFor === sn)) { renderDaily(); renderForecast(); return; }
+    if (!sn || (!force && loadedFor === sn)) { drawAll(); return; }
     loadedFor = sn;
     const q = '?device_sn=' + encodeURIComponent(sn);
     $('history-sub').textContent = window.V2.status()?.device?.name || '';
     getJson('/api/energy/totals' + q).then(renderTotals).catch(() => {});
-    getJson('/api/energy/daily' + q + '&days=90').then((j) => { daily = j.daily || []; renderDaily(); }).catch(failed('hist-table', 5));
+    getJson('/api/energy/daily' + q + '&days=90').then((j) => { daily = j.daily || []; renderDaily(); drawSunWeek(); }).catch(failed('hist-table', 5));
     getJson('/api/forecast' + q).then((j) => {
       forecast = j;
       renderForecast();
@@ -181,5 +261,7 @@
   }
   $('hist-more').addEventListener('click', () => { showAll = !showAll; renderDaily(); });
 
-  window.V2.register('history', { show: load, draw() { drawDaily(); drawForecast(); } });
+  function drawAll() { drawDaily(); drawForecast(); drawSolar(); drawSunWeek(); }
+  window.V2.register('history', { show: load, draw: drawAll });
+  window.V2.register('forecast', { show: load, draw: drawAll });
 })();

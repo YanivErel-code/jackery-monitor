@@ -213,6 +213,10 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
 .chart .charge { fill: var(--blue); }
 .chart .bar-solar { fill: var(--amber); } .chart .bar-grid { fill: var(--blue); }
 .chart .area-solar { fill: var(--amber); opacity: .28; }
+.chart .area-sun { fill: var(--amber); opacity: .55; }
+.chart .line-sun { fill: none; stroke: var(--amber); stroke-width: 2; stroke-linejoin: round; }
+.chart .bar-solar-fc { fill: var(--amber); fill-opacity: .25; stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.chart .today-mark { fill: var(--ink); font-weight: 600; }
 .chart .zone-low { fill: var(--alert-bg); }
 .chart .s-solar { fill: none; stroke: var(--amber); stroke-width: 2; stroke-linejoin: round; }
 .chart .s-grid { fill: none; stroke: var(--blue); stroke-width: 2; stroke-linejoin: round; }
@@ -225,6 +229,7 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
 .lg.blk { width: 14px; height: 10px; border-radius: 2px; }
 .lg.charge { background: var(--blue); }
 .lg.solar { background: var(--amber); }
+.lg.solar-fc { background: transparent; border: 2px dashed var(--amber); }
 .lg.peak { background: var(--peak-bg); border: 1px solid var(--peak-line); }
 .lg.mid { background: var(--mid-bg); border: 1px solid var(--mid-line); }
 .seg { display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: var(--bg); }
@@ -285,6 +290,7 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .brand { display: none; }
   .nav-item { flex: 1; flex-direction: column; justify-content: center; gap: 2px; min-height: 60px; padding: 0 2px; font-size: 11px; border-radius: 0; text-align: center; }
   .nav-item svg { width: 22px; height: 22px; }
+  .nav-item .wide { display: none; }
   .tools { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 12px 16px 0; background: none; border-right: 0; }
   .tools .device-box { flex: 1 1 100%; flex-direction: row; align-items: center; flex-wrap: wrap; padding: 8px 12px; background: var(--card); border: 1px solid var(--border); }
   .tools .device-box select { flex: 1; min-width: 140px; }
