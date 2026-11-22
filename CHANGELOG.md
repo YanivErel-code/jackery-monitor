@@ -34,6 +34,11 @@ limitations still apply; a major version is not a hardware safety guarantee.
   switch, add, find, remove, Kasa account), battery rules, and AI insights.
   Switching a controller's plug by hand warns that it ignores the laundry hold.
 
+- V2 Forecast page, between Charging and History: solar expected today
+  (measured so far plus still to come), tomorrow, the best day ahead and the
+  5-day total; hourly solar power for the next 5 days with a sky summary per
+  day; measured solar for the last week beside the forecast days. The battery
+  forecast and the sunrise-forecast comparison moved here from History.
 - V2 Live page shows the animated power flow again: solar and grid into the
   battery, battery to the home, with a dot travelling along each line that is
   carrying power (faster for more watts; still when reduced motion is set).
@@ -48,6 +53,8 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
+- V2 chart axis labels were cut off at the left edge for values of 10 kWh and
+  up, and axis steps could be awkward fractions.
 - A V2 page left open across a deploy kept running old code against the new
   server (History opened Live; tabs did nothing). See the build id above.
 - `/?ui=v1`, the classic-tab link used by the first V2 release, opens the
