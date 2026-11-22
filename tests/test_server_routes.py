@@ -81,7 +81,7 @@ def client(app):
 
 # ---------- auth flow + middleware ----------
 
-@pytest.mark.parametrize("path", ["/", "/sw.js", "/static/app.js"])
+@pytest.mark.parametrize("path", ["/", "/v2", "/sw.js", "/static/app.js", "/static/v2.js"])
 def test_dashboard_shell_revalidates_after_deployment(client, path):
     """HTML and scripts must not age independently across a deployment."""
     response = client.get(path)
@@ -90,6 +90,32 @@ def test_dashboard_shell_revalidates_after_deployment(client, path):
     assert response.headers.get("etag")
     if path == "/sw.js":
         assert response.headers.get("service-worker-allowed") == "/"
+
+
+def test_v2_dashboard_is_behind_the_same_auth_gate(unauth_client):
+    r = unauth_client.get("/v2", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/setup"
+    assert unauth_client.get("/api/v2/overview").status_code == 401
+
+
+def test_classic_page_forwards_to_v2_only_by_browser_choice(client):
+    """The V1/V2 choice lives in localStorage, so "/" always serves the
+    classic shell and the shell itself decides whether to forward."""
+    html = client.get("/").text
+    assert "localStorage.getItem('jackery_ui') === 'v2'" in html
+    assert 'id="use-v2"' in html
+    assert 'id="use-v1"' in client.get("/v2").text
+
+
+def test_v2_overview_answers_before_any_decision_exists(client, app):
+    sn = app.state.device.device_sn if app.state.device else None
+    r = client.get("/api/v2/overview", params={"device_sn": sn or "MOCK"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["headline"]["state"] == "manual"
+    assert body["plan"]["blocks"] == [] and body["activity"] == []
+    assert body["rates"] and body["grid_today"]["tiers"]
 
 
 def test_unauth_root_redirects_to_setup_when_no_user(unauth_client):

@@ -4206,6 +4206,13 @@ function renderDevicePicker(devices, selectedId) {
 // ============================================================
 // RECONNECT
 // ============================================================
+// Classic ↔ V2 is a per-browser preference; index.html reads it before
+// first paint and forwards to /v2.
+$('use-v2')?.addEventListener('click', () => {
+  try { localStorage.setItem('jackery_ui', 'v2'); } catch (e) { /* storage blocked */ }
+  location.href = '/v2';
+});
+
 $('logout')?.addEventListener('click', async () => {
   if (!confirm('Sign out of the Jackery Monitor?')) return;
   try { await fetch('/api/auth/logout', { method: 'POST' }); }

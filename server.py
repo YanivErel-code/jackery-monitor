@@ -60,6 +60,7 @@ import rescue
 import settings as user_settings
 import smart_charge
 import solar_charge
+import ui_overview
 import weather_client
 from automation import AutomationEngine, AutomationError
 from cloud_client import PACK_CACHE_TTL_S
@@ -4989,6 +4990,40 @@ def api_smart_charge_status(device_sn: str | None = None):
             "history": history}
 
 
+@app.get("/api/v2/overview")
+def api_v2_overview(device_sn: str | None = None):
+    """Everything the V2 dashboard needs to explain the charging plan in
+    plain language: status headline, next charge, rate bands, laundry
+    hold, today's grid cost by rate and the last day's activity. Built
+    from the latest saved decision; computes no new plan."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    _require_portable_device(device_sn)
+    now = time.time()
+    rows = state.energy.list_smart_charge_decisions(
+        device_sn, limit=4000, since_ts=int(now) - 24 * 3600)
+    decision = rows[0] if rows else None
+    snapshot = (state.energy.smart_charge_decision_inputs(device_sn, decision["decided_at"])
+                if decision else None)
+    tz_off = int((snapshot or {}).get("tz_offset_seconds")
+                 or device_location.get_tz_offset() or 0)
+    day_start = int((now + tz_off) // 86400) * 86400 - tz_off
+    hourly = state.energy.history(
+        device_sn, hours=int((now - day_start) // 3600) + 1, bucket_s=3600)
+    try:
+        aliases = {d.get("device_id"): d.get("alias") or ""
+                   for d in lg_thinq.monitor.public_status().get("devices") or []}
+    except Exception:
+        aliases = {}
+    return ui_overview.build_overview(
+        now=now, device_sn=device_sn, decision=decision, snapshot=snapshot,
+        config=smart_charge.get_config(device_sn), cost_plan=cost_module.get_plan(),
+        tz_offset_seconds=tz_off, decision_rows=list(reversed(rows)),
+        hourly_rows=hourly, day_start=day_start, appliance_aliases=aliases)
+
+
 @app.get("/api/smart_charge/analytics")
 def api_smart_charge_analytics(device_sn: str | None = None, days: int = 14):
     """Predicted-vs-actual sunrise SOC pairs for the last N days. Joins
@@ -6527,6 +6562,13 @@ def index():
     # A cached shell may otherwise outlive its scripts across deployment.
     # Revalidation still allows storage and the SW's offline fallback.
     return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/v2")
+def index_v2():
+    # The redesigned dashboard. Which one opens at "/" is a per-browser
+    # choice kept in localStorage; index.html forwards here when it is "v2".
+    return FileResponse(WEB_DIR / "v2.html", headers={"Cache-Control": "no-cache"})
 
 
 # PWA manifest + service worker MUST live at the site root for the browser
