@@ -48,7 +48,7 @@
       </div>
       <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
       <a id="use-v1" class="btn" href="/classic">Open classic view</a>
-      <p class="side-note">Rules &amp; plugs and Settings still use the classic screens. To make classic the default, use Settings → Default view.</p>
+      <p class="side-note">Settings still uses the classic screens. To make classic the default, use Settings → Default view.</p>
   </aside>
 
   <main>
@@ -275,7 +275,85 @@
       </section>
     </div>
 
-    <!-- Rules & plugs and Settings: the classic screens, framed so
+    <!-- ================= RULES & PLUGS ================= -->
+    <div id="page-rules" class="page" hidden>
+      <header class="page-head">
+        <h1>Rules &amp; plugs</h1>
+        <div id="rules-sub" class="muted"></div>
+      </header>
+
+      <section class="card">
+        <div class="card-head"><h2>Grid charging</h2><a href="#charging">See the current plan</a></div>
+        <p class="muted">Charges from the wall through a smart plug, at the cheapest hours that still reach your sunrise level. Nothing changes until you press Save.</p>
+        <div id="smart-form" class="form"></div>
+        <p id="smart-rate" class="muted small"></p>
+        <div class="form-foot"><button id="smart-save" class="btn primary" type="button">Save grid charging</button><span id="smart-msg" class="form-msg" role="status"></span></div>
+      </section>
+
+      <section class="card">
+        <h2>Excess solar</h2>
+        <p class="muted">When the battery will comfortably reach your sunrise level, spare solar can run an extra load, such as a car charger, through a second plug.</p>
+        <p id="solar-status" class="muted small"></p>
+        <div id="solar-form" class="form"></div>
+        <div class="form-foot"><button id="solar-save" class="btn primary" type="button">Save excess solar</button><span id="solar-msg" class="form-msg" role="status"></span></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Smart plugs</h2><button id="plug-refresh" class="btn small" type="button">Check plugs now</button></div>
+        <div id="plug-list" class="items"></div>
+        <span id="plug-msg" class="form-msg" role="status"></span>
+        <details>
+          <summary>Add a plug</summary>
+          <div class="inline-form">
+            <label>IP address<input id="plug-host" type="text" inputmode="decimal" autocomplete="off" placeholder="192.168.3.50"></label>
+            <label>Name (optional)<input id="plug-alias" type="text" autocomplete="off"></label>
+            <button id="plug-add" class="btn" type="button">Add plug</button>
+            <button id="plug-find" class="btn" type="button">Find plugs on the network</button>
+          </div>
+          <div id="plug-found" class="items"></div>
+        </details>
+        <details>
+          <summary>Kasa account</summary>
+          <p id="kasa-account" class="muted"></p>
+          <div class="inline-form">
+            <label>Kasa email<input id="kasa-email" type="email" autocomplete="username"></label>
+            <label>Kasa password<input id="kasa-password" type="password" autocomplete="current-password"></label>
+            <button id="kasa-save" class="btn" type="button">Save account</button>
+            <button id="kasa-forget" class="btn" type="button" hidden>Remove account</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Battery rules</h2><button id="rule-new" class="btn small" type="button">New rule</button></div>
+        <p class="muted">Simple switches: turn a plug on or off when the battery crosses a level. Grid charging above is usually the better tool.</p>
+        <div id="rule-list" class="items"></div>
+        <div id="rule-editor" class="editor" hidden>
+          <h3 id="rule-editor-title">New rule</h3>
+          <div class="inline-form">
+            <label>Name (optional)<input id="rule-name" type="text" autocomplete="off"></label>
+            <label>When the battery<select id="rule-op"><option value="&lt;=">falls to</option><option value="&gt;=">rises to</option></select></label>
+            <label>Level (%)<input id="rule-value" type="number" min="0" max="100" step="1" inputmode="numeric"></label>
+            <label>Turn<select id="rule-action"><option value="on">on</option><option value="off">off</option></select></label>
+            <label>Plug<select id="rule-plug"></select></label>
+            <button id="rule-save" class="btn primary" type="button">Save rule</button>
+            <button id="rule-cancel" class="btn" type="button">Cancel</button>
+          </div>
+        </div>
+        <span id="rule-msg" class="form-msg" role="status"></span>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>AI insights</h2><button id="ai-run" class="btn small" type="button">Run a review now</button></div>
+        <span id="ai-msg" class="form-msg" role="status"></span>
+        <h3>Waiting for you</h3>
+        <div id="ai-suggestions" class="items"></div>
+        <h3>Recently applied</h3>
+        <div id="ai-changes" class="items"></div>
+      </section>
+    </div>
+
+    <!-- Settings: the classic screens, framed so
          this menu stays in place. -->
     <div id="page-classic" class="page-embed" hidden>
       <iframe id="classic-frame" title="Classic screens"></iframe>
@@ -284,5 +362,6 @@
 </div>
 <script src="/static/v2.js"></script>
 <script src="/static/v2_history.js"></script>
+<script src="/static/v2_rules.js"></script>
 </body>
 </html>

@@ -126,7 +126,14 @@ def test_each_view_links_to_the_other_and_settings_offers_the_default(client):
     import re
     for src in re.findall(r'<script src="([^"]+)"', v2):
         assert client.get(src).status_code == 200, src
-    assert 'id="page-history"' in v2
+    assert 'id="page-history"' in v2 and 'id="page-rules"' in v2
+    # A colour token used but not defined renders as nothing (an invisible
+    # button, in one case), so every var() must exist in both themes.
+    css = client.get("/static/v2.css").text
+    used = set(re.findall(r"var\(--([a-z0-9-]+)", css))
+    for theme in ("light", "dark"):
+        block = re.search(r':root\[data-theme="' + theme + r'"\] \{(.*?)\n\}', css, re.S).group(1)
+        assert used <= set(re.findall(r"--([a-z0-9-]+):", block)), theme
     assert 'id="classic-frame"' in v2 and "classList.add('embed')" in classic
     spec = next(s for s in client.get("/api/settings").json()["settings"] if s["key"] == "default_ui_version")
     assert (spec["default"], spec["min"], spec["max"], spec["control"]) == (2, 1, 2, "custom")
