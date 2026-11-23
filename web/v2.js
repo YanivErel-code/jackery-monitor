@@ -143,6 +143,15 @@
       if (on) dot.firstElementChild.setAttribute('dur', Math.max(0.7, 3.2 - w / 1200).toFixed(2) + 's');
     }
     $('flow-soc').textContent = pct(soc);
+    // Today's solar and home energy ride on the live status, so they keep
+    // counting between plan checks.
+    const today = (status.energy || {}).today || {}, saved = (status.energy || {}).today_savings || {};
+    const kwh = (wh) => (num(wh) == null ? '—' : (wh / 1000).toFixed(2) + ' kWh');
+    // The unit sits beside the number in small type so the pair fits a narrow tile.
+    $('solar-kwh').replaceChildren(...(num(today.solar_wh) == null ? ['—']
+      : [(today.solar_wh / 1000).toFixed(2), el('i', { text: 'kWh' })]));
+    $('solar-saved').textContent = num(saved.solar_value) == null ? '' : 'worth ' + usd(saved.solar_value) + ' at grid rates';
+    $('home-kwh').textContent = kwh(today.output_wh);
     const net = (num(t.input_power_w) ?? 0) - (home ?? 0);
     const filling = net > 20, draining = net < -20;
     $('now-net').classList.toggle('filling', filling);
@@ -247,7 +256,7 @@
 
     const g = o.grid_today;
     $('cost-total').textContent = usd(g.cost);
-    $('cost-kwh').textContent = g.kwh.toFixed(2) + ' kWh bought';
+    $('cost-kwh').textContent = g.kwh.toFixed(2) + ' kWh';
     $('cost-tiers').replaceChildren(...g.tiers.map((t) => el('div', { class: 'row' },
       el('span', { text: TIER_NAME[t.tier] + ', ' + usd(t.rate) }),
       el('b', { class: t.kwh ? '' : 'zero', text: t.kwh.toFixed(2) + ' kWh' }))));

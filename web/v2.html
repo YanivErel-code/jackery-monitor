@@ -134,9 +134,13 @@
         </section>
 
         <section class="card">
-          <h3>Grid cost today</h3>
-          <div class="big"><span id="cost-total">—</span><small id="cost-kwh"></small></div>
+          <h3>Energy today</h3>
+          <div class="pair">
+            <div class="tile"><span>Solar made</span><b id="solar-kwh">—</b><small id="solar-saved"></small></div>
+            <div class="tile"><span>Grid bought</span><b id="cost-total">—</b><small id="cost-kwh"></small></div>
+          </div>
           <div id="cost-tiers" class="rows"></div>
+          <div class="rows"><div class="row"><span>Home used</span><b id="home-kwh">—</b></div></div>
         </section>
       </div>
 

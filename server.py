@@ -433,8 +433,11 @@ async def poll_loop() -> None:
                 # _start_of_day buckets "today" at the user's local
                 # midnight even when no location/Open-Meteo is configured.
                 # No-op if location already has the same offset.
+                # With a location set, its time zone decides the offset and
+                # follows daylight saving; the device's own number does not.
                 tz_off = status_dict.get("utc_offset_seconds")
-                if tz_off is not None and tz_off != device_location.get_tz_offset():
+                if (tz_off is not None and not device_location.get_timezone_name()
+                        and tz_off != device_location.get_tz_offset()):
                     try:
                         device_location.update_timezone(int(tz_off))
                     except Exception as e:
@@ -967,8 +970,7 @@ def _decorate_totals_with_savings(totals: dict, device_sn: str, *, energy_store=
     try:
         db = energy_store if energy_store is not None else state.energy
         plan = cost_module.get_plan()
-        loc = device_location.get() or {}
-        tz_offset = int(loc.get("utc_offset_seconds") or 0)
+        tz_offset = int(device_location.get_tz_offset() or 0)
         from energy_db import _start_of_day
         today_since = _start_of_day(int(time.time()))
         today_hist = [r for r in db.history(device_sn, hours=24, bucket_s=3600)

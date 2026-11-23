@@ -72,7 +72,7 @@ def test_update_timezone_merges_offset(tmp_path, monkeypatch):
     # Open-Meteo would return -25200 for PDT (UTC-7).
     assert loc.update_timezone(-25200, "America/Los_Angeles") is True
     got = loc.get()
-    assert got["utc_offset_seconds"] == -25200
+    assert got["utc_offset_seconds"] in (-25200, -28800)     # whichever is in force today
     assert got["timezone"] == "America/Los_Angeles"
     # lat/lon untouched
     assert abs(got["latitude"] - 37.7749) < 1e-6
@@ -83,18 +83,43 @@ def test_update_timezone_creates_record_without_lat_lon(tmp_path, monkeypatch):
     when no geographic location is set. update_timezone must accept
     standalone TZ writes."""
     loc = _fresh_location(monkeypatch, tmp_path)
-    assert loc.update_timezone(-25200, "America/Los_Angeles") is True
+    assert loc.update_timezone(-25200) is True
     # get() still returns None (no lat/lon to validate)
     assert loc.get() is None
     # but get_tz_offset() returns the saved offset
     assert loc.get_tz_offset() == -25200
+    assert loc.get_timezone_name() is None
 
 
 def test_get_tz_offset_works_with_full_record(tmp_path, monkeypatch):
     loc = _fresh_location(monkeypatch, tmp_path)
     loc.set(37.7749, -122.4194)
     loc.update_timezone(-25200, "America/Los_Angeles")
-    assert loc.get_tz_offset() == -25200
+    assert loc.get_tz_offset(now=_JULY) == -25200
+    assert loc.get_timezone_name() == "America/Los_Angeles"
+
+
+_JULY = 1783000000        # 2026-07-02, daylight time in Los Angeles (UTC-7)
+_NOVEMBER = 1795400000    # 2026-11-22, standard time (UTC-8)
+
+
+def test_offset_follows_daylight_saving_when_the_zone_is_known(tmp_path, monkeypatch):
+    """The stored number is a snapshot from the day it was saved. After the
+    clocks change it is an hour wrong, which put "today" an hour off and
+    the device kept re-reporting it. The zone name is what decides."""
+    loc = _fresh_location(monkeypatch, tmp_path)
+    loc.set(37.7749, -122.4194)
+    loc.update_timezone(-25200, "America/Los_Angeles")       # saved in summer
+    assert loc.get_tz_offset(now=_JULY) == -25200
+    assert loc.get_tz_offset(now=_NOVEMBER) == -28800        # not the stale -25200
+    monkeypatch.setattr(loc.time, "time", lambda: _NOVEMBER)
+    assert loc.get()["utc_offset_seconds"] == -28800         # get() reports the offset in force too
+
+
+def test_offset_falls_back_to_the_stored_number_for_an_unknown_zone(tmp_path, monkeypatch):
+    loc = _fresh_location(monkeypatch, tmp_path)
+    loc.update_timezone(3600, "Not/A_Zone")
+    assert loc.get_tz_offset(now=_NOVEMBER) == 3600
 
 
 def test_get_tz_offset_none_when_unset(tmp_path, monkeypatch):
@@ -154,7 +179,7 @@ def test_update_timezone_preserves_label(tmp_path, monkeypatch):
     assert loc.update_timezone(-25200, "America/Los_Angeles") is True
     got = loc.get()
     assert got["label"] == "San Jose, California, US"
-    assert got["utc_offset_seconds"] == -25200
+    assert got["utc_offset_seconds"] in (-25200, -28800)     # whichever is in force today
     assert got["timezone"] == "America/Los_Angeles"
 
 

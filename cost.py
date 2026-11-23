@@ -302,6 +302,7 @@ def compute_savings(history: list[dict[str, Any]],
     output_kwh_total = 0.0
     solar_kwh_total = 0.0
     grid_kwh_total = 0.0
+    solar_value_dollars = 0.0
     for row in history:
         ts = row.get("ts")
         if ts is None:
@@ -319,6 +320,7 @@ def compute_savings(history: list[dict[str, Any]],
             grid_kwh = max(0.0, input_kwh - solar_kwh)
         saved_dollars += output_kwh * rate
         grid_cost_dollars += grid_kwh * rate
+        solar_value_dollars += solar_kwh * rate
         output_kwh_total += output_kwh
         solar_kwh_total += solar_kwh
         grid_kwh_total += grid_kwh
@@ -328,6 +330,9 @@ def compute_savings(history: list[dict[str, Any]],
         "solar_savings": round(saved_dollars, 2),
         "grid_cost": round(grid_cost_dollars, 2),
         "net_savings": round(saved_dollars - grid_cost_dollars, 2),
+        # What the solar collected would have cost from the grid at the
+        # rate in force when it was collected.
+        "solar_value": round(solar_value_dollars, 2),
         "output_kwh": round(output_kwh_total, 3),
         "solar_kwh": round(solar_kwh_total, 3),
         "grid_kwh": round(grid_kwh_total, 3),
