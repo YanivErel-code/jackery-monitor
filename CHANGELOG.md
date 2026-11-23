@@ -65,6 +65,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
+- An alert that could not be delivered is no longer lost: sending retries
+  a dropped connection, and an alert that still fails is tried again on
+  the next pass.
 - V2 chart axis labels were cut off at the left edge for values of 10 kWh and
   up, and axis steps could be awkward fractions.
 - A V2 page left open across a deploy kept running old code against the new

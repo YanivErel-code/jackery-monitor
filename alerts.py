@@ -17,6 +17,7 @@ Config lives in /data/alerts.json; the memory and the recent-alert log in
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ def _state_file() -> str:
 
 RECENT_LIMIT = 50
 LOW_BATTERY_CLEAR_MARGIN_PCT = 5.0
+SEND_RETRY_WAITS_S = (1.0, 3.0)
 TOPIC_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # name -> (label shown in Settings, defaults). A rule's numeric option, if
@@ -256,7 +258,19 @@ def active_rules(memory: dict[str, dict]) -> set[str]:
     return {name for name, entry in memory.items() if entry.get("sent_key") is not None}
 
 
+def undelivered(memory: dict[str, dict], alert: Alert) -> None:
+    """Forget that `alert` was sent so the next pass tries it again."""
+    if alert.rule in memory:
+        memory[alert.rule]["sent_key"] = None
+
+
 def record(state: dict[str, Any], alert: Alert, now: float, error: str | None) -> None:
+    """Log one send. A failure that is still failing on a retry updates
+    its existing row, so an ntfy outage does not flood the log."""
+    last = next((r for r in state["recent"] if r["rule"] == alert.rule), None)
+    if error and last and not last["delivered"] and last["key"] == alert.key:
+        last.update(ts=now, error=error)
+        return
     state["recent"].insert(0, {**asdict(alert), "ts": now, "delivered": error is None, "error": error})
     del state["recent"][RECENT_LIMIT:]
 
@@ -273,13 +287,23 @@ async def send_ntfy(config: dict[str, Any], alert: Alert, *,
             "tags": [alert.tag]}
     owned = client is None
     client = client or httpx.AsyncClient(timeout=10)
+    reason = "Could not reach ntfy."
     try:
-        response = await client.post(config.get("ntfy_server") or "https://ntfy.sh", json=body)
-        if response.status_code >= 300:
-            return f"ntfy answered {response.status_code}."
-        return None
-    except httpx.HTTPError as error:
-        return f"Could not reach ntfy: {type(error).__name__}."
+        # A single dropped connection should not lose an alert.
+        for wait in (*SEND_RETRY_WAITS_S, None):
+            try:
+                response = await client.post(config.get("ntfy_server") or "https://ntfy.sh", json=body)
+            except httpx.HTTPError as error:
+                reason = f"Could not reach ntfy: {type(error).__name__}."
+            else:
+                if response.status_code < 300:
+                    return None
+                reason = f"ntfy answered {response.status_code}."
+                if response.status_code < 500 and response.status_code != 429:
+                    break               # a refusal will not change on retry
+            if wait is not None:
+                await asyncio.sleep(wait)
+        return reason
     finally:
         if owned:
             await client.aclose()
