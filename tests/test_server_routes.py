@@ -696,6 +696,30 @@ async def test_live_activity_follows_charging(client, app, monkeypatch):
     assert [c[0] for c in calls] == ["end"]
 
 
+async def test_live_activity_shows_solar_and_is_replaced_when_old(client, app, monkeypatch):
+    calls = []
+
+    async def record(name, content, **kwargs):
+        calls.append((name, content["status"]))
+
+    for name in ("live_start", "live_update", "live_end"):
+        monkeypatch.setattr(app.apns, name, lambda content, _n=name, **kw: record(_n, content, **kw))
+    monkeypatch.setattr(app.apns, "is_configured", lambda: True)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    summary = _quiet_summary("solar_enough", 60)
+    summary["power"].update(grid_w=0, solar_w=2400)
+    monkeypatch.setattr(app, "api_app_summary", lambda: summary)
+
+    app.alerts.set_config({"enabled": True, "live_solar": False})
+    await app._alerts_tick(now=0)
+    assert calls == []                                      # the option is off
+    app.alerts.set_config({"live_solar": True})
+    await app._alerts_tick(now=60)
+    assert calls == [("live_start", "Charging from solar")]
+    await app._alerts_tick(now=60 + app.alerts.LIVE_MAX_AGE_S)
+    assert calls[1:] == [("live_end", "Charging from solar"), ("live_start", "Charging from solar")]
+
+
 async def test_a_live_activity_that_could_not_start_is_tried_again(client, app, monkeypatch):
     starts = []
 

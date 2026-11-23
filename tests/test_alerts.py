@@ -131,6 +131,8 @@ def test_memory_survives_a_json_round_trip(isolated_data):
 
 def test_config_defaults_then_merges_and_persists(isolated_data):
     assert alerts.get_config()["enabled"] is False and alerts.get_config()["live_activity"] is True
+    assert alerts.get_config()["live_solar"] is True
+    assert alerts.set_config({"live_solar": False})["live_solar"] is False and alerts.get_config()["live_solar"] is False
     saved = alerts.set_config({"enabled": True, "live_activity": False,
                                "rules": {"low_battery": {"threshold_pct": "30"}, "offline": {"enabled": False}}})
     assert saved["rules"]["low_battery"] == {"enabled": True, "threshold_pct": 30}
@@ -184,6 +186,54 @@ def test_live_content_only_exists_while_something_is_going_on():
 @pytest.mark.parametrize("soc, shown", [(26.5, 27), (27.5, 28), (26.49, 26), (0.5, 1), (None, 0)])
 def test_live_content_rounds_halves_up_like_the_dashboard(soc, shown):
     assert alerts.live_content(_summary(soc=soc))["socPct"] == shown
+
+
+def _sunny(solar=2600, home=430.4, soc=59.0, to_full=3.2, state="solar_enough"):
+    return {"battery": {"soc_pct": soc, "time_to_full_h": to_full},
+            "power": {"grid_w": 0, "solar_w": solar, "output_w": home},
+            "headline": {"state": state, "tone": "warn", "title": "Not charging. Next charge starts at 12 AM."},
+            "until_ts": 5000.0}
+
+
+def test_live_content_covers_charging_from_solar():
+    assert alerts.live_content(_sunny()) == {
+        "socPct": 59, "state": "solar", "status": "Charging from solar", "title": "Full in about 3 h at this rate.",
+        "tone": "ok", "gridW": 0, "solarW": 2600, "outputW": 430, "untilTs": None}
+    assert alerts.live_content(_sunny(to_full=0.4))["title"] == "Full in under an hour at this rate."
+    assert alerts.live_content(_sunny(to_full=None))["title"] == "The battery is gaining from solar."
+    # solar that does not cover the home, or a full battery, is not charging
+    assert alerts.live_content(_sunny(solar=300, home=900))["status"] == "Running on solar"
+    assert alerts.live_content(_sunny(soc=100))["title"] == "The battery is full; solar is running the home."
+    # panels not producing, or the option switched off: no card
+    assert alerts.live_content(_sunny(solar=99)) is None
+    assert alerts.live_content(_sunny(), solar=False) is None
+    # grid charging and a hold keep their own card while the sun is out
+    assert alerts.live_content(_sunny(state="hold"))["status"] == "Charging on hold"
+    # the closing state never claims solar is still charging
+    assert alerts.live_content(_sunny(), final=True)["status"] == "Charging finished"
+
+
+def test_solar_power_changes_are_pushed_less_often():
+    memory: dict = {}
+    assert alerts.live_step(memory, alerts.live_content(_sunny()), 0) == "start"
+    assert alerts.live_step(memory, alerts.live_content(_sunny(solar=1500)), 180) is None
+    assert alerts.live_step(memory, alerts.live_content(_sunny(solar=1500)), 300) == "update"
+    # going from solar to grid charging changes the same card at once
+    assert alerts.live_step(memory, alerts.live_content(_summary()), 310) == "update"
+
+
+def test_a_card_is_replaced_before_ios_ends_it_at_eight_hours():
+    memory: dict = {}
+    sunny = alerts.live_content(_sunny())
+    assert alerts.live_step(memory, sunny, 0) == "start"
+    assert alerts.live_step(memory, sunny, alerts.LIVE_MAX_AGE_S - 60) == "update"
+    assert alerts.live_step(memory, sunny, alerts.LIVE_MAX_AGE_S) == "rotate"
+    assert memory["card_ts"] == alerts.LIVE_MAX_AGE_S and memory["started_ts"] == 0
+    assert alerts.live_step(memory, sunny, alerts.LIVE_MAX_AGE_S + 60) is None
+    # a session that resumes on a card that old gets a new card instead
+    later = 2 * alerts.LIVE_MAX_AGE_S
+    assert alerts.live_step(memory, None, later - 300) == "finish"
+    assert alerts.live_step(memory, sunny, later) == "rotate" and "ended_ts" not in memory
 
 
 def test_live_content_for_an_ending_activity_says_so():

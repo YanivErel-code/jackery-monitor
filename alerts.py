@@ -65,7 +65,7 @@ class Alert:
 
 
 def default_config() -> dict[str, Any]:
-    return {"enabled": False, "live_activity": True,
+    return {"enabled": False, "live_activity": True, "live_solar": True,
             "daily_summary": {"enabled": False, "hour": 7},
             "rules": {name: dict(defaults) for name, (_, defaults) in RULES.items()}}
 
@@ -92,7 +92,7 @@ def get_config() -> dict[str, Any]:
     version shows up with its default."""
     stored = _read(_config_file())
     config = default_config()
-    for key in ("enabled", "live_activity"):
+    for key in ("enabled", "live_activity", "live_solar"):
         if key in stored:
             config[key] = bool(stored[key])
     daily = stored.get("daily_summary")
@@ -111,8 +111,9 @@ def set_config(patch: dict[str, Any]) -> dict[str, Any]:
     config = get_config()
     if "enabled" in patch:
         config["enabled"] = bool(patch["enabled"])
-    if "live_activity" in patch:
-        config["live_activity"] = bool(patch["live_activity"])
+    for key in ("live_activity", "live_solar"):
+        if key in patch:
+            config[key] = bool(patch[key])
     daily = patch.get("daily_summary")
     if isinstance(daily, dict):
         if "enabled" in daily:
@@ -296,6 +297,12 @@ LIVE_REFRESH_S = 10 * 60
 LIVE_LINGER_S = 15 * 60          # how long a finished card stays on the lock screen
 LIVE_POWER_STEP_W = 50.0
 LIVE_POWER_MIN_GAP_S = 120
+# Solar swings with every cloud and its card is up all day, so its power
+# readings are pushed less often to spare the phone's battery.
+LIVE_SOLAR_POWER_MIN_GAP_S = 300
+LIVE_SOLAR_MIN_W = 100.0
+# iOS ends a Live Activity that has run for eight hours; replace it before then.
+LIVE_MAX_AGE_S = 7.5 * 3600
 LIVE_STATUS = {
     "charging": "Charging", "charging_peak": "Charging at peak rate", "hold": "Charging on hold",
     "not_charging": "Not charging", "scheduled": "Charge scheduled", "solar_enough": "Solar is enough",
@@ -303,23 +310,50 @@ LIVE_STATUS = {
 }
 
 
-def live_content(summary: dict[str, Any], *, final: bool = False) -> dict[str, Any] | None:
+def _solar_card(summary: dict[str, Any]) -> tuple[str, str] | None:
+    """Status and title for the card while solar is coming in and nothing
+    else is going on, or None when the panels are not producing."""
+    power, battery = summary.get("power") or {}, summary.get("battery") or {}
+    solar, home = _num(power.get("solar_w")) or 0.0, _num(power.get("output_w")) or 0.0
+    if solar < LIVE_SOLAR_MIN_W:
+        return None
+    soc = _num(battery.get("soc_pct")) or 0.0
+    if soc >= 99.5:
+        return "Running on solar", "The battery is full; solar is running the home."
+    if solar <= home:
+        return "Running on solar", "Solar is covering part of what the home uses."
+    hours = _num(battery.get("time_to_full_h"))
+    if not hours or hours <= 0:
+        return "Charging from solar", "The battery is gaining from solar."
+    left = "under an hour" if hours < 1 else f"about {_whole(hours)} h"
+    return "Charging from solar", f"Full in {left} at this rate."
+
+
+def live_content(summary: dict[str, Any], *, final: bool = False, solar: bool = True) -> dict[str, Any] | None:
     """What the Live Activity shows, or None when nothing is going on.
     `final` builds the closing state for an activity that is ending.
+    With `solar`, charging from the panels counts as something going on.
 
     The keys are the app's ChargingAttributes.ContentState, field for
     field: the phone silently drops a push it cannot decode."""
     headline = summary.get("headline") or {}
     state = headline.get("state")
-    if state not in LIVE_STATES and not final:
-        return None
+    status, title, tone = LIVE_STATUS.get(state), headline.get("title") or "", headline.get("tone") or "ok"
+    if state not in LIVE_STATES:
+        sunny = _solar_card(summary) if solar and not final else None
+        if sunny:
+            state, tone, (status, title) = "solar", "ok", sunny
+        elif not final:
+            return None
+        else:
+            status = "Charging finished"
     power, battery = summary.get("power") or {}, summary.get("battery") or {}
     return {
         "socPct": _whole(battery.get("soc_pct")),
         "state": state or "",
-        "status": LIVE_STATUS.get(state, "Charging finished") if state in LIVE_STATES else "Charging finished",
-        "title": headline.get("title") or "",
-        "tone": headline.get("tone") or "ok",
+        "status": status,
+        "title": title,
+        "tone": tone,
         "gridW": _whole(power.get("grid_w")),
         "solarW": _whole(power.get("solar_w")),
         "outputW": _whole(power.get("output_w")),
@@ -338,7 +372,7 @@ def _power_moved(before: Any, after: Any) -> bool:
 
 def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float) -> str | None:
     """Update `memory` in place and say what to do: "start", "update",
-    "finish", "resume", "end" or nothing. The card draws the power flowing
+    "finish", "resume", "rotate", "end" or nothing. The card draws the power flowing
     between solar, grid, battery and home, so a real change in any of them
     is pushed (at most every two minutes), as is a change of level, status
     or end time (at once); readings that only wobble wait for the periodic
@@ -348,7 +382,10 @@ def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float
     ("finish") and is ended only after LIVE_LINGER_S. If charging or a hold
     begins again meanwhile, the same card carries on ("resume"). Ending it
     and starting another would leave two on the lock screen, because iOS
-    keeps an ended card for a while and it cannot be removed early."""
+    keeps an ended card for a while and it cannot be removed early.
+
+    A card that has been up for LIVE_MAX_AGE_S is replaced ("rotate"),
+    because iOS ends one itself after eight hours."""
     if content is None:
         if not memory:
             return None
@@ -360,18 +397,26 @@ def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float
             memory.clear()
             return "end"
         return None
+    old = (memory.get("content") is not None
+           and now - memory.get("card_ts", memory.get("started_ts", now)) >= LIVE_MAX_AGE_S)
     if memory.get("ended_ts") is not None:
         del memory["ended_ts"]
         memory.update(content=content, pushed_ts=now, started_ts=now)
-        return "resume"
+        if old:
+            memory["card_ts"] = now
+        return "rotate" if old else "resume"
+    if old:
+        memory.update(content=content, pushed_ts=now, card_ts=now)
+        return "rotate"
     previous = memory.get("content")
     if previous is None:
-        memory.update(content=content, pushed_ts=now, started_ts=now)
+        memory.update(content=content, pushed_ts=now, started_ts=now, card_ts=now)
         return "start"
     since = now - memory.get("pushed_ts", 0)
     changed = any(previous.get(k) != content.get(k) for k in ("socPct", "state", "title", "untilTs"))
     # Every push wakes the phone, so power changes are spaced out to spare its battery.
-    flow = (since >= LIVE_POWER_MIN_GAP_S
+    gap = LIVE_SOLAR_POWER_MIN_GAP_S if content.get("state") == "solar" else LIVE_POWER_MIN_GAP_S
+    flow = (since >= gap
             and any(_power_moved(previous.get(k), content.get(k)) for k in ("gridW", "solarW", "outputW")))
     if changed or flow or since >= LIVE_REFRESH_S:
         memory.update(content=content, pushed_ts=now)
