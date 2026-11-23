@@ -214,3 +214,17 @@ def test_live_step_starts_updates_on_change_refreshes_and_ends():
     assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2, state="charging_peak")), 1105) == "update"
     assert alerts.live_step(memory, None, 1110) == "end" and memory == {}
     assert alerts.live_step(memory, None, 1170) is None
+
+
+# ---- widgets ----
+
+def test_widget_step_pushes_status_at_once_and_level_sparingly():
+    memory: dict = {}
+    assert alerts.widget_step(memory, _summary(state="scheduled", soc=50), 0) is False      # first look
+    assert alerts.widget_step(memory, _summary(state="scheduled", soc=50.2), 60) is False   # nothing changed
+    assert alerts.widget_step(memory, _summary(state="charging", soc=50.2), 120) is True    # status: at once
+    assert alerts.widget_step(memory, _summary(state="charging", soc=51), 180) is False     # level: too soon
+    assert alerts.widget_step(memory, _summary(state="charging", soc=53), 120 + 15 * 60) is True
+    assert memory["shown"] == {"state": "charging", "soc": 53}
+    assert alerts.widget_step(memory, _summary(state="hold", soc=53), 130 + 15 * 60) is True
+
