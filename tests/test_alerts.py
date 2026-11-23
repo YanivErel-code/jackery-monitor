@@ -197,11 +197,17 @@ def test_live_step_starts_updates_on_change_refreshes_and_ends():
     assert alerts.live_step(memory, None, 0) is None
     assert alerts.live_step(memory, first, 0) == "start"
     assert alerts.live_step(memory, first, 60) is None
-    # power alone is not worth a push...
-    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 120) is None
+    # a wobble in the power readings is not worth a push...
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=1160)), 120) is None
     # ...but it rides along on the periodic refresh
-    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 600) == "update"
-    assert memory["content"]["gridW"] == 900
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=1160)), 600) == "update"
+    assert memory["content"]["gridW"] == 1160
+    # a real change in the flow redraws the card
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 630) == "update"
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=0)), 640) == "update"
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=0)), 650) is None
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=20)), 655) == "update"    # started flowing
+    assert alerts.live_step(memory, alerts.live_content(_summary()), 658) == "update"
     # a new level or status goes out at once
     assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2)), 660) == "update"
     assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2, state="charging_peak")), 720) == "update"
