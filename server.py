@@ -2028,12 +2028,12 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     end = min(plan.sunrise_ts or plan.decided_at + 36 * 3600,
               plan.decided_at + 36 * 3600) + 3600
     start = plan.decided_at // 3600 * 3600
-    weather_keys = ("ts", "ghi_w_m2", "cloud_cover_pct")
+    weather_keys = ("ts", "ghi_w_m2", "cloud_cover_pct", "direct_w_m2", "diffuse_w_m2")
     forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w",
                      "output_w", "ac_battery_charge_w", "ac_wall_input_w", "ac_bypass_active",
                      "load_without_baseline_w", "drain_baseline_prior_w",
                      "drain_baseline_applied_w", "load_nowcast_applied", "nowcast_split")
-    model_keys = ("solar_coefficient", "fit_samples", "diurnal_shape", "solar_intraday_calibration",
+    model_keys = ("solar_coefficient", "solar_model", "solar_diffuse_ratio", "fit_samples", "diurnal_shape", "solar_intraday_calibration",
                   "charge_efficiency",
                   "ac_input_excludes_load", "ac_supply_limit_w",
                   "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",

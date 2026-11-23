@@ -187,6 +187,21 @@ DIURNAL_SHAPE_PRIOR_STRENGTH = 4.0   # pseudo-samples pulling each hour toward 1
 DIURNAL_MIN_GHI = 50.0               # only learn from real daylight hours
 DIURNAL_RATIO_CLAMP = (0.05, 5.0)    # drop non-physical per-sample ratios (broken-cloud max-vs-mean spikes)
 
+# Direct/diffuse solar model. GHI is sunlight on flat ground. Tilted
+# panels under a low sun collect far more from the direct beam than flat
+# ground does, while diffuse light under cloud gains nothing from the
+# tilt, so one coefficient on GHI is too low on clear days and too high
+# on overcast ones (2026-11: clear days ran 30-40% over the model while
+# overcast days made half of it). fit_solar_split learns the two apart:
+#     predicted_solar = k * (direct + r * diffuse) * s_h
+# with k the response to direct sun and r how much less diffuse light is
+# worth. r is pulled toward a prior because a fortnight of only clear (or
+# only overcast) days cannot tell the two apart.
+SOLAR_SPLIT_MIN_SAMPLES = 24             # paired daylight hours before the split is trusted
+SOLAR_DIFFUSE_PRIOR_RATIO = 0.6
+SOLAR_DIFFUSE_PRIOR_STRENGTH = 0.5
+SOLAR_DIFFUSE_RATIO_CLAMP = (0.1, 1.2)
+
 # Learned charge ceiling. Multi-pack rigs plateau below 100% system SOC
 # because the weakest pack saturates first (its BMS stops accepting
 # charge) while the capacity-weighted average is still well under full —
@@ -524,6 +539,94 @@ def fit_solar_coefficient(
     return k, len(pairs)
 
 
+def _has_split(w: dict[str, Any]) -> bool:
+    return w.get("direct_w_m2") is not None and w.get("diffuse_w_m2") is not None
+
+
+def solar_irradiance(w: dict[str, Any]) -> float:
+    """The sunlight figure the solar coefficient multiplies for this
+    hour: the direct/diffuse blend when the split model is in use (see
+    `with_solar_irradiance`), plain GHI otherwise."""
+    if "solar_irradiance_w_m2" in w:
+        return float(w["solar_irradiance_w_m2"] or 0)
+    return float(w.get("ghi_w_m2") or 0)
+
+
+def with_solar_irradiance(weather_hourly: list[dict[str, Any]],
+                          diffuse_ratio: float) -> list[dict[str, Any]]:
+    """Copies of the weather rows carrying `direct + ratio * diffuse` as
+    their solar irradiance. An hour stored without the split gets None,
+    which every fit treats as no daylight and skips."""
+    return [{**w, "solar_irradiance_w_m2":
+             (float(w["direct_w_m2"]) + diffuse_ratio * float(w["diffuse_w_m2"])) if _has_split(w) else None}
+            for w in weather_hourly]
+
+
+def fit_solar_split(
+    energy_history: list[dict[str, Any]],
+    weather_hourly: list[dict[str, Any]],
+) -> tuple[float, float, int] | None:
+    """Fit solar_w ≈ k * (direct + r * diffuse). Returns (k, r, n_pairs),
+    or None when there is too little split weather history to trust it,
+    in which case the caller stays on the single GHI coefficient.
+
+    Pairs follow fit_solar_coefficient: per-hour peak solar against the
+    weather row that ends that hour, daylight only. Hours with headroom
+    (SOC below the taper, no AC charging) are preferred; when there are
+    too few of those, every daylight hour is used."""
+    by_hour_solar: dict[int, float] = {}
+    by_hour_soc_min: dict[int, float] = {}
+    by_hour_has_ac: dict[int, bool] = {}
+    for row in energy_history:
+        ts = int(row.get("ts") or 0)
+        if ts <= 0:
+            continue
+        h = (ts // 3600) * 3600
+        by_hour_solar[h] = max(by_hour_solar.get(h, 0.0), float(row.get("solar_w") or 0))
+        soc = _row_soc(row)
+        if soc is not None:
+            by_hour_soc_min[h] = min(by_hour_soc_min.get(h, soc), soc)
+        if float(row.get("ac_input_w") or 0) > SOLAR_FIT_MAX_AC_INPUT_W:
+            by_hour_has_ac[h] = True
+    headroom: list[tuple[float, float, float]] = []
+    broad: list[tuple[float, float, float]] = []
+    for w in weather_hourly:
+        if not _has_split(w) or float(w.get("ghi_w_m2") or 0) <= 50:
+            continue
+        h = (int(w.get("ts") or 0) // 3600) * 3600 - 3600
+        sol = by_hour_solar.get(h)
+        if sol is None or sol <= 0:
+            continue
+        triple = (max(0.0, float(w["direct_w_m2"])), max(0.0, float(w["diffuse_w_m2"])), sol)
+        broad.append(triple)
+        soc = by_hour_soc_min.get(h)
+        if soc is not None and soc <= SOLAR_FIT_MAX_SOC_PCT and not by_hour_has_ac.get(h, False):
+            headroom.append(triple)
+    pairs = headroom if len(headroom) >= SOLAR_SPLIT_MIN_SAMPLES else broad
+    if len(pairs) < SOLAR_SPLIT_MIN_SAMPLES:
+        return None
+    # Least squares on solar = a*direct + b*diffuse, with a penalty that
+    # pulls b toward PRIOR_RATIO * a (scaled to the diffuse data's weight).
+    a11 = sum(d * d for d, _, _ in pairs)
+    a22 = sum(f * f for _, f, _ in pairs)
+    a12 = sum(d * f for d, f, _ in pairs)
+    b1 = sum(d * y for d, _, y in pairs)
+    b2 = sum(f * y for _, f, y in pairs)
+    penalty = SOLAR_DIFFUSE_PRIOR_STRENGTH * a22
+    a11 += penalty * SOLAR_DIFFUSE_PRIOR_RATIO ** 2
+    a12 -= penalty * SOLAR_DIFFUSE_PRIOR_RATIO
+    a22 += penalty
+    det = a11 * a22 - a12 * a12
+    if det <= 0:
+        return None
+    k = (b1 * a22 - b2 * a12) / det
+    diffuse_k = (a11 * b2 - a12 * b1) / det
+    if not 0.05 <= k <= 15.0:
+        return None                      # same plausibility range as the GHI coefficient
+    lo, hi = SOLAR_DIFFUSE_RATIO_CLAMP
+    return k, max(lo, min(hi, diffuse_k / k)), len(pairs)
+
+
 def fit_diurnal_shape(
     energy_history: list[dict[str, Any]],
     weather_hourly: list[dict[str, Any]],
@@ -571,7 +674,7 @@ def fit_diurnal_shape(
     ratios: dict[int, list[float]] = {}
     for w in weather_hourly:
         h = (int(w.get("ts") or 0) // 3600) * 3600 - 3600
-        ghi = float(w.get("ghi_w_m2") or 0)
+        ghi = solar_irradiance(w)
         if ghi <= DIURNAL_MIN_GHI:
             continue
         sol = by_hour_solar.get(h)
@@ -2057,6 +2160,16 @@ def build_forecast(
     cutoff = int(now_ts)
 
     k, n_fit = fit_solar_coefficient(energy_history, weather_hourly)
+    # Prefer the direct/diffuse model when there is split weather for the
+    # hours ahead and enough split history to fit it. From here on the
+    # weather rows carry the blended irradiance that k multiplies.
+    solar_model, diffuse_ratio = "ghi", None
+    ahead = [w for w in weather_hourly if int(w.get("ts") or 0) > cutoff][:horizon_hours]
+    split = fit_solar_split(energy_history, weather_hourly) if ahead and all(map(_has_split, ahead)) else None
+    if split:
+        k, diffuse_ratio, n_fit = split
+        solar_model = "direct_diffuse"
+        weather_hourly = with_solar_irradiance(weather_hourly, diffuse_ratio)
     # Per-local-hour shade/azimuth correction on top of k. All-1.0 on a
     # fresh install → identical to pure k*GHI; learns the site's diurnal
     # curve (e.g. afternoon shade) as history accumulates.
@@ -2157,7 +2270,7 @@ def build_forecast(
         same_day = ((interval_start + utc_offset_seconds) // 86400
                     == (cutoff + utc_offset_seconds) // 86400)
         intraday_scale = solar_intraday["scale"] if same_day else 1.0
-        solar_w_uncapped = max(0.0, k * ghi * shape_factor * intraday_scale)
+        solar_w_uncapped = max(0.0, k * solar_irradiance(w) * shape_factor * intraday_scale)
         solar_w = solar_w_uncapped
         capped = False
         if solar_cap is not None and solar_w > solar_cap:
@@ -2208,6 +2321,11 @@ def build_forecast(
         "starting_soc_pct": round(starting_soc_pct, 1),
         "capacity_wh": capacity_wh,
         "solar_coefficient": round(k, 4),
+        # "direct_diffuse": k multiplies direct + solar_diffuse_ratio *
+        # diffuse sunlight. "ghi": k multiplies plain GHI (no split
+        # weather yet, or too little of it to fit).
+        "solar_model": solar_model,
+        "solar_diffuse_ratio": round(diffuse_ratio, 4) if diffuse_ratio is not None else None,
         "fit_samples": n_fit,
         # Anchors the recent-peak solar cap. `solar_recent_peak_w` is
         # the highest solar_w sample in the last 48h; `solar_cap_w` is

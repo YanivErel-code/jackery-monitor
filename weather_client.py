@@ -58,7 +58,8 @@ async def fetch_irradiance(
     """Return hourly GHI + cloud cover, past N days through forecast N days.
 
     Shape:
-      {"hourly": [{"ts": int, "ghi_w_m2": float, "cloud_cover_pct": float}, ...],
+      {"hourly": [{"ts": int, "ghi_w_m2": float, "cloud_cover_pct": float,
+                   "direct_w_m2": float, "diffuse_w_m2": float}, ...],
        "fetched_at": float, "lat": float, "lon": float}
     """
     if lat == 0 and lon == 0:
@@ -76,7 +77,7 @@ async def fetch_irradiance(
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "shortwave_radiation,cloud_cover",
+        "hourly": "shortwave_radiation,cloud_cover,direct_radiation,diffuse_radiation",
         "past_days": past_days,
         "forecast_days": forecast_days,
         "timezone": "auto",
@@ -136,12 +137,19 @@ async def fetch_irradiance(
     times = hourly.get("time") or []
     ghi = hourly.get("shortwave_radiation") or []
     cloud = hourly.get("cloud_cover") or []
-    rows = [
-        {"ts": int(t),
-         "ghi_w_m2": float(g) if g is not None else 0.0,
-         "cloud_cover_pct": float(c) if c is not None else 0.0}
-        for t, g, c in zip(times, ghi, cloud, strict=False)
-    ]
+    # Sunlight split into direct and diffuse (both on the horizontal, and
+    # summing to shortwave_radiation). Tilted panels gain far more from
+    # direct sun than from diffuse light, so the forecaster fits them apart.
+    direct = hourly.get("direct_radiation") or []
+    diffuse = hourly.get("diffuse_radiation") or []
+    rows = []
+    for i, (t, g, c) in enumerate(zip(times, ghi, cloud, strict=False)):
+        row = {"ts": int(t),
+               "ghi_w_m2": float(g) if g is not None else 0.0,
+               "cloud_cover_pct": float(c) if c is not None else 0.0}
+        if i < len(direct) and i < len(diffuse) and direct[i] is not None and diffuse[i] is not None:
+            row.update(direct_w_m2=float(direct[i]), diffuse_w_m2=float(diffuse[i]))
+        rows.append(row)
     # Open-Meteo with timezone=auto returns the UTC offset for the lat/lon.
     # Stash it onto the location record so server-side "what's today" math
     # uses the user's local midnight, not the container's UTC midnight.
@@ -199,6 +207,17 @@ def _median(xs: list[float]) -> float:
     return s[len(s) // 2] if s else 0.0
 
 
+def _stored_row(o: dict[str, Any]) -> dict[str, Any]:
+    """A stored observation as a weather row, with the direct/diffuse
+    split when the hour was stored with it."""
+    row = {"ts": int(o["ts"]),
+           "ghi_w_m2": float(o["ghi_w_m2"] or 0.0),
+           "cloud_cover_pct": float(o["cloud_cover_pct"] or 0.0)}
+    if o.get("direct_w_m2") is not None and o.get("diffuse_w_m2") is not None:
+        row.update(direct_w_m2=float(o["direct_w_m2"]), diffuse_w_m2=float(o["diffuse_w_m2"]))
+    return row
+
+
 def _serve_from_db(now: float, past_days: int, lat: float,
                    lon: float) -> dict[str, Any] | None:
     """Serve the real last-good forecast persisted to the DB when the live
@@ -222,10 +241,7 @@ def _serve_from_db(now: float, past_days: int, lat: float,
         log.debug("DB forecast serve failed: %s", e)
         return None
     tz = loc_mod.get_tz_offset() or 0
-    past = [{"ts": int(o["ts"]),
-             "ghi_w_m2": float(o["ghi_w_m2"] or 0.0),
-             "cloud_cover_pct": float(o["cloud_cover_pct"] or 0.0)}
-            for o in obs if int(o["ts"]) <= int(now)]
+    past = [_stored_row(o) for o in obs if int(o["ts"]) <= int(now)]
     return {"hourly": past + future, "fetched_at": float(fetched_at or now),
             "lat": lat, "lon": lon,
             "utc_offset_seconds": tz, "timezone": None,
@@ -265,10 +281,7 @@ def _synthesize_from_observations(now: float, past_days: int,
         return None
 
     # Real past hours (observations are already ts <= now).
-    past_rows = [{"ts": int(o["ts"]),
-                  "ghi_w_m2": float(o["ghi_w_m2"] or 0.0),
-                  "cloud_cover_pct": float(o["cloud_cover_pct"] or 0.0)}
-                 for o in obs if int(o["ts"]) <= int(now)]
+    past_rows = [_stored_row(o) for o in obs if int(o["ts"]) <= int(now)]
 
     # Per-local-hour climatology (median) over the observation window.
     from collections import defaultdict

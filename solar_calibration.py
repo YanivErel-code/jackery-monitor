@@ -63,7 +63,8 @@ def fit_intraday_solar_scale(
         if not (0 <= soc <= 70 and 0 <= main_soc <= 70 and 0 <= ac <= 50 and measured >= 0):
             continue
         conditions = by_end.get(stamp + 3600)
-        ghi = conditions.get('ghi_w_m2') if conditions else None
+        # The blended direct/diffuse irradiance when the split model is in use.
+        ghi = conditions.get('solar_irradiance_w_m2', conditions.get('ghi_w_m2')) if conditions else None
         hour = ((stamp + utc_offset_seconds) % 86400) // 3600
         shape = diurnal_shape.get(hour, 1.0)
         if not _finite(ghi) or ghi < 100 or not _finite(shape) or shape <= 0:
