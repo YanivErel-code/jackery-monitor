@@ -10,6 +10,10 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Added
+- `/app/handoff` for the iOS app: signs in through Cloudflare Access in
+  the system browser, where Google sign-in is allowed, and hands the
+  result back to the app. Answers only requests that carry a valid Access
+  assertion.
 - V2 dashboard at `/v2`, alongside the classic view. Live opens with a
   plain-language status line ("Not charging. Next charge starts at 12 AM.",
   "Charging is on hold while the dryer runs.", "No grid charging needed."),

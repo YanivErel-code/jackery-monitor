@@ -468,3 +468,55 @@ def test_energy_daily_requires_auth(unauth_client):
     unauth_client.post("/api/auth/logout")
     r = unauth_client.get("/api/energy/daily")
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------
+# /app/handoff: returns the Cloudflare Access assertion to the iOS app,
+# and only for a request that Access itself authenticated.
+# ---------------------------------------------------------------------
+
+_HANDOFF_TOKEN = "aaa.bbb.ccc-_"
+
+
+@pytest.fixture()
+def access(monkeypatch):
+    import cf_access
+
+    async def _verify(token):
+        return "user@example.com" if token == _HANDOFF_TOKEN else None
+
+    monkeypatch.setattr(cf_access, "verify", _verify)
+    monkeypatch.setattr(cf_access, "is_configured", lambda: True)
+    return cf_access
+
+
+def test_handoff_returns_the_assertion_to_the_app(app, access):
+    from urllib.parse import parse_qs, urlsplit
+    with TestClient(app.app, follow_redirects=False) as c:
+        r = c.get("/app/handoff", headers={access.HEADER_NAME: _HANDOFF_TOKEN})
+    assert r.status_code == 303
+    target = urlsplit(r.headers["location"])
+    assert (target.scheme, target.netloc) == ("jackery", "auth")
+    assert parse_qs(target.query) == {"cf": [_HANDOFF_TOKEN]}
+    assert r.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("headers", [{}, {"cf-access-jwt-assertion": "forged"}])
+def test_handoff_refuses_without_a_valid_assertion(app, access, headers):
+    with TestClient(app.app, follow_redirects=False) as c:
+        r = c.get("/app/handoff", headers=headers)
+    assert "jackery://" not in r.headers.get("location", "")
+    assert r.status_code != 200
+
+
+def test_handoff_gives_a_password_session_nothing(client, access):
+    """A LAN password session has no Access assertion to hand over."""
+    r = client.get("/app/handoff", follow_redirects=False)
+    assert r.status_code == 404
+
+
+def test_handoff_is_off_when_access_is_not_configured(client, access, monkeypatch):
+    monkeypatch.setattr(access, "is_configured", lambda: False)
+    r = client.get("/app/handoff", follow_redirects=False,
+                   headers={access.HEADER_NAME: _HANDOFF_TOKEN})
+    assert r.status_code == 404
