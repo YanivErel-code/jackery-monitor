@@ -256,3 +256,30 @@ async def test_restart_only_reaches_phones_without_a_card(ready):
     assert [str(r.url)[-64:] for r in seen] == ["c3" * 32]
     assert ready.devices()["install-0001"]["activity_token"] == "d4" * 40        # the showing card is left alone
 
+
+async def test_a_new_card_first_removes_the_one_that_just_ended(ready):
+    """Charging stops and five minutes later the washer starts a hold: the
+    finished card must not sit beside the new one."""
+    ready.register_device("install-0001", {"activity_token": "d4" * 40})
+    seen, client = _capture()
+    async with client:
+        await ready.live_end({**CONTENT, "status": "Charging finished"}, now=1000, client=client)
+        assert ready.devices()["install-0001"]["activity_token"] is None
+        await ready.live_start(CONTENT, device_name="E", alert=("a", "b"), now=1300, client=client)
+    ended, removed, started = (json.loads(r.content)["aps"] for r in seen)
+    assert [str(r.url)[-80:] for r in seen[:2]] == ["d4" * 40, "d4" * 40] and str(seen[2].url).endswith(TOKEN_B)
+    assert ended["event"] == "end" and ended["dismissal-date"] == 1000 + 15 * 60
+    assert removed["event"] == "end" and removed["dismissal-date"] == 1300         # gone at once
+    assert removed["content-state"]["status"] == "Charging finished"
+    assert started["event"] == "start"
+    assert "lingering" not in ready.devices()["install-0001"]
+
+
+async def test_a_card_that_has_already_left_the_lock_screen_is_not_chased(ready):
+    ready.register_device("install-0001", {"activity_token": "d4" * 40})
+    seen, client = _capture()
+    async with client:
+        await ready.live_end(CONTENT, now=1000, client=client)
+        await ready.live_start(CONTENT, device_name="E", alert=("a", "b"), now=1000 + 16 * 60, client=client)
+    assert [json.loads(r.content)["aps"]["event"] for r in seen] == ["end", "start"]
+
