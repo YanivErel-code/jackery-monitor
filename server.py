@@ -1892,13 +1892,25 @@ def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
             wx = state.energy.list_weather_observations(
                 since_ts=int(time.time()) - 14 * 86400, limit=14 * 24,
             )
-            k_val, n = forecaster.fit_solar_coefficient(ehist, wx)
-            source = "fit" if n >= forecaster.MIN_FIT_SAMPLES else "default"
+            # Show what the forecast uses: the response to direct sun and
+            # the worth of diffuse light when the split model has enough
+            # history, the single GHI coefficient otherwise.
+            split = forecaster.fit_solar_split(ehist, wx)
+            if split:
+                k_val, ratio, n = split
+                source = "fit"
+                note = (f"Watts per W/m² of direct sun. Diffuse light under cloud "
+                        f"counts for {round(ratio * 100)}% of that.")
+            else:
+                k_val, n = forecaster.fit_solar_coefficient(ehist, wx)
+                source = "fit" if n >= forecaster.MIN_FIT_SAMPLES else "default"
+                note = None
             state.energy.set_device_param(
                 device_sn, key, k_val, source=source, n_samples=n,
                 confidence=("high" if n >= 20 else "medium" if n >= 5 else "low"),
+                note=note,
             )
-            return {"value": k_val, "source": source, "n_samples": n,
+            return {"value": k_val, "source": source, "n_samples": n, "note": note,
                     "updated_at": int(time.time())}
         except Exception as e:
             log.debug("resolve %s/%s fit failed: %s", device_sn, key, e)

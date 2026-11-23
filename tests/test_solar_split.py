@@ -199,3 +199,26 @@ async def test_weather_fetch_asks_for_and_returns_the_split(monkeypatch):
     assert (first["direct_w_m2"], first["diffuse_w_m2"]) == (320.0, 80.0)
     assert (second["direct_w_m2"], second["diffuse_w_m2"]) == (0.0, 300.0)
     assert "direct_w_m2" not in third                                       # a missing half means no split
+
+
+def test_settings_shows_the_values_the_forecast_uses(monkeypatch):
+    """What the app has learned: the direct-sun response with the worth of
+    diffuse light as its note, or the single GHI coefficient without one."""
+    import server
+    energy, weather = _days(["clear", "overcast"] * 7)
+    saved = {}
+    monkeypatch.setattr(server.state.energy, "get_device_param", lambda sn, key: None)
+    monkeypatch.setattr(server.state.energy, "set_device_param",
+                        lambda sn, key, value, **kw: saved.update(value=value, **kw))
+    monkeypatch.setattr(server, "_cached_history", lambda sn: energy)
+    monkeypatch.setattr(server.state.energy, "list_weather_observations", lambda **kw: weather)
+    resolved = server.resolve_device_param("MAIN", "solar_coefficient")
+    assert resolved["value"] == pytest.approx(K, rel=0.03) and resolved["source"] == "fit"
+    assert resolved["note"].startswith("Watts per W/m² of direct sun.") and "% of that" in resolved["note"]
+    assert saved["note"] == resolved["note"]
+
+    plain = [{k: v for k, v in w.items() if k not in ("direct_w_m2", "diffuse_w_m2")} for w in weather]
+    monkeypatch.setattr(server.state.energy, "list_weather_observations", lambda **kw: plain)
+    resolved = server.resolve_device_param("MAIN", "solar_coefficient")
+    assert resolved["note"] is None and saved["note"] is None
+    assert resolved["value"] == pytest.approx(forecaster.fit_solar_coefficient(energy, plain)[0])

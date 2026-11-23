@@ -357,7 +357,7 @@ DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
     "solar_coefficient": {
         "label": "Solar coefficient",
         "unit": "W per W/m²",
-        "description": "Effective panel array size — fitted from observed solar vs irradiance.",
+        "description": "Effective panel array size — fitted from observed solar vs sunlight (direct and diffuse separately once there is enough history).",
     },
 }
 
