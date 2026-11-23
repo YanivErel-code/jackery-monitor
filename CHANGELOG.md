@@ -87,6 +87,10 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
+- Two lock-screen cards could show at once: a finished card lingers for 15
+  minutes, and a new one could start within that time (charging stops,
+  then the washer starts a hold). A new card now removes the lingering
+  one first.
 - "Today" started an hour early after daylight saving ended. The UTC
   offset was a number saved in summer, and the battery kept re-reporting
   its own stale offset over it. With a location set, the offset now comes
