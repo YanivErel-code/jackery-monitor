@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 import auth
 import cf_access
+
+# URL scheme the iOS app listens on while its sign-in sheet is open.
+APP_CALLBACK = "jackery://auth"
 
 
 def _cookie_secure() -> bool:
@@ -166,6 +170,23 @@ def install(app: FastAPI, web_dir: Path,
         if not auth.save_user(user["username"], new):
             raise HTTPException(500, "failed to save")
         return {"ok": True}
+
+    @app.get("/app/handoff")
+    async def app_handoff(request: Request):
+        """Hand a Cloudflare Access sign-in from the system browser to the
+        iOS app. Google refuses to sign in inside an app's embedded web
+        view, so the app opens this URL in a Safari sheet instead; Access
+        authenticates there and this redirect returns the same assertion
+        Access just issued, which the app stores as its own
+        CF_Authorization cookie. Only a request that arrived through
+        Access with a valid assertion gets an answer."""
+        token = request.headers.get(cf_access.HEADER_NAME)
+        if not cf_access.is_configured() or not await cf_access.verify(token):
+            raise HTTPException(404, "Not Found")
+        return RedirectResponse(
+            f"{APP_CALLBACK}?cf={quote(token, safe='')}", status_code=303,
+            headers={"Cache-Control": "no-store",
+                     "Referrer-Policy": "no-referrer"})
 
     @app.get("/login")
     def login_page():
