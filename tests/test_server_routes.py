@@ -173,6 +173,26 @@ def test_v2_overview_answers_before_any_decision_exists(client, app):
     assert body["rates"] and body["grid_today"]["tiers"]
 
 
+def test_app_summary_is_compact_and_carries_the_headline(client, app):
+    r = client.get("/api/app/summary")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {
+        "now", "device_sn", "device_name", "connection", "last_update_ts", "battery",
+        "power", "headline", "charging_now", "next_charge_ts", "reserve_pct"}
+    assert set(body["battery"]) == {"soc_pct", "time_remaining_h", "time_to_full_h"}
+    assert set(body["power"]) == {"solar_w", "grid_w", "input_w", "output_w"}
+    if body["device_sn"]:
+        assert body["headline"]["state"] == "manual" and body["headline"]["title"]
+    assert body["charging_now"] is False and body["next_charge_ts"] is None
+    assert len(r.content) < 2000
+
+
+def test_app_summary_requires_sign_in(app):
+    with TestClient(app.app, follow_redirects=False) as c:
+        assert c.get("/api/app/summary").status_code == 401
+
+
 def test_unauth_root_redirects_to_setup_when_no_user(unauth_client):
     """Fresh install (no user yet) → / redirects to /setup."""
     r = unauth_client.get("/", follow_redirects=False)
