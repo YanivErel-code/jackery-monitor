@@ -5124,6 +5124,7 @@ async def _alerts_tick(now: float | None = None) -> list[alerts.Alert]:
         error = await alerts.send_ntfy(config, alert)
         if error:
             log.warning("alert %s not delivered: %s", alert.rule, error)
+            alerts.undelivered(memory["memory"], alert)   # try again next pass
         alerts.record(memory, alert, now, error)
     if to_send or json.dumps(memory["memory"], sort_keys=True) != before:
         alerts.save_state(memory)

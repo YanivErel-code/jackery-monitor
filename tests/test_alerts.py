@@ -178,7 +178,52 @@ async def test_send_ntfy_posts_the_alert(config):
                             "priority": 4, "tags": ["low_battery"]}
 
 
-async def test_send_ntfy_reports_failure_without_raising(config):
+async def test_send_ntfy_retries_a_dropped_connection(config, monkeypatch):
+    monkeypatch.setattr(alerts, "SEND_RETRY_WAITS_S", (0, 0))
+    config["ntfy_topic"] = "jackery-abc123"
+    calls = []
+
+    def flaky(request):
+        calls.append(1)
+        if len(calls) < 3:
+            raise httpx.ConnectError("no route")
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(flaky)) as client:
+        assert await alerts.send_ntfy(config, _alert(), client=client) is None
+    assert len(calls) == 3
+
+
+async def test_send_ntfy_does_not_retry_a_refusal(config, monkeypatch):
+    monkeypatch.setattr(alerts, "SEND_RETRY_WAITS_S", (0, 0))
+    config["ntfy_topic"] = "jackery-abc123"
+    calls = []
+
+    def refuse(request):
+        calls.append(1)
+        return httpx.Response(403)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        assert "403" in await alerts.send_ntfy(config, _alert(), client=client)
+    assert len(calls) == 1
+
+
+def test_an_undelivered_alert_is_tried_again_and_logged_once():
+    state = {"memory": {}, "recent": []}
+    current = {"low_battery": _alert()}
+    for now in (100, 160, 220):
+        (alert,) = alerts.step(state["memory"], current, now)
+        alerts.record(state, alert, now, "Could not reach ntfy: ConnectError.")
+        alerts.undelivered(state["memory"], alert)
+    assert len(state["recent"]) == 1 and state["recent"][0]["ts"] == 220
+    (alert,) = alerts.step(state["memory"], current, 280)
+    alerts.record(state, alert, 280, None)
+    assert [r["delivered"] for r in state["recent"]] == [True, False]
+    assert alerts.step(state["memory"], current, 340) == []
+
+
+async def test_send_ntfy_reports_failure_without_raising(config, monkeypatch):
+    monkeypatch.setattr(alerts, "SEND_RETRY_WAITS_S", (0, 0))
     assert await alerts.send_ntfy(config, _alert()) == "No ntfy topic is set."
     config["ntfy_topic"] = "jackery-abc123"
 
