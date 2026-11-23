@@ -27,7 +27,9 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import crypto_util
 
@@ -114,11 +116,10 @@ def get() -> dict | None:
         "latitude": pair[0], "longitude": pair[1],
         "updated_at": float(data.get("updated_at") or 0.0),
     }
-    if "utc_offset_seconds" in data:
-        try:
-            out["utc_offset_seconds"] = int(data["utc_offset_seconds"])
-        except (TypeError, ValueError):
-            pass
+    # The offset in force now, not the number saved with the record.
+    offset = _current_offset(data)
+    if offset is not None:
+        out["utc_offset_seconds"] = offset
     if data.get("timezone"):
         out["timezone"] = str(data["timezone"])
     if data.get("label"):
@@ -198,19 +199,48 @@ def update_timezone(utc_offset_seconds: int,
     return True
 
 
-def get_tz_offset() -> int | None:
-    """Return the stored UTC offset in seconds, or None. Independent of
-    lat/lon — works when only the device's `uo` field has populated the
-    record."""
+def get_timezone_name() -> str | None:
+    """The IANA time-zone name (such as "America/Los_Angeles"), if a
+    location has been set."""
     with _lock:
         data = _read_raw()
-    if not data:
-        return None
+    name = (data or {}).get("timezone")
+    return str(name) if name else None
+
+
+def _current_offset(data: dict, now: float | None = None) -> int | None:
+    """The UTC offset in force at `now` for a stored record.
+
+    When the time-zone name is known the offset is worked out from it,
+    so it follows daylight saving. The stored number is only a snapshot:
+    it was right when it was saved and goes an hour wrong at the next
+    clock change, and a device may keep reporting its own stale offset.
+    Without a name, the stored offset is all there is."""
+    name = data.get("timezone")
+    if name:
+        try:
+            moment = datetime.fromtimestamp(time.time() if now is None else now, ZoneInfo(str(name)))
+            offset = moment.utcoffset()
+            if offset is not None:
+                return int(offset.total_seconds())
+        except Exception as error:      # unknown name, or no time-zone data on this system
+            log.debug("time zone %r unusable, using the stored offset: %s", name, error)
     raw = data.get("utc_offset_seconds")
     try:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def get_tz_offset(now: float | None = None) -> int | None:
+    """The UTC offset in seconds in force right now (or at `now`), or None
+    when nothing is stored. Works without lat/lon: the offset alone can
+    come from the device's own `uo` field."""
+    with _lock:
+        data = _read_raw()
+    if not data:
+        return None
+    return _current_offset(data, now)
 
 
 def clear() -> bool:

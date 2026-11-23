@@ -244,3 +244,25 @@ def test_list_presets_returns_id_and_label(tmp_path, monkeypatch):
     pge = next((p for p in presets if p["id"] == "pge-ev2a"), None)
     assert pge is not None
     assert pge["plan"]["type"] == "tou"
+
+
+def test_solar_value_is_the_solar_itself_at_the_rate_when_collected(tmp_path, monkeypatch):
+    """`solar_savings` values everything the home drew; `solar_value` is
+    what the solar collected would have cost from the grid."""
+    cost = _fresh_cost(tmp_path, monkeypatch)
+    plan = {
+        "type": "tou", "currency": "USD",
+        "tou_rates": [
+            {"start_hour": 16, "end_hour": 21, "rate": 0.60, "label": "peak"},
+            {"start_hour": 0, "end_hour": 16, "rate": 0.30, "label": "off-peak"},
+            {"start_hour": 21, "end_hour": 24, "rate": 0.30, "label": "off-peak"},
+        ],
+    }
+    base = 1_700_000_000 - (1_700_000_000 % 86400)
+    history = [
+        {"ts": base + 10 * 3600, "solar_wh": 2000, "ac_input_wh": 0, "input_wh": 2000, "output_wh": 4000},
+        {"ts": base + 17 * 3600, "solar_wh": 500, "ac_input_wh": 0, "input_wh": 500, "output_wh": 0},
+    ]
+    out = cost.compute_savings(history, plan, tz_offset_seconds=0)
+    assert out["solar_value"] == 0.90        # 2 kWh at $0.30 + 0.5 kWh at $0.60
+    assert out["solar_savings"] == 1.20      # the home's 4 kWh at $0.30: a different question

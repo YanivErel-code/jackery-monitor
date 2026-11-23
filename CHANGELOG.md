@@ -35,6 +35,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
 - The iOS app's widgets are asked to refresh by push when the charging
   status changes, and for a change of battery level at most every 15
   minutes.
+- The Live page's "Grid cost today" card is now "Energy today": solar made
+  today and what it was worth, next to grid bought and its cost, with the
+  rate breakdown and the home's use below.
 - `/api/app/summary`: compact battery, live power and headline for the iOS
   app's widgets.
 - `/app/handoff` for the iOS app: signs in through Cloudflare Access in
@@ -84,6 +87,12 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
+- "Today" started an hour early after daylight saving ended. The UTC
+  offset was a number saved in summer, and the battery kept re-reporting
+  its own stale offset over it. With a location set, the offset now comes
+  from the time-zone name and follows the clock changes; the battery's
+  number is only used when no location is set. This also corrects the
+  hour-of-day used by the forecast and the rate lookups that read it.
 - The Charging page showed a red "Reserve at risk" whenever the plan could
   not reach the sunrise target, even with the battery far above the
   reserve. It now says "Sunrise target will be missed" as a warning, and
