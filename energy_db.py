@@ -196,6 +196,8 @@ CREATE TABLE IF NOT EXISTS weather_observations (
     ts              INTEGER NOT NULL,    -- hour-aligned unix epoch
     ghi_w_m2        REAL NOT NULL,
     cloud_cover_pct REAL,
+    direct_w_m2     REAL,                -- direct part of ghi (horizontal)
+    diffuse_w_m2    REAL,                -- diffuse part of ghi
     PRIMARY KEY (ts)
 );
 
@@ -208,6 +210,8 @@ CREATE TABLE IF NOT EXISTS weather_forecast (
     ts              INTEGER NOT NULL,    -- hour-aligned unix epoch (future)
     ghi_w_m2        REAL NOT NULL,
     cloud_cover_pct REAL,
+    direct_w_m2     REAL,
+    diffuse_w_m2    REAL,
     fetched_at      INTEGER NOT NULL,    -- when this forecast was pulled
     PRIMARY KEY (ts)
 );
@@ -358,6 +362,19 @@ DEVICE_PARAM_KEYS: dict[str, dict[str, Any]] = {
 }
 
 
+def _opt_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _weather_row(r: tuple) -> dict:
+    """(ts, ghi, cloud, direct, diffuse, ...) → the dict the forecaster
+    reads. The split is left out for hours stored without it."""
+    row = {"ts": r[0], "ghi_w_m2": r[1], "cloud_cover_pct": r[2]}
+    if r[3] is not None and r[4] is not None:
+        row.update(direct_w_m2=r[3], diffuse_w_m2=r[4])
+    return row
+
+
 class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMixin):
     """Top-level energy DB.
 
@@ -488,6 +505,14 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             # actual_*). Used by the Forecast tab to filter the headline
             # MAE to predictions made by post-cutoff code, so wild errors
             # from older buggy code don't drag the displayed accuracy down.
+            # Sunlight split into its direct and diffuse parts, which tilted
+            # panels respond to differently. NULL on hours stored before.
+            for table in ("weather_observations", "weather_forecast"):
+                existing_wx = {row[1] for row in c.execute(
+                    f"PRAGMA table_info({table})").fetchall()}
+                for column in ("direct_w_m2", "diffuse_w_m2"):
+                    if column not in existing_wx:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} REAL")
             existing_ds = {row[1] for row in c.execute(
                 "PRAGMA table_info(daily_solar_summary)").fetchall()}
             if "predictions_made_at" not in existing_ds:
@@ -815,25 +840,33 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
     # ---------- weather observations (GHI + cloud cover history) ----------
     def upsert_weather_observations(self, rows: list[dict]) -> int:
         """Bulk-write weather observations. Each row is {ts, ghi_w_m2,
-        cloud_cover_pct}. INSERT OR IGNORE — once we've recorded a value
-        for a given hour we don't overwrite (Open-Meteo's historical
-        re-analysis can shift a tiny bit and we'd rather have the value
-        we saw at observation time)."""
+        cloud_cover_pct, direct_w_m2, diffuse_w_m2}. Once we've recorded a
+        value for a given hour we don't overwrite it (Open-Meteo's
+        historical re-analysis can shift a tiny bit and we'd rather have
+        the value we saw at observation time). The one exception: an hour
+        stored before the direct/diffuse split existed gets the split
+        filled in, so the solar fit has history to learn from at once."""
         if not rows:
             return 0
         prepared = [
             (int(r["ts"]),
              float(r.get("ghi_w_m2") or 0),
-             float(r["cloud_cover_pct"]) if r.get("cloud_cover_pct") is not None else None)
+             float(r["cloud_cover_pct"]) if r.get("cloud_cover_pct") is not None else None,
+             _opt_float(r.get("direct_w_m2")), _opt_float(r.get("diffuse_w_m2")))
             for r in rows if r.get("ts")
         ]
         if not prepared:
             return 0
         with self._conn() as c:
             c.executemany(
-                """INSERT OR IGNORE INTO weather_observations
-                       (ts, ghi_w_m2, cloud_cover_pct)
-                   VALUES (?, ?, ?)""",
+                """INSERT INTO weather_observations
+                       (ts, ghi_w_m2, cloud_cover_pct, direct_w_m2, diffuse_w_m2)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(ts) DO UPDATE SET
+                       direct_w_m2 = excluded.direct_w_m2,
+                       diffuse_w_m2 = excluded.diffuse_w_m2
+                   WHERE weather_observations.direct_w_m2 IS NULL
+                     AND excluded.direct_w_m2 IS NOT NULL""",
                 prepared,
             )
         return len(prepared)
@@ -844,17 +877,14 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
         returns everything stored."""
         with self._conn() as c:
             rows = c.execute(
-                """SELECT ts, ghi_w_m2, cloud_cover_pct
+                """SELECT ts, ghi_w_m2, cloud_cover_pct, direct_w_m2, diffuse_w_m2
                      FROM weather_observations
                     WHERE ts >= ?
                     ORDER BY ts ASC
                     LIMIT ?""",
                 (int(since_ts), int(limit)),
             ).fetchall()
-        return [
-            {"ts": r[0], "ghi_w_m2": r[1], "cloud_cover_pct": r[2]}
-            for r in rows
-        ]
+        return [_weather_row(r) for r in rows]
 
     def last_battery_full_ts(self, device_sn: str, full_pct: int = 100,
                              lookback_days: int = 365) -> int | None:
@@ -878,11 +908,13 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
     def replace_weather_forecast(self, rows: list[dict], fetched_at: int) -> int:
         """Store the latest forecast (future hourly GHI + cloud), replacing
         any prior. Served as the last-good forecast when the live API is
-        unreachable. Each row is {ts, ghi_w_m2, cloud_cover_pct}."""
+        unreachable. Each row is {ts, ghi_w_m2, cloud_cover_pct,
+        direct_w_m2, diffuse_w_m2}."""
         prepared = [
             (int(r["ts"]),
              float(r.get("ghi_w_m2") or 0),
              float(r["cloud_cover_pct"]) if r.get("cloud_cover_pct") is not None else None,
+             _opt_float(r.get("direct_w_m2")), _opt_float(r.get("diffuse_w_m2")),
              int(fetched_at))
             for r in rows if r.get("ts")
         ]
@@ -891,8 +923,8 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             if prepared:
                 c.executemany(
                     """INSERT OR REPLACE INTO weather_forecast
-                           (ts, ghi_w_m2, cloud_cover_pct, fetched_at)
-                       VALUES (?, ?, ?, ?)""",
+                           (ts, ghi_w_m2, cloud_cover_pct, direct_w_m2, diffuse_w_m2, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
                     prepared,
                 )
         return len(prepared)
@@ -902,7 +934,7 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
         oldest first. fetched_at is 0 when the table is empty."""
         with self._conn() as c:
             rows = c.execute(
-                """SELECT ts, ghi_w_m2, cloud_cover_pct, fetched_at
+                """SELECT ts, ghi_w_m2, cloud_cover_pct, direct_w_m2, diffuse_w_m2, fetched_at
                      FROM weather_forecast
                     WHERE ts >= ?
                     ORDER BY ts ASC""",
@@ -910,9 +942,8 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             ).fetchall()
         if not rows:
             return [], 0
-        fetched_at = int(rows[0][3] or 0)
-        return ([{"ts": r[0], "ghi_w_m2": r[1], "cloud_cover_pct": r[2]}
-                 for r in rows], fetched_at)
+        fetched_at = int(rows[0][5] or 0)
+        return [_weather_row(r) for r in rows], fetched_at
 
     # ---------- per-expansion-battery state ----------
     def record_battery_packs(self, parent_sn: str, packs: list[dict],
