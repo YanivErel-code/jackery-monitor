@@ -75,6 +75,12 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
+- The Charging page showed a red "Reserve at risk" whenever the plan could
+  not reach the sunrise target, even with the battery far above the
+  reserve. It now says "Sunrise target will be missed" as a warning, and
+  keeps "Reserve at risk" for a projected low below the reserve, the same
+  test the headline uses.
+- Backups now include the notification settings and the Apple push key.
 - The lock-screen battery level could read one point below the dashboard
   (26.5% showed as 26% on one and 27% on the other).
 - V2 chart axis labels were cut off at the left edge for values of 10 kWh and
