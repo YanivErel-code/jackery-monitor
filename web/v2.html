@@ -430,7 +430,7 @@
         <button type="button" role="tab" data-sec="rates" aria-selected="false">Rates</button>
         <button type="button" role="tab" data-sec="ai" aria-selected="false">AI</button>
         <button type="button" role="tab" data-sec="laundry" aria-selected="false">Laundry</button>
-        <button type="button" role="tab" data-sec="alerts" aria-selected="false">Alerts</button>
+        <button type="button" role="tab" data-sec="alerts" aria-selected="false">Notifications</button>
         <button type="button" role="tab" data-sec="backup" aria-selected="false">Backup</button>
         <button type="button" role="tab" data-sec="device" aria-selected="false">Device</button>
         <button type="button" role="tab" data-sec="logs" aria-selected="false">Logs</button>
@@ -537,16 +537,16 @@
 
       <div data-sec="alerts" class="stack-lg" hidden>
         <section class="card">
-          <h2>Alerts on your phone</h2>
-          <p class="muted">Sent as notifications to the Jackery app on your iPhone.</p>
+          <h2>Notifications on your phone</h2>
+          <p class="muted">Sent to the Jackery app on your iPhone. Untick any you do not want.</p>
           <p id="al-state"></p>
-          <div class="f-row check"><label class="f-label" for="al-enabled"><b>Send alerts</b></label>
+          <div class="f-row check"><label class="f-label" for="al-enabled"><b>Send notifications</b></label>
             <div class="f-control"><input id="al-enabled" type="checkbox"></div></div>
           <div class="f-row check"><label class="f-label" for="al-live"><b>Show charging on the lock screen</b><span>A Live Activity with the battery level while the battery charges from the grid or charging is on hold.</span></label>
             <div class="f-control"><input id="al-live" type="checkbox"></div></div>
-          <h3>What to alert on</h3>
+          <h3>What to notify you about</h3>
           <div id="al-rules" class="form"></div>
-          <div class="form-foot"><button id="al-save" class="btn primary" type="button">Save</button><button id="al-test" class="btn" type="button">Send a test alert</button><span id="al-msg" class="form-msg" role="status"></span></div>
+          <div class="form-foot"><button id="al-save" class="btn primary" type="button">Save</button><button id="al-test" class="btn" type="button">Send a test notification</button><span id="al-msg" class="form-msg" role="status"></span></div>
         </section>
         <section class="card">
           <h2>Phones</h2>
@@ -569,8 +569,8 @@
           <span id="al-key-msg" class="form-msg" role="status"></span>
         </section>
         <section class="card">
-          <h2>Recent alerts</h2>
-          <div class="table-wrap"><table id="al-table"><thead><tr><th scope="col" class="left">When</th><th scope="col" class="left">Alert</th><th scope="col" class="left">Sent</th></tr></thead><tbody></tbody></table></div>
+          <h2>Recent notifications</h2>
+          <div class="table-wrap"><table id="al-table"><thead><tr><th scope="col" class="left">When</th><th scope="col" class="left">Notification</th><th scope="col" class="left">Sent</th></tr></thead><tbody></tbody></table></div>
         </section>
       </div>
 

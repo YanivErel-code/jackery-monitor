@@ -5197,9 +5197,9 @@ def api_alerts_config(body: dict):
 
 @app.post("/api/alerts/test")
 async def api_alerts_test():
-    """Send a test alert to every registered phone."""
+    """Send a test notification to every registered phone."""
     error = await apns.send_alert(
-        "Test alert from Jackery monitor", "If you can read this, alerts are working.", rule="test")
+        "Test notification from Jackery monitor", "If you can read this, notifications are working.", rule="test")
     return {"ok": error is None, "error": error}
 
 

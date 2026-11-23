@@ -15,7 +15,7 @@ limitations still apply; a major version is not a hardware safety guarantee.
   tripped, charging held by laundry for a long time, lost contact with the
   battery, and backup failed. Each alert is sent once when its condition
   starts and re-arms when it clears; one that could not be delivered is
-  tried again on the next pass. Set up under Settings → Alerts: the Apple
+  tried again on the next pass. Set up under Settings → Notifications: the Apple
   push key (stored encrypted), the registered phones, per-alert toggles
   and thresholds, and a test button.
 - A Live Activity on the phone's lock screen while the battery charges
