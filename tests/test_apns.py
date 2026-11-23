@@ -219,3 +219,40 @@ async def test_widget_reload_push_is_what_apple_expects(ready):
     assert request.headers["apns-topic"] == "com.example.jackery.push-type.widgets"
     assert json.loads(request.content) == {"aps": {"content-changed": True}}
 
+
+async def test_a_low_priority_alert_is_silent_and_carries_its_page(ready):
+    seen, client = _capture()
+    async with client:
+        await ready.send_alert("Backup failed", "smb", priority="low", rule="backup_failed", page="settings", client=client)
+        await ready.send_alert("Battery low", "19%", priority="high", rule="low_battery", page="live", client=client)
+    quiet, loud = (json.loads(r.content) for r in seen)
+    assert quiet == {"aps": {"alert": {"title": "Backup failed", "body": "smb"}, "thread-id": "backup_failed",
+                             "interruption-level": "passive"}, "page": "settings"}
+    assert "sound" not in quiet["aps"] and seen[0].headers["apns-priority"] == "5"
+    assert loud["aps"]["sound"] == "default" and loud["page"] == "live" and seen[1].headers["apns-priority"] == "10"
+
+
+def test_api_token_is_stored_hashed_replaced_on_reissue_and_revoked_with_the_phone(apns, isolated_data):
+    token = apns.issue_api_token("install-0001")
+    assert len(token) >= 40 and apns.verify_api_token(token)
+    assert token not in (isolated_data / "app-devices.json").read_text()
+    assert not apns.verify_api_token("") and not apns.verify_api_token(None) and not apns.verify_api_token(token + "x")
+    newer = apns.issue_api_token("install-0001")
+    assert apns.verify_api_token(newer) and not apns.verify_api_token(token)
+    apns.register_device("install-0001", {"push_token": TOKEN_A})           # registering keeps the token
+    assert apns.verify_api_token(newer)
+    apns.remove_device("install-0001")
+    assert not apns.verify_api_token(newer)
+    with pytest.raises(ValueError):
+        apns.issue_api_token("x")
+
+
+async def test_restart_only_reaches_phones_without_a_card(ready):
+    ready.register_device("install-0001", {"activity_token": "d4" * 40})
+    ready.register_device("install-0002", {"start_token": "c3" * 32})
+    seen, client = _capture()
+    async with client:
+        assert await ready.live_start(CONTENT, device_name="E", alert=("a", "b"), now=1, only_missing=True, client=client) is None
+    assert [str(r.url)[-64:] for r in seen] == ["c3" * 32]
+    assert ready.devices()["install-0001"]["activity_token"] == "d4" * 40        # the showing card is left alone
+

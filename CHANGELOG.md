@@ -23,6 +23,15 @@ limitations still apply; a major version is not a hardware safety guarantee.
   monitor. It is redrawn when the level, status or end time changes, or
   when solar, grid or home power starts, stops or moves by 50 W and a tenth
   (power changes at most every two minutes, to spare the phone's battery).
+- The iOS app gets its own long-lived token for `/api/app/*` (and nothing
+  else), so its widgets and Siri answer keep working after the browser
+  sign-in expires. Stored hashed; removing the phone revokes it.
+- A morning summary notification, off by default: battery level, today's
+  solar forecast and what yesterday's grid power cost, at an hour you pick.
+- Tapping a notification opens the page it is about. "Backup failed" is
+  delivered silently, since backups run at night.
+- A phone whose lock-screen card was removed by an app update asks for it
+  back and gets it on the next pass; a card the owner swiped away stays away.
 - The iOS app's widgets are asked to refresh by push when the charging
   status changes, and for a change of battery level at most every 15
   minutes.

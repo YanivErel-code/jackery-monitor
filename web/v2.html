@@ -544,6 +544,8 @@
             <div class="f-control"><input id="al-enabled" type="checkbox"></div></div>
           <div class="f-row check"><label class="f-label" for="al-live"><b>Show charging on the lock screen</b><span>A Live Activity with the battery level while the battery charges from the grid or charging is on hold.</span></label>
             <div class="f-control"><input id="al-live" type="checkbox"></div></div>
+          <div class="f-row check opt"><label class="f-label" for="al-daily"><b>Morning summary</b><span>Battery level, today's solar forecast and what yesterday's grid power cost, once a day.</span></label>
+            <div class="f-control"><span class="f-unit">at</span><select id="al-daily-hour" aria-label="Morning summary time"></select><input id="al-daily" type="checkbox"></div></div>
           <h3>What to notify you about</h3>
           <div id="al-rules" class="form"></div>
           <div class="form-foot"><button id="al-save" class="btn primary" type="button">Save</button><button id="al-test" class="btn" type="button">Send a test notification</button><span id="al-msg" class="form-msg" role="status"></span></div>

@@ -19,10 +19,13 @@ BadDeviceToken); dead tokens are dropped so they are not retried forever.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import time
 from typing import Any
 
@@ -183,9 +186,37 @@ def register_device(install_id: str, patch: dict[str, Any], now: float | None = 
                 raise ValueError(f"{field} is not a valid push token.")
             device[field] = token or None
     device["updated_ts"] = time.time() if now is None else now
+    if patch.get("activity_gone") == "dismissed":
+        # The owner swiped the lock-screen card away: do not bring it back
+        # for this charging session.
+        device["activity_dismissed_ts"] = device["updated_ts"]
     found[install_id] = device
     _save_devices(found)
     return device
+
+
+def issue_api_token(install_id: str, now: float | None = None) -> str:
+    """A long-lived token that lets this install call /api/app/* without
+    the browser sign-in, so widgets keep working after that sign-in
+    expires. Only its hash is stored; issuing again replaces the old one,
+    and removing the phone revokes it."""
+    if not ID_RE.match(str(install_id or "")):
+        raise ValueError("install_id must be the app's install identifier.")
+    token = secrets.token_urlsafe(32)
+    found = devices()
+    device = found.get(install_id) or {"environment": "production", "name": "iPhone"}
+    device["api_token_sha256"] = hashlib.sha256(token.encode()).hexdigest()
+    device["updated_ts"] = time.time() if now is None else now
+    found[install_id] = device
+    _save_devices(found)
+    return token
+
+
+def verify_api_token(token: str | None) -> bool:
+    if not token:
+        return False
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    return any(hmac.compare_digest(digest, d.get("api_token_sha256") or "") for d in devices().values())
 
 
 def remove_device(install_id: str) -> bool:
@@ -229,11 +260,20 @@ def public_status() -> dict[str, Any]:
 
 # ---- sending ----------------------------------------------------------
 
-def alert_payload(title: str, message: str, *, priority: str, rule: str) -> dict:
-    urgent = priority in ("high", "urgent")
-    return {"aps": {"alert": {"title": title, "body": message}, "sound": "default",
-                    "interruption-level": "time-sensitive" if urgent else "active",
-                    "thread-id": rule}}
+def alert_payload(title: str, message: str, *, priority: str, rule: str, page: str | None = None) -> dict:
+    """`page` is the dashboard page the app opens when the notification is
+    tapped. A low-priority notification is delivered silently: it waits in
+    Notification Centre without lighting the screen or making a sound."""
+    aps: dict[str, Any] = {"alert": {"title": title, "body": message}, "thread-id": rule}
+    if priority == "low":
+        aps["interruption-level"] = "passive"
+    else:
+        aps["sound"] = "default"
+        aps["interruption-level"] = "time-sensitive" if priority in ("high", "urgent") else "active"
+    payload: dict[str, Any] = {"aps": aps}
+    if page:
+        payload["page"] = page
+    return payload
 
 
 def live_payload(event: str, content: dict, now: float, *, device_name: str | None = None,
@@ -278,14 +318,15 @@ async def _post(client: httpx.AsyncClient, config: dict, environment: str, token
 
 
 async def _send_to_all(field: str, payload: dict, *, push_type: str, priority: int,
-                       collapse_id: str | None = None,
+                       collapse_id: str | None = None, only=None,
                        client: httpx.AsyncClient | None = None) -> str | None:
     """Push to every phone that has a token of this kind. Returns None if
     at least one phone accepted it, otherwise why nothing was delivered."""
     config = _config()
     if not config:
         return "Push is not set up yet: the Apple push key is missing."
-    targets = [(install_id, d) for install_id, d in devices().items() if d.get(field)]
+    targets = [(install_id, d) for install_id, d in devices().items()
+               if d.get(field) and (only is None or only(d))]
     if not targets:
         return "No phone is registered. Open the Jackery app and allow notifications."
     owned = client is None
@@ -310,10 +351,10 @@ async def _send_to_all(field: str, payload: dict, *, push_type: str, priority: i
 
 
 async def send_alert(title: str, message: str, *, priority: str = "default", rule: str = "alert",
-                     client: httpx.AsyncClient | None = None) -> str | None:
+                     page: str | None = None, client: httpx.AsyncClient | None = None) -> str | None:
     return await _send_to_all(
-        "push_token", alert_payload(title, message, priority=priority, rule=rule),
-        push_type="alert", priority=10, collapse_id=rule, client=client)
+        "push_token", alert_payload(title, message, priority=priority, rule=rule, page=page),
+        push_type="alert", priority=5 if priority == "low" else 10, collapse_id=rule, client=client)
 
 
 async def reload_widgets(*, client: httpx.AsyncClient | None = None) -> str | None:
@@ -324,12 +365,18 @@ async def reload_widgets(*, client: httpx.AsyncClient | None = None) -> str | No
 
 
 async def live_start(content: dict, *, device_name: str | None, alert: tuple[str, str],
-                     now: float | None = None, client: httpx.AsyncClient | None = None) -> str | None:
+                     now: float | None = None, only_missing: bool = False,
+                     client: httpx.AsyncClient | None = None) -> str | None:
+    """Start the card on every phone. `only_missing` restarts it just on
+    phones that have lost theirs (an app update removes it), leaving a
+    card that is still showing alone."""
     now = time.time() if now is None else now
-    clear_activity_tokens()
+    if not only_missing:
+        clear_activity_tokens()
     return await _send_to_all(
         "start_token", live_payload("start", content, now, device_name=device_name, alert=alert),
-        push_type="liveactivity", priority=10, client=client)
+        push_type="liveactivity", priority=10, client=client,
+        only=(lambda d: not d.get("activity_token")) if only_missing else None)
 
 
 async def live_update(content: dict, *, now: float | None = None,
