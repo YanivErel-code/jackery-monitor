@@ -197,13 +197,20 @@ def test_live_step_starts_updates_on_change_refreshes_and_ends():
     assert alerts.live_step(memory, None, 0) is None
     assert alerts.live_step(memory, first, 0) == "start"
     assert alerts.live_step(memory, first, 60) is None
-    # power alone is not worth a push...
-    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 120) is None
+    # a wobble in the power readings is not worth a push...
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=1160)), 120) is None
     # ...but it rides along on the periodic refresh
-    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 600) == "update"
-    assert memory["content"]["gridW"] == 900
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=1160)), 600) == "update"
+    assert memory["content"]["gridW"] == 1160
+    # a real change in the flow redraws the card, but not more than every two minutes
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 660) is None
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 720) == "update"
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=0)), 840) == "update"       # stopped
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=0)), 960) is None
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=20)), 965) == "update"      # started
+    assert alerts.live_step(memory, alerts.live_content(_summary()), 1090) == "update"
     # a new level or status goes out at once
-    assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2)), 660) == "update"
-    assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2, state="charging_peak")), 720) == "update"
-    assert alerts.live_step(memory, None, 780) == "end" and memory == {}
-    assert alerts.live_step(memory, None, 840) is None
+    assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2)), 1100) == "update"
+    assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2, state="charging_peak")), 1105) == "update"
+    assert alerts.live_step(memory, None, 1110) == "end" and memory == {}
+    assert alerts.live_step(memory, None, 1170) is None

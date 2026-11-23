@@ -20,7 +20,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
   and thresholds, and a test button.
 - A Live Activity on the phone's lock screen while the battery charges
   from the grid or charging is on hold, started, updated and ended by the
-  monitor.
+  monitor. It is redrawn when the level, status or end time changes, or
+  when solar, grid or home power starts, stops or moves by 50 W and a tenth
+  (power changes at most every two minutes, to spare the phone's battery).
 - `/api/app/summary`: compact battery, live power and headline for the iOS
   app's widgets.
 - `/app/handoff` for the iOS app: signs in through Cloudflare Access in

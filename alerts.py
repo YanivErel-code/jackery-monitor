@@ -270,6 +270,8 @@ def record(state: dict[str, Any], alert: Alert, now: float, error: str | None) -
 # Headline states that are worth a place on the lock screen while they last.
 LIVE_STATES = {"charging", "charging_peak", "hold"}
 LIVE_REFRESH_S = 10 * 60
+LIVE_POWER_STEP_W = 50.0
+LIVE_POWER_MIN_GAP_S = 120
 LIVE_STATUS = {
     "charging": "Charging", "charging_peak": "Charging at peak rate", "hold": "Charging on hold",
     "not_charging": "Not charging", "scheduled": "Charge scheduled", "solar_enough": "Solar is enough",
@@ -301,11 +303,21 @@ def live_content(summary: dict[str, Any], *, final: bool = False) -> dict[str, A
     }
 
 
+def _power_moved(before: Any, after: Any) -> bool:
+    """A reading changed enough to redraw: it started or stopped, or moved
+    by 50 W and a tenth of its value. Smaller wobbles are noise."""
+    before, after = _num(before) or 0.0, _num(after) or 0.0
+    if (before > 0) != (after > 0):
+        return True
+    return abs(after - before) >= max(LIVE_POWER_STEP_W, 0.1 * before)
+
+
 def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float) -> str | None:
     """Update `memory` in place and say what to do: "start", "update",
-    "end" or nothing. Power readings change every second, so they only
-    ride along on a periodic refresh; a change of level, status or end
-    time is pushed straight away."""
+    "end" or nothing. The card draws the power flowing between solar,
+    grid, battery and home, so a real change in any of them is pushed (at
+    most every two minutes), as is a change of level, status or end time
+    (at once); readings that only wobble wait for the periodic refresh."""
     if content is None:
         if memory:
             memory.clear()
@@ -315,8 +327,12 @@ def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float
     if previous is None:
         memory.update(content=content, pushed_ts=now, started_ts=now)
         return "start"
+    since = now - memory.get("pushed_ts", 0)
     changed = any(previous.get(k) != content.get(k) for k in ("socPct", "state", "title", "untilTs"))
-    if changed or now - memory.get("pushed_ts", 0) >= LIVE_REFRESH_S:
+    # Every push wakes the phone, so power changes are spaced out to spare its battery.
+    flow = (since >= LIVE_POWER_MIN_GAP_S
+            and any(_power_moved(previous.get(k), content.get(k)) for k in ("gridW", "solarW", "outputW")))
+    if changed or flow or since >= LIVE_REFRESH_S:
         memory.update(content=content, pushed_ts=now)
         return "update"
     return None
