@@ -23,6 +23,9 @@ limitations still apply; a major version is not a hardware safety guarantee.
   monitor. It is redrawn when the level, status or end time changes, or
   when solar, grid or home power starts, stops or moves by 50 W and a tenth
   (power changes at most every two minutes, to spare the phone's battery).
+- The iOS app's widgets are asked to refresh by push when the charging
+  status changes, and for a change of battery level at most every 15
+  minutes.
 - `/api/app/summary`: compact battery, live power and headline for the iOS
   app's widgets.
 - `/app/handoff` for the iOS app: signs in through Cloudflare Access in

@@ -9,6 +9,7 @@ lock-screen Live Activity should show. Delivery is apns.py's job.
   clears. Pure; the caller persists the memory.
 * `live_content()` and `live_step()` do the same for the Live Activity:
   what it shows, and whether to start, update or end it.
+* `widget_step()` decides when the phone's widgets are worth refreshing.
 
 Config lives in /data/alerts.json; the memory and the recent-alert log in
 /data/alerts-state.json so a restart does not repeat alerts already sent.
@@ -129,13 +130,13 @@ def set_config(patch: dict[str, Any]) -> dict[str, Any]:
 def load_state() -> dict[str, Any]:
     state = _read(_state_file())
     return {"memory": state.get("memory") or {}, "recent": state.get("recent") or [],
-            "live": state.get("live") or {}}
+            "live": state.get("live") or {}, "widgets": state.get("widgets") or {}}
 
 
 def save_state(state: dict[str, Any]) -> None:
     try:
         _write(_state_file(), {"memory": state["memory"], "recent": state["recent"][:RECENT_LIMIT],
-                              "live": state.get("live") or {}})
+                              "live": state.get("live") or {}, "widgets": state.get("widgets") or {}})
     except OSError as error:
         log.warning("could not save alert state: %s", error)
 
@@ -336,3 +337,27 @@ def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float
         memory.update(content=content, pushed_ts=now)
         return "update"
     return None
+
+
+# ---- Widgets ----------------------------------------------------------
+
+WIDGET_LEVEL_GAP_S = 15 * 60
+
+
+def widget_step(memory: dict[str, Any], summary: dict[str, Any], now: float) -> bool:
+    """Whether to ask the phone's widgets to refresh, updating `memory`.
+    A change of status goes out at once; a change of battery level waits
+    until 15 minutes after the last push, because iOS gives widget pushes
+    a small daily budget and the widgets refresh on a timer anyway."""
+    headline = summary.get("headline") or {}
+    shown = {"state": headline.get("state"), "soc": _whole((summary.get("battery") or {}).get("soc_pct"))}
+    previous = memory.get("shown")
+    if previous is None:
+        memory.update(shown=shown, pushed_ts=now)
+        return False                    # nothing to compare with yet
+    if previous == shown:
+        return False
+    if previous["state"] == shown["state"] and now - memory.get("pushed_ts", 0) < WIDGET_LEVEL_GAP_S:
+        return False
+    memory.update(shown=shown, pushed_ts=now)
+    return True

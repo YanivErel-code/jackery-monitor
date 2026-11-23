@@ -5144,7 +5144,7 @@ async def _alerts_tick(now: float | None = None) -> list[alerts.Alert]:
     now = time.time() if now is None else now
     memory = _alerts_memory()
     config = alerts.get_config()
-    before = json.dumps([memory["memory"], memory["live"]], sort_keys=True)
+    before = json.dumps([memory["memory"], memory["live"], memory["widgets"]], sort_keys=True)
     summary = api_app_summary()
     to_send: list[alerts.Alert] = []
     if config["enabled"]:
@@ -5159,7 +5159,12 @@ async def _alerts_tick(now: float | None = None) -> list[alerts.Alert]:
     else:
         memory["memory"].clear()
     await _live_activity_tick(memory, config, summary, now)
-    if to_send or json.dumps([memory["memory"], memory["live"]], sort_keys=True) != before:
+    # Widgets show the status whether or not notifications are on.
+    if apns.is_configured() and summary.get("headline") and alerts.widget_step(memory["widgets"], summary, now):
+        error = await apns.reload_widgets()
+        if error:
+            log.debug("widget refresh not delivered: %s", error)
+    if to_send or json.dumps([memory["memory"], memory["live"], memory["widgets"]], sort_keys=True) != before:
         alerts.save_state(memory)
     return to_send
 

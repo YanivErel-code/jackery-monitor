@@ -103,7 +103,7 @@ def test_register_merges_tokens_and_rejects_junk(apns):
             apns.register_device(bad_id, patch)
     status = apns.public_status()["devices"]
     assert status == [{"install_id": "install-0001", "name": "Phone", "environment": "development",
-                       "updated_ts": status[0]["updated_ts"], "alerts": False, "live_activity": True}]
+                       "updated_ts": status[0]["updated_ts"], "alerts": False, "live_activity": True, "widgets": False}]
     assert TOKEN_B not in json.dumps(status)
     assert apns.remove_device("install-0001") and not apns.remove_device("install-0001")
 
@@ -204,3 +204,18 @@ async def test_live_activity_start_update_and_end(ready):
     ended = json.loads(end.content)["aps"]
     assert ended["event"] == "end" and ended["dismissal-date"] == 1180 + 15 * 60 and "stale-date" not in ended
     assert ready.devices()["install-0001"]["activity_token"] is None
+
+
+async def test_widget_reload_push_is_what_apple_expects(ready):
+    assert "No phone is registered" in await ready.reload_widgets()
+    ready.register_device("install-0001", {"widget_token": "f6" * 32})
+    assert ready.public_status()["devices"][0]["widgets"] is True
+    seen, client = _capture()
+    async with client:
+        assert await ready.reload_widgets(client=client) is None
+    request = seen[0]
+    assert str(request.url).endswith("f6" * 32)
+    assert request.headers["apns-push-type"] == "widgets"
+    assert request.headers["apns-topic"] == "com.example.jackery.push-type.widgets"
+    assert json.loads(request.content) == {"aps": {"content-changed": True}}
+

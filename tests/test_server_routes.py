@@ -698,3 +698,23 @@ def test_alert_facts_come_from_the_live_status(client, app):
     facts = app._alert_facts(app.api_app_summary())
     assert set(facts) == {"soc_pct", "headline", "connection", "laundry", "watchdog", "backup_last_run"}
     assert facts["laundry"] == {"blocked": False}
+
+
+async def test_widgets_are_refreshed_when_the_status_changes(client, app, monkeypatch):
+    reloads = []
+
+    async def reload_widgets(**kwargs):
+        reloads.append(1)
+
+    monkeypatch.setattr(app.apns, "reload_widgets", reload_widgets)
+    monkeypatch.setattr(app.apns, "is_configured", lambda: True)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    now_state = {"state": "scheduled"}
+    monkeypatch.setattr(app, "api_app_summary", lambda: _quiet_summary(now_state["state"], 50))
+    await app._alerts_tick(now=0)
+    await app._alerts_tick(now=60)
+    assert reloads == []                                    # notifications are off; nothing changed
+    now_state["state"] = "solar_enough"
+    await app._alerts_tick(now=120)
+    assert reloads == [1]                                   # sent even with notifications off
+

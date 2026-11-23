@@ -209,7 +209,7 @@
         const j = await run('al-phone-msg', 'Removing…', () => send('DELETE', '/api/app/devices/' + encodeURIComponent(d.install_id)), 'Removed. The phone registers again the next time the app opens.');
         if (j) renderPush(j.push);
       });
-      const can = [d.alerts ? 'notifications' : null, d.live_activity ? 'lock-screen status' : null].filter(Boolean).join(' and ') || 'notifications not allowed yet';
+      const can = [d.alerts ? 'notifications' : null, d.live_activity ? 'lock-screen status' : null, d.widgets ? 'widget updates' : null].filter(Boolean).join(', ') || 'notifications not allowed yet';
       return el('div', { class: 'item' },
         el('div', {}, el('b', { text: d.name || 'iPhone' }), el('div', { class: 'muted small', text: can + ' · last seen ' + when(d.updated_ts) + (d.environment === 'development' ? ' · test build' : '') })),
         el('div', { class: 'item-side' }, remove));

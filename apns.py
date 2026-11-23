@@ -7,9 +7,10 @@ Three parts:
   bundle ID.
 * The phones that have the app installed, in /data/app-devices.json.
   Each registers itself and its push tokens after sign-in.
-* Senders: `send_alert()` for ordinary notifications, and
+* Senders: `send_alert()` for ordinary notifications,
   `live_start()` / `live_update()` / `live_end()` for the charging
-  Live Activity on the lock screen.
+  Live Activity on the lock screen, and `reload_widgets()` to make the
+  widgets refresh.
 
 Apple only accepts HTTP/2, and tells us when a token is dead (410, or 400
 BadDeviceToken); dead tokens are dropped so they are not retried forever.
@@ -43,7 +44,7 @@ LIVE_STALE_AFTER_S = 30 * 60
 TOKEN_RE = re.compile(r"^[0-9a-fA-F]{32,400}$")
 ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 DEAD_TOKEN_REASONS = {"BadDeviceToken", "Unregistered", "ExpiredToken", "DeviceTokenNotForTopic"}
-TOKEN_FIELDS = ("push_token", "start_token", "activity_token")
+TOKEN_FIELDS = ("push_token", "start_token", "activity_token", "widget_token")
 
 _provider_token: tuple[str, float, str] | None = None     # (jwt, issued_at, key_id)
 
@@ -221,7 +222,7 @@ def public_status() -> dict[str, Any]:
         "team_id": config.get("team_id"), "key_id": config.get("key_id"), "bundle_id": config.get("bundle_id"),
         "devices": [{"install_id": install_id, "name": d.get("name"), "environment": d.get("environment"),
                      "updated_ts": d.get("updated_ts"), "alerts": bool(d.get("push_token")),
-                     "live_activity": bool(d.get("start_token"))}
+                     "live_activity": bool(d.get("start_token")), "widgets": bool(d.get("widget_token"))}
                     for install_id, d in sorted(devices().items(), key=lambda kv: -(kv[1].get("updated_ts") or 0))],
     }
 
@@ -257,7 +258,8 @@ async def _post(client: httpx.AsyncClient, config: dict, environment: str, token
                 now: float | None = None) -> tuple[bool, str | None]:
     """One push. Returns (delivered, reason). The reason is Apple's own
     word, such as BadDeviceToken, or a short description of a network failure."""
-    topic = config["bundle_id"] + (".push-type.liveactivity" if push_type == "liveactivity" else "")
+    # Live Activity and widget pushes each have a topic of their own.
+    topic = config["bundle_id"] + (f".push-type.{push_type}" if push_type in ("liveactivity", "widgets") else "")
     headers = {"authorization": f"bearer {provider_token(config, now)}", "apns-topic": topic,
                "apns-push-type": push_type, "apns-priority": str(priority)}
     if collapse_id:
@@ -312,6 +314,13 @@ async def send_alert(title: str, message: str, *, priority: str = "default", rul
     return await _send_to_all(
         "push_token", alert_payload(title, message, priority=priority, rule=rule),
         push_type="alert", priority=10, collapse_id=rule, client=client)
+
+
+async def reload_widgets(*, client: httpx.AsyncClient | None = None) -> str | None:
+    """Ask the phone to refresh its home-screen and lock-screen widgets
+    now. iOS budgets these and may delay or skip one."""
+    return await _send_to_all("widget_token", {"aps": {"content-changed": True}},
+                              push_type="widgets", priority=5, client=client)
 
 
 async def live_start(content: dict, *, device_name: str | None, alert: tuple[str, str],
