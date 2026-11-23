@@ -1,5 +1,5 @@
-/* Jackery Monitor — V2 Settings page: general, rates, AI, laundry, backup,
- * device and logs. Same endpoints as the classic Settings, Device and Logs
+/* Jackery Monitor — V2 Settings page: general, rates, AI, laundry, alerts,
+ * backup, device and logs. Same endpoints as the classic Settings, Device and Logs
  * tabs. Changing the backup destination and restoring stay on the classic
  * backup screen. */
 (function () {
@@ -194,6 +194,60 @@
     if (j) { $('lg-token').value = ''; renderLg(j); }
   });
 
+  // ---------- alerts ----------
+  const ALERT_OPTIONS = { threshold_pct: ['at or below', '%', 5, 95], after_min: ['after', 'minutes', 1, 1440] };
+  let alertRules = [];
+  async function loadAlerts() {
+    const j = await getJson('/api/alerts');
+    alertRules = j.rules || [];
+    $('al-enabled').checked = !!j.config.enabled;
+    $('al-topic').value = j.config.ntfy_topic || '';
+    $('al-rules').replaceChildren(...alertRules.map((r) => {
+      const cfg = j.config.rules[r.name] || {};
+      const box = el('input', { id: 'al-on-' + r.name, type: 'checkbox' });
+      box.checked = !!cfg.enabled;
+      const control = el('div', { class: 'f-control' });
+      const key = Object.keys(ALERT_OPTIONS).find((k) => k in cfg);
+      if (key) {
+        const [before, unit, min, max] = ALERT_OPTIONS[key];
+        const input = el('input', { id: 'al-opt-' + r.name, type: 'number', min, max, step: '1', inputmode: 'numeric', 'aria-label': r.label + ': ' + before + ' how many ' + unit });
+        input.value = cfg[key];
+        input.dataset.key = key;
+        control.append(el('span', { class: 'f-unit', text: before }), input, el('span', { class: 'f-unit', text: unit }));
+      }
+      control.append(box);
+      return el('div', { class: 'f-row check' + (key ? ' opt' : '') }, el('label', { class: 'f-label', for: 'al-on-' + r.name }, el('b', { text: r.label })), control);
+    }));
+    const recent = (j.recent || []).slice(0, 15);
+    $('al-table').tBodies[0].replaceChildren(...(recent.length ? recent.map((a) => el('tr', {},
+      el('td', { class: 'left', text: when(a.ts) }),
+      el('td', { class: 'left' }, el('b', { text: a.title }), el('div', { class: 'muted small', text: a.message })),
+      el('td', { class: 'left', text: a.delivered ? 'Yes' : 'No: ' + (a.error || 'unknown') })))
+      : [el('tr', {}, el('td', { colspan: '3', class: 'zero', text: 'No alerts have been sent yet.' }))]));
+  }
+  $('al-save').addEventListener('click', async () => {
+    const rules = {};
+    for (const r of alertRules) {
+      rules[r.name] = { enabled: $('al-on-' + r.name).checked };
+      const opt = $('al-opt-' + r.name);
+      if (!opt) continue;
+      const n = Number(opt.value);
+      if (opt.value.trim() === '' || !Number.isInteger(n) || n < Number(opt.min) || n > Number(opt.max)) { say('al-msg', r.label + ': enter a whole number from ' + opt.min + ' to ' + opt.max + '.', 'bad'); return; }
+      rules[r.name][opt.dataset.key] = n;
+    }
+    await run('al-msg', 'Saving…', () => send('POST', '/api/alerts/config', { enabled: $('al-enabled').checked, ntfy_topic: $('al-topic').value.trim(), rules }),
+      () => ($('al-enabled').checked ? 'Saved. Alerts are on.' : 'Saved. Alerts are off.'));
+  });
+  $('al-test').addEventListener('click', async () => {
+    const topic = $('al-topic').value.trim();
+    if (!topic) { say('al-msg', 'Enter an ntfy topic first.', 'bad'); return; }
+    say('al-msg', 'Sending…');
+    try {
+      const j = await send('POST', '/api/alerts/test', { ntfy_topic: topic });
+      say('al-msg', j.ok ? 'Sent. It should reach your phone within a few seconds.' : 'Not sent: ' + (j.error || 'unknown'), j.ok ? 'ok' : 'bad');
+    } catch (e) { say('al-msg', 'Not sent: ' + e.message, 'bad'); }
+  });
+
   // ---------- backup ----------
   const size = (b) => (num(b) == null ? '—' : b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(0) + ' MB');
   async function loadBackup() {
@@ -285,7 +339,7 @@
   $('log-problems').addEventListener('change', () => loadLogs().catch(() => {}));
 
   // ---------- sections ----------
-  const LOADERS = { general: loadGeneral, rates: loadRates, ai: loadAi, laundry: loadLg, backup: loadBackup, device: loadDevice, logs: loadLogs };
+  const LOADERS = { general: loadGeneral, rates: loadRates, ai: loadAi, laundry: loadLg, alerts: loadAlerts, backup: loadBackup, device: loadDevice, logs: loadLogs };
   function show(force) {
     if (force || lastDevice !== deviceSn()) { loaded.delete('device'); lastDevice = deviceSn(); }
     $('settings-sub').textContent = window.V2.status()?.device?.name || '';
