@@ -287,7 +287,18 @@
     else if (v === 'charging') checks.push(['ok', 'Charging confirmed', 'The battery is taking power while the plug is on.']);
     else checks.push(['ok', 'Charge check is ready', 'Each charge is confirmed by watching the battery take power.']);
     const reserve = num(o.battery.reserve_pct), low = num(p.min_soc_pct);
-    if (p.feasible === false) checks.push(['alert', 'Reserve at risk', p.warnings[0] || 'The plan cannot keep the reserve.']);
+    // Same test as the headline: the reserve is only at risk when the
+    // projected low falls below it. A plan that merely misses the sunrise
+    // target is a lesser warning, not a reserve problem.
+    const belowReserve = low != null && reserve != null && low < reserve;
+    const sunrise = num(p.sunrise_soc_pct), target = num(o.battery.target_pct);
+    if (p.feasible === false && belowReserve) checks.push(['alert', 'Reserve at risk',
+      'The battery is projected to fall to ' + pct(low) + ', below the ' + pct(reserve) + ' reserve.']);
+    else if (p.feasible === false) checks.push(['warn', 'Sunrise target will be missed',
+      (sunrise != null && target != null
+        ? 'The plan reaches ' + sunrise.toFixed(1) + '% by sunrise, short of the ' + pct(target) + ' target.'
+        : 'The plan cannot reach the sunrise target.')
+      + (low != null && reserve != null ? ' The projected low of ' + pct(low) + ' stays above the ' + pct(reserve) + ' reserve.' : '')]);
     else if (low != null && reserve != null) checks.push(['ok', 'Reserve is safe',
       'The projected low of ' + pct(low) + ' stays above the ' + pct(reserve) + ' reserve.']);
     $('protections').replaceChildren(...checks.map(([tone, title, text]) => el('div', { class: 'check ' + tone },

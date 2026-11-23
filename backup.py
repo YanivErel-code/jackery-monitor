@@ -94,6 +94,11 @@ SMALL_FILES = (
     "location.json",
     "anthropic-prefs.json",
     "cost-plan.json",
+    # Notification settings, and the Apple push key (encrypted, like the
+    # other credentials here). The phone list is left out: phones register
+    # themselves again the next time the app opens.
+    "alerts.json",
+    "apns.json",
 )
 
 # The at-rest encryption key. NOT backed up by default — see module docstring.
