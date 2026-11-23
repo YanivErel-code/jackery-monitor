@@ -181,6 +181,11 @@ def test_live_content_only_exists_while_something_is_going_on():
     assert alerts.live_content({"battery": {}, "power": {}, "headline": None}) is None
 
 
+@pytest.mark.parametrize("soc, shown", [(26.5, 27), (27.5, 28), (26.49, 26), (0.5, 1), (None, 0)])
+def test_live_content_rounds_halves_up_like_the_dashboard(soc, shown):
+    assert alerts.live_content(_summary(soc=soc))["socPct"] == shown
+
+
 def test_live_content_for_an_ending_activity_says_so():
     final = alerts.live_content(_summary(state="scheduled", title="Not charging. Next charge starts at 12 AM."), final=True)
     assert final["status"] == "Charging finished" and final["untilTs"] is None and final["socPct"] == 42

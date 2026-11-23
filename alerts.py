@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -144,6 +145,13 @@ def _num(value: Any) -> float | None:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _whole(value: Any) -> int:
+    """Round the way the dashboard and the phone do: halves go up.
+    Python's round() sends 26.5 to 26, which left the lock screen a
+    point behind the app."""
+    return math.floor((_num(value) or 0) + 0.5)
 
 
 def _hours(minutes: float) -> str:
@@ -281,14 +289,14 @@ def live_content(summary: dict[str, Any], *, final: bool = False) -> dict[str, A
         return None
     power, battery = summary.get("power") or {}, summary.get("battery") or {}
     return {
-        "socPct": round(_num(battery.get("soc_pct")) or 0),
+        "socPct": _whole(battery.get("soc_pct")),
         "state": state or "",
         "status": LIVE_STATUS.get(state, "Charging finished") if state in LIVE_STATES else "Charging finished",
         "title": headline.get("title") or "",
         "tone": headline.get("tone") or "ok",
-        "gridW": round(_num(power.get("grid_w")) or 0),
-        "solarW": round(_num(power.get("solar_w")) or 0),
-        "outputW": round(_num(power.get("output_w")) or 0),
+        "gridW": _whole(power.get("grid_w")),
+        "solarW": _whole(power.get("solar_w")),
+        "outputW": _whole(power.get("output_w")),
         "untilTs": _num(summary.get("until_ts")) if state in LIVE_STATES else None,
     }
 
