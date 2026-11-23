@@ -718,3 +718,89 @@ async def test_widgets_are_refreshed_when_the_status_changes(client, app, monkey
     await app._alerts_tick(now=120)
     assert reloads == [1]                                   # sent even with notifications off
 
+
+# ---------------------------------------------------------------------
+# The iOS app's own token: opens /api/app/* and nothing else.
+# ---------------------------------------------------------------------
+
+def test_app_token_opens_only_the_app_api(client, app):
+    token = client.post("/api/app/token", json={"install_id": "install-0001"}).json()["token"]
+    bearer = {"Authorization": f"Bearer {token}"}
+    with TestClient(app.app, follow_redirects=False) as fresh:               # no session cookie
+        assert fresh.get("/api/app/summary").status_code == 401
+        assert fresh.get("/api/app/summary", headers=bearer).status_code == 200
+        assert fresh.post("/api/app/devices", headers=bearer,
+                          json={"install_id": "install-0001", "push_token": _PUSH_TOKEN}).status_code == 200
+        # nothing outside /api/app/
+        for path in ("/api/status", "/api/alerts", "/api/settings", "/"):
+            assert fresh.get(path, headers=bearer).status_code in (401, 303), path
+        assert fresh.post("/api/alerts/config", headers=bearer, json={"enabled": True}).status_code == 401
+        # the token cannot mint another, and a wrong one opens nothing
+        assert fresh.post("/api/app/token", headers=bearer, json={"install_id": "install-0001"}).status_code == 403
+        assert fresh.get("/api/app/summary", headers={"Authorization": "Bearer nope"}).status_code == 401
+        assert fresh.get("/api/app/summary", headers={"Authorization": f"Basic {token}"}).status_code == 401
+    # removing the phone revokes it
+    client.delete("/api/app/devices/install-0001")
+    with TestClient(app.app, follow_redirects=False) as fresh:
+        assert fresh.get("/api/app/summary", headers=bearer).status_code == 401
+
+
+async def test_a_phone_that_lost_its_card_gets_it_back_unless_it_was_swiped_away(client, app, monkeypatch):
+    starts = []
+
+    async def live_start(content, **kwargs):
+        starts.append(bool(kwargs.get("only_missing")))
+
+    async def live_update(content, **kwargs):
+        return None
+
+    monkeypatch.setattr(app.apns, "live_start", live_start)
+    monkeypatch.setattr(app.apns, "live_update", live_update)
+    monkeypatch.setattr(app.apns, "is_configured", lambda: True)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    monkeypatch.setattr(app, "api_app_summary", lambda: _quiet_summary("charging", 50))
+    app.alerts.set_config({"enabled": True})
+    await app._alerts_tick(now=1000)
+    assert starts == [False]
+
+    # the app starts up after an update and finds no card
+    client.post("/api/app/devices", json={"install_id": "install-0001", "activity_token": "", "activity_gone": "launch"})
+    await app._alerts_tick(now=1060)
+    assert starts == [False, True]
+    await app._alerts_tick(now=1120)
+    assert starts == [False, True]                                      # asked once, restarted once
+
+    # the owner swipes it away: a later launch does not bring it back this session
+    client.post("/api/app/devices", json={"install_id": "install-0001", "activity_token": "", "activity_gone": "dismissed"})
+    client.post("/api/app/devices", json={"install_id": "install-0001", "activity_token": "", "activity_gone": "launch"})
+    await app._alerts_tick(now=1180)
+    assert starts == [False, True]
+
+
+async def test_morning_summary_is_sent_once_with_its_parts(client, app, monkeypatch):
+    sent = []
+
+    async def fake_send(title, message, **kwargs):
+        sent.append((title, message, kwargs.get("page")))
+
+    async def fake_forecast(sn):
+        return {"forecast": [{"ts": 100 * 86400 + 12 * 3600, "duration_h": 1, "solar_w": 2500},
+                             {"ts": 101 * 86400 + 12 * 3600, "duration_h": 1, "solar_w": 9000}]}
+
+    monkeypatch.setattr(app.apns, "send_alert", fake_send)
+    monkeypatch.setattr(app, "_build_and_record_forecast", fake_forecast)
+    monkeypatch.setattr(app.device_location, "get_tz_offset", lambda: 0)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    monkeypatch.setattr(app, "api_app_summary", lambda: {**_quiet_summary("scheduled", 61), "device_sn": "MOCK"})
+    app.alerts.set_config({"enabled": True, "daily_summary": {"enabled": True, "hour": 7},
+                           "rules": {"low_battery": {"enabled": False}}})
+    await app._alerts_tick(now=100 * 86400 + 6 * 3600)
+    assert sent == []
+    await app._alerts_tick(now=100 * 86400 + 7 * 3600 + 5)
+    await app._alerts_tick(now=100 * 86400 + 7 * 3600 + 65)
+    assert len(sent) == 1
+    title, message, page = sent[0]
+    assert title == "Jackery this morning" and page == "live"
+    assert message.startswith("Battery at 61%. Solar expected today: 2.5 kWh.")
+    assert client.get("/api/alerts").json()["recent"][0]["rule"] == "daily_summary"
+

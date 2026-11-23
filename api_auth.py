@@ -19,8 +19,12 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
+import apns
 import auth
 import cf_access
+
+# The only paths the iOS app's own token opens.
+APP_API_PREFIX = "/api/app/"
 
 # URL scheme the iOS app listens on while its sign-in sheet is open.
 APP_CALLBACK = "jackery://auth"
@@ -88,7 +92,16 @@ def install(app: FastAPI, web_dir: Path,
 
         # 1. Valid app-session cookie → fast path (local HMAC check).
         if auth.verify_session(request.cookies.get(auth.COOKIE_NAME)):
+            request.state.auth = "session"
             return await call_next(request)
+
+        # 1b. The iOS app's own token, good for /api/app/* and nothing else.
+        #     It outlives the browser sign-in, so widgets keep working.
+        if path.startswith(APP_API_PREFIX):
+            scheme, _, token = request.headers.get("authorization", "").partition(" ")
+            if scheme.lower() == "bearer" and apns.verify_api_token(token.strip()):
+                request.state.auth = "app_token"
+                return await call_next(request)
 
         # 2. Valid Cloudflare Access assertion → authenticated at the
         #    edge (e.g. Google/Gmail SSO), no app password needed. Mint a
@@ -101,6 +114,7 @@ def install(app: FastAPI, web_dir: Path,
             cf_email = await cf_access.verify(
                 request.headers.get(cf_access.HEADER_NAME))
             if cf_email:
+                request.state.auth = "access"
                 response = await call_next(request)
                 _set_session_cookie(response, cf_email)
                 return response

@@ -224,6 +224,12 @@
     alertRules = j.rules || [];
     $('al-enabled').checked = !!j.config.enabled;
     $('al-live').checked = !!j.config.live_activity;
+    const daily = j.config.daily_summary || { enabled: false, hour: 7 };
+    if (!$('al-daily-hour').options.length) {
+      for (let h = 0; h < 24; h++) $('al-daily-hour').append(el('option', { value: h, text: (h % 12 || 12) + (h < 12 ? ' AM' : ' PM') }));
+    }
+    $('al-daily-hour').value = String(daily.hour);
+    $('al-daily').checked = !!daily.enabled;
     renderPush(j.push || {});
     $('al-rules').replaceChildren(...alertRules.map((r) => {
       const cfg = j.config.rules[r.name] || {};
@@ -258,7 +264,7 @@
       if (opt.value.trim() === '' || !Number.isInteger(n) || n < Number(opt.min) || n > Number(opt.max)) { say('al-msg', r.label + ': enter a whole number from ' + opt.min + ' to ' + opt.max + '.', 'bad'); return; }
       rules[r.name][opt.dataset.key] = n;
     }
-    await run('al-msg', 'Saving…', () => send('POST', '/api/alerts/config', { enabled: $('al-enabled').checked, live_activity: $('al-live').checked, rules }),
+    await run('al-msg', 'Saving…', () => send('POST', '/api/alerts/config', { enabled: $('al-enabled').checked, live_activity: $('al-live').checked, daily_summary: { enabled: $('al-daily').checked, hour: Number($('al-daily-hour').value) }, rules }),
       () => ($('al-enabled').checked ? 'Saved. Notifications are on.' : 'Saved. Notifications are off.'));
   });
   $('al-test').addEventListener('click', async () => {

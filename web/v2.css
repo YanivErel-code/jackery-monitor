@@ -138,6 +138,7 @@ input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--btn); }
   .f-control select { flex: 1; min-width: 0; }
   .f-row.check.opt { flex-wrap: wrap; } .f-row.check.opt .f-label, .f-row.check.opt .f-control { flex: 1 1 100%; }
   .f-row.check.opt .f-unit { min-width: 0; } .f-row.check.opt input[type=checkbox] { margin-left: auto; }
+  .f-row.check.opt .f-control select { flex: none; }
 }
 .stack-lg { display: flex; flex-direction: column; gap: 20px; }
 .seg.wrap { flex-wrap: wrap; align-self: flex-start; }

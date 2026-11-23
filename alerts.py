@@ -58,13 +58,15 @@ class Alert:
     rule: str
     title: str
     message: str
-    priority: str = "default"     # default | high | urgent
+    priority: str = "default"     # low (silent) | default | high | urgent
+    page: str = "live"            # dashboard page a tap on the notification opens
     delay_s: float = 0.0          # how long the condition must hold first
     key: str = ""                 # a new key on a live condition alerts again
 
 
 def default_config() -> dict[str, Any]:
     return {"enabled": False, "live_activity": True,
+            "daily_summary": {"enabled": False, "hour": 7},
             "rules": {name: dict(defaults) for name, (_, defaults) in RULES.items()}}
 
 
@@ -93,6 +95,9 @@ def get_config() -> dict[str, Any]:
     for key in ("enabled", "live_activity"):
         if key in stored:
             config[key] = bool(stored[key])
+    daily = stored.get("daily_summary")
+    if isinstance(daily, dict):
+        config["daily_summary"].update({k: v for k, v in daily.items() if k in config["daily_summary"]})
     for name, rule in (stored.get("rules") or {}).items():
         if name in config["rules"] and isinstance(rule, dict):
             config["rules"][name].update(
@@ -108,6 +113,18 @@ def set_config(patch: dict[str, Any]) -> dict[str, Any]:
         config["enabled"] = bool(patch["enabled"])
     if "live_activity" in patch:
         config["live_activity"] = bool(patch["live_activity"])
+    daily = patch.get("daily_summary")
+    if isinstance(daily, dict):
+        if "enabled" in daily:
+            config["daily_summary"]["enabled"] = bool(daily["enabled"])
+        if "hour" in daily:
+            try:
+                hour = int(daily["hour"])
+            except (TypeError, ValueError):
+                raise ValueError("The summary hour must be a whole number.") from None
+            if not 0 <= hour <= 23:
+                raise ValueError("The summary hour must be between 0 and 23.")
+            config["daily_summary"]["hour"] = hour
     for name, rule in (patch.get("rules") or {}).items():
         if name not in config["rules"] or not isinstance(rule, dict):
             raise ValueError(f"Unknown alert: {name}")
@@ -130,13 +147,15 @@ def set_config(patch: dict[str, Any]) -> dict[str, Any]:
 def load_state() -> dict[str, Any]:
     state = _read(_state_file())
     return {"memory": state.get("memory") or {}, "recent": state.get("recent") or [],
-            "live": state.get("live") or {}, "widgets": state.get("widgets") or {}}
+            "live": state.get("live") or {}, "widgets": state.get("widgets") or {},
+            "daily": state.get("daily") or {}}
 
 
 def save_state(state: dict[str, Any]) -> None:
     try:
         _write(_state_file(), {"memory": state["memory"], "recent": state["recent"][:RECENT_LIMIT],
-                              "live": state.get("live") or {}, "widgets": state.get("widgets") or {}})
+                              "live": state.get("live") or {}, "widgets": state.get("widgets") or {},
+            "daily": state.get("daily") or {}})
     except OSError as error:
         log.warning("could not save alert state: %s", error)
 
@@ -192,12 +211,12 @@ def conditions(facts: dict[str, Any], config: dict[str, Any],
     if on("charge_failed") and state == "not_charging":
         found["charge_failed"] = Alert(
             "charge_failed", "Battery isn't charging", f"{title} {detail}".strip(),
-            priority="high")
+            priority="high", page="charging")
 
     if on("reserve_risk") and tone == "alert" and state != "not_charging":
         found["reserve_risk"] = Alert(
             "reserve_risk", "Battery heading below the reserve", f"{title} {detail}".strip(),
-            priority="high")
+            priority="high", page="charging")
 
     watchdog = facts.get("watchdog") or {}
     if on("inverter_trip") and (watchdog.get("hw_trip_active") or watchdog.get("error_message")):
@@ -210,7 +229,8 @@ def conditions(facts: dict[str, Any], config: dict[str, Any],
     if on("laundry_hold") and (facts.get("laundry") or {}).get("blocked"):
         minutes = float(rules["laundry_hold"]["after_min"])
         found["laundry_hold"] = Alert(
-            "laundry_hold", f"Charging held for {_hours(minutes)}", f"{title} {detail}".strip(), delay_s=minutes * 60)
+            "laundry_hold", f"Charging held for {_hours(minutes)}", f"{title} {detail}".strip(),
+            page="charging", delay_s=minutes * 60)
 
     connection = facts.get("connection")
     if on("offline") and connection is not None and connection != "connected":
@@ -224,7 +244,9 @@ def conditions(facts: dict[str, Any], config: dict[str, Any],
     if on("backup_failed") and backup and not backup.get("ok"):
         found["backup_failed"] = Alert(
             "backup_failed", "Backup failed",
-            str(backup.get("error") or "The last backup did not complete."), key=str(backup.get("ts") or ""))
+            str(backup.get("error") or "The last backup did not complete."),
+            # Backups run in the small hours and can wait until morning.
+            priority="low", page="settings", key=str(backup.get("ts") or ""))
 
     return found
 
@@ -361,3 +383,41 @@ def widget_step(memory: dict[str, Any], summary: dict[str, Any], now: float) -> 
         return False
     memory.update(shown=shown, pushed_ts=now)
     return True
+
+
+# ---- Morning summary --------------------------------------------------
+
+def daily_summary_due(memory: dict[str, Any], config: dict[str, Any], now: float, tz_offset_seconds: int) -> bool:
+    """True once a day, at or after the chosen local hour. Marks the day as
+    done, so a restart later that day does not send it again; a day whose
+    hour has already passed when the summary is switched on is skipped."""
+    daily = config["daily_summary"]
+    local = now + tz_offset_seconds
+    day, hour = int(local // 86400), int(local % 86400 // 3600)
+    if not daily["enabled"]:
+        memory.pop("day", None)
+        return False
+    if memory.get("day") is None:
+        # Just switched on: start with the next time the hour comes round.
+        memory["day"] = day if hour >= daily["hour"] else day - 1
+        return False
+    if day > memory["day"] and hour >= daily["hour"]:
+        memory["day"] = day
+        return True
+    return False
+
+
+def daily_summary_alert(*, soc_pct: Any, solar_today_kwh: Any, grid_yesterday: dict | None) -> Alert:
+    parts = []
+    soc = _num(soc_pct)
+    if soc is not None:
+        parts.append(f"Battery at {_whole(soc)}%.")
+    solar = _num(solar_today_kwh)
+    if solar is not None:
+        parts.append(f"Solar expected today: {solar:.1f} kWh.")
+    if grid_yesterday and _num(grid_yesterday.get("kwh")) is not None:
+        kwh, cost = _num(grid_yesterday["kwh"]) or 0.0, _num(grid_yesterday.get("cost")) or 0.0
+        parts.append(f"Yesterday's grid power: {kwh:.1f} kWh, ${cost:.2f}." if kwh > 0
+                     else "No grid power was bought yesterday.")
+    return Alert("daily_summary", "Jackery this morning", " ".join(parts) or "No data yet.", page="live")
+

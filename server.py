@@ -5121,6 +5121,13 @@ async def _live_activity_tick(memory: dict[str, Any], config: dict[str, Any],
     """Start, refresh or end the charging Live Activity on the phone."""
     wanted = config["enabled"] and config["live_activity"] and apns.is_configured()
     content = alerts.live_content(summary) if wanted else None
+    # A phone that lost its card (an app update removes it) asked for it back.
+    if memory["live"].pop("restart", None) and content is not None and memory["live"]:
+        headline = summary.get("headline") or {}
+        error = await apns.live_start(content, device_name=summary.get("device_name"), only_missing=True,
+                                      alert=(content["status"], headline.get("title") or ""), now=now)
+        if error:
+            log.info("live activity restart not delivered: %s", error)
     action = alerts.live_step(memory["live"], content, now)
     error = None
     if action == "start":
@@ -5138,33 +5145,65 @@ async def _live_activity_tick(memory: dict[str, Any], config: dict[str, Any],
     return action
 
 
+async def _daily_summary(summary: dict[str, Any], now: float, tz_off: int) -> alerts.Alert:
+    """The morning summary: battery level, today's solar forecast and what
+    yesterday's grid power cost. Each part is left out if it cannot be had."""
+    sn = summary.get("device_sn")
+    day_start = int((now + tz_off) // 86400) * 86400 - tz_off
+    solar_kwh = grid = None
+    try:
+        forecast = await _build_and_record_forecast(sn)
+        # Each forecast row is stamped with the end of the interval it covers.
+        solar_kwh = sum((r.get("solar_w") or 0) * (r.get("duration_h") or 0) / 1000
+                        for r in forecast.get("forecast") or []
+                        if day_start < (r.get("ts") or 0) <= day_start + 86400)
+    except Exception as error:
+        log.debug("daily summary: no solar forecast: %s", error)
+    try:
+        hourly = state.energy.history(sn, hours=int((now - day_start) // 3600) + 26, bucket_s=3600)
+        yesterday = [r for r in hourly if day_start - 86400 <= (r.get("ts") or 0) < day_start]
+        grid = ui_overview.grid_today(cost_module.get_plan(), yesterday, day_start - 86400, tz_off)
+    except Exception as error:
+        log.debug("daily summary: no grid cost: %s", error)
+    return alerts.daily_summary_alert(soc_pct=summary["battery"]["soc_pct"], solar_today_kwh=solar_kwh,
+                                      grid_yesterday=grid)
+
+
 async def _alerts_tick(now: float | None = None) -> list[alerts.Alert]:
     """One pass: work out which alerts just became true and send them,
     then bring the Live Activity up to date."""
     now = time.time() if now is None else now
     memory = _alerts_memory()
     config = alerts.get_config()
-    before = json.dumps([memory["memory"], memory["live"], memory["widgets"]], sort_keys=True)
+    before = json.dumps([memory[k] for k in ("memory", "live", "widgets", "daily")], sort_keys=True)
     summary = api_app_summary()
     to_send: list[alerts.Alert] = []
     if config["enabled"]:
         current = alerts.conditions(_alert_facts(summary), config, alerts.active_rules(memory["memory"]))
         to_send = alerts.step(memory["memory"], current, now)
         for alert in to_send:
-            error = await apns.send_alert(alert.title, alert.message, priority=alert.priority, rule=alert.rule)
+            error = await apns.send_alert(alert.title, alert.message, priority=alert.priority,
+                                          rule=alert.rule, page=alert.page)
             if error:
                 log.warning("alert %s not delivered: %s", alert.rule, error)
                 alerts.undelivered(memory["memory"], alert)   # try again next pass
             alerts.record(memory, alert, now, error)
+        tz_off = int(device_location.get_tz_offset() or 0)
+        if alerts.daily_summary_due(memory["daily"], config, now, tz_off):
+            alert = await _daily_summary(summary, now, tz_off)
+            error = await apns.send_alert(alert.title, alert.message, rule=alert.rule, page=alert.page)
+            alerts.record(memory, alert, now, error)
+            to_send = [*to_send, alert]
     else:
         memory["memory"].clear()
+        memory["daily"].clear()
     await _live_activity_tick(memory, config, summary, now)
     # Widgets show the status whether or not notifications are on.
     if apns.is_configured() and summary.get("headline") and alerts.widget_step(memory["widgets"], summary, now):
         error = await apns.reload_widgets()
         if error:
             log.debug("widget refresh not delivered: %s", error)
-    if to_send or json.dumps([memory["memory"], memory["live"], memory["widgets"]], sort_keys=True) != before:
+    if to_send or json.dumps([memory[k] for k in ("memory", "live", "widgets", "daily")], sort_keys=True) != before:
         alerts.save_state(memory)
     return to_send
 
@@ -5232,10 +5271,33 @@ def api_app_devices_register(body: dict):
     sign-in, and again whenever Apple hands it a new token."""
     body = body or {}
     try:
-        apns.register_device(body.get("install_id"), body)
+        device = apns.register_device(body.get("install_id"), body)
     except ValueError as error:
         raise HTTPException(400, str(error)) from None
+    if body.get("activity_gone"):
+        log.info("app reports its lock-screen card gone (%s); activities: %s",
+                 body.get("activity_gone"), body.get("activities"))
+    # The app starts up and finds no card although one should be showing:
+    # an app update removed it. Bring it back on the next pass, unless the
+    # owner swiped this session's card away.
+    live = _alerts_memory()["live"]
+    if (body.get("activity_gone") == "launch" and live
+            and (device.get("activity_dismissed_ts") or 0) < live.get("started_ts", 0)):
+        live["restart"] = True
     return {"ok": True}
+
+
+@app.post("/api/app/token")
+def api_app_token(body: dict, request: Request):
+    """Give the iOS app its own long-lived token for /api/app/*. Asked for
+    once, while signed in through the browser; the token cannot be used
+    to mint another."""
+    if getattr(request.state, "auth", None) == "app_token":
+        raise HTTPException(403, "Sign in to get a new token")
+    try:
+        return {"token": apns.issue_api_token((body or {}).get("install_id"))}
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
 
 
 @app.delete("/api/app/devices/{install_id}")

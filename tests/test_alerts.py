@@ -228,3 +228,64 @@ def test_widget_step_pushes_status_at_once_and_level_sparingly():
     assert memory["shown"] == {"state": "charging", "soc": 53}
     assert alerts.widget_step(memory, _summary(state="hold", soc=53), 130 + 15 * 60) is True
 
+
+# ---- tap target and silent delivery ----
+
+def test_each_alert_names_the_page_a_tap_opens(config):
+    found = alerts.conditions(_facts(
+        soc_pct=5, connection="error", laundry={"blocked": True},
+        watchdog={"hw_trip_active": True}, backup_last_run={"ok": False, "ts": 1, "error": "x"},
+        headline={"state": "not_charging", "tone": "alert", "title": "t", "detail": "d"}), config)
+    assert {name: a.page for name, a in found.items()} == {
+        "low_battery": "live", "charge_failed": "charging", "inverter_trip": "live",
+        "laundry_hold": "charging", "offline": "live", "backup_failed": "settings"}
+    assert found["backup_failed"].priority == "low"            # can wait until morning
+    assert {a.priority for n, a in found.items() if n != "backup_failed"} <= {"default", "high", "urgent"}
+
+
+# ---- morning summary ----
+
+DAY = 86400
+
+
+def test_daily_summary_fires_once_a_day_at_the_chosen_local_hour(config):
+    config["daily_summary"] = {"enabled": True, "hour": 7}
+    tz = -8 * 3600
+    local = lambda day, hour, minute=0: day * DAY + hour * 3600 + minute * 60 - tz   # noqa: E731
+    memory: dict = {}
+    assert alerts.daily_summary_due(memory, config, local(100, 6, 30), tz) is False    # just switched on
+    assert alerts.daily_summary_due(memory, config, local(100, 6, 59), tz) is False
+    assert alerts.daily_summary_due(memory, config, local(100, 7, 0), tz) is True
+    assert alerts.daily_summary_due(memory, config, local(100, 7, 1), tz) is False
+    assert alerts.daily_summary_due(memory, config, local(100, 23, 0), tz) is False
+    assert alerts.daily_summary_due(memory, config, local(101, 6, 0), tz) is False
+    assert alerts.daily_summary_due(memory, config, local(101, 9, 15), tz) is True     # monitor was down at 7
+
+
+def test_daily_summary_switched_on_after_the_hour_waits_for_tomorrow(config):
+    config["daily_summary"] = {"enabled": True, "hour": 7}
+    memory: dict = {}
+    assert alerts.daily_summary_due(memory, config, 100 * DAY + 8 * 3600, 0) is False
+    assert alerts.daily_summary_due(memory, config, 100 * DAY + 20 * 3600, 0) is False
+    assert alerts.daily_summary_due(memory, config, 101 * DAY + 7 * 3600, 0) is True
+    config["daily_summary"]["enabled"] = False
+    assert alerts.daily_summary_due(memory, config, 102 * DAY + 7 * 3600, 0) is False and memory == {}
+
+
+def test_daily_summary_wording():
+    alert = alerts.daily_summary_alert(soc_pct=49.5, solar_today_kwh=10.94, grid_yesterday={"kwh": 7.62, "cost": 2.05})
+    assert alert.title == "Jackery this morning" and alert.page == "live"
+    assert alert.message == "Battery at 50%. Solar expected today: 10.9 kWh. Yesterday's grid power: 7.6 kWh, $2.05."
+    quiet = alerts.daily_summary_alert(soc_pct=80, solar_today_kwh=None, grid_yesterday={"kwh": 0, "cost": 0})
+    assert quiet.message == "Battery at 80%. No grid power was bought yesterday."
+    assert alerts.daily_summary_alert(soc_pct=None, solar_today_kwh=None, grid_yesterday=None).message == "No data yet."
+
+
+def test_daily_summary_config_is_validated(isolated_data):
+    assert alerts.get_config()["daily_summary"] == {"enabled": False, "hour": 7}
+    assert alerts.set_config({"daily_summary": {"enabled": True, "hour": "6"}})["daily_summary"] == {"enabled": True, "hour": 6}
+    for bad in (24, -1, "noon"):
+        with pytest.raises(ValueError):
+            alerts.set_config({"daily_summary": {"hour": bad}})
+    assert alerts.get_config()["daily_summary"] == {"enabled": True, "hour": 6}
+
