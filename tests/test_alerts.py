@@ -1,10 +1,7 @@
-"""Alert rules, the send-once state machine, config validation and ntfy delivery."""
+"""Alert rules, the send-once state machine, config validation and the Live Activity plan."""
 
 from __future__ import annotations
 
-import json
-
-import httpx
 import pytest
 
 import alerts
@@ -133,21 +130,16 @@ def test_memory_survives_a_json_round_trip(isolated_data):
 # ---- config ----
 
 def test_config_defaults_then_merges_and_persists(isolated_data):
-    assert alerts.get_config()["enabled"] is False
-    saved = alerts.set_config({"ntfy_topic": "jackery-abc123", "enabled": True,
+    assert alerts.get_config()["enabled"] is False and alerts.get_config()["live_activity"] is True
+    saved = alerts.set_config({"enabled": True, "live_activity": False,
                                "rules": {"low_battery": {"threshold_pct": "30"}, "offline": {"enabled": False}}})
     assert saved["rules"]["low_battery"] == {"enabled": True, "threshold_pct": 30}
     again = alerts.get_config()
-    assert again["enabled"] and again["ntfy_topic"] == "jackery-abc123"
+    assert again["enabled"] and again["live_activity"] is False
     assert again["rules"]["offline"]["enabled"] is False and again["rules"]["laundry_hold"]["after_min"] == 120
 
 
 @pytest.mark.parametrize("patch", [
-    {"enabled": True},                                        # no topic yet
-    {"ntfy_topic": "has spaces"},
-    {"ntfy_topic": "x/../y"},
-    {"ntfy_server": "ntfy.sh"},
-    {"ntfy_server": "https://ntfy.sh/path"},
     {"rules": {"low_battery": {"threshold_pct": 0}}},
     {"rules": {"low_battery": {"threshold_pct": "lots"}}},
     {"rules": {"nonsense": {"enabled": True}}},
@@ -158,62 +150,12 @@ def test_config_rejects_what_would_not_work(isolated_data, patch):
     assert alerts.get_config() == alerts.default_config()
 
 
-# ---- delivery ----
-
-async def test_send_ntfy_posts_the_alert(config):
-    seen = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"], seen["body"] = str(request.url), json.loads(request.content)
-        return httpx.Response(200, json={"id": "x"})
-
-    config["ntfy_topic"] = "jackery-abc123"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        error = await alerts.send_ntfy(
-            config, alerts.Alert("low_battery", "Battery low", "At 19%.", priority="high", tag="low_battery"),
-            client=client)
-    assert error is None
-    assert seen["url"] == "https://ntfy.sh"
-    assert seen["body"] == {"topic": "jackery-abc123", "title": "Battery low", "message": "At 19%.",
-                            "priority": 4, "tags": ["low_battery"]}
-
-
-async def test_send_ntfy_retries_a_dropped_connection(config, monkeypatch):
-    monkeypatch.setattr(alerts, "SEND_RETRY_WAITS_S", (0, 0))
-    config["ntfy_topic"] = "jackery-abc123"
-    calls = []
-
-    def flaky(request):
-        calls.append(1)
-        if len(calls) < 3:
-            raise httpx.ConnectError("no route")
-        return httpx.Response(200)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(flaky)) as client:
-        assert await alerts.send_ntfy(config, _alert(), client=client) is None
-    assert len(calls) == 3
-
-
-async def test_send_ntfy_does_not_retry_a_refusal(config, monkeypatch):
-    monkeypatch.setattr(alerts, "SEND_RETRY_WAITS_S", (0, 0))
-    config["ntfy_topic"] = "jackery-abc123"
-    calls = []
-
-    def refuse(request):
-        calls.append(1)
-        return httpx.Response(403)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        assert "403" in await alerts.send_ntfy(config, _alert(), client=client)
-    assert len(calls) == 1
-
-
 def test_an_undelivered_alert_is_tried_again_and_logged_once():
     state = {"memory": {}, "recent": []}
     current = {"low_battery": _alert()}
     for now in (100, 160, 220):
         (alert,) = alerts.step(state["memory"], current, now)
-        alerts.record(state, alert, now, "Could not reach ntfy: ConnectError.")
+        alerts.record(state, alert, now, "Could not reach Apple: ConnectError")
         alerts.undelivered(state["memory"], alert)
     assert len(state["recent"]) == 1 and state["recent"][0]["ts"] == 220
     (alert,) = alerts.step(state["memory"], current, 280)
@@ -222,18 +164,41 @@ def test_an_undelivered_alert_is_tried_again_and_logged_once():
     assert alerts.step(state["memory"], current, 340) == []
 
 
-async def test_send_ntfy_reports_failure_without_raising(config, monkeypatch):
-    monkeypatch.setattr(alerts, "SEND_RETRY_WAITS_S", (0, 0))
-    assert await alerts.send_ntfy(config, _alert()) == "No ntfy topic is set."
-    config["ntfy_topic"] = "jackery-abc123"
+# ---- Live Activity ----
 
-    def refuse(request):
-        return httpx.Response(429)
+def _summary(state="charging", soc=41.6, until=5000.0, grid=1200, title="Charging from the grid at $0.25 until 3 PM."):
+    return {"battery": {"soc_pct": soc}, "power": {"grid_w": grid, "solar_w": 0, "output_w": 430.4},
+            "headline": {"state": state, "tone": "ok", "title": title}, "until_ts": until}
 
-    def drop(request):
-        raise httpx.ConnectError("no route")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        assert "429" in await alerts.send_ntfy(config, _alert(), client=client)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(drop)) as client:
-        assert "Could not reach ntfy" in await alerts.send_ntfy(config, _alert(), client=client)
+def test_live_content_only_exists_while_something_is_going_on():
+    content = alerts.live_content(_summary())
+    assert content == {"socPct": 42, "state": "charging", "status": "Charging",
+                       "title": "Charging from the grid at $0.25 until 3 PM.", "tone": "ok",
+                       "gridW": 1200, "solarW": 0, "outputW": 430, "untilTs": 5000.0}
+    assert alerts.live_content(_summary(state="hold"))["status"] == "Charging on hold"
+    assert alerts.live_content(_summary(state="scheduled")) is None
+    assert alerts.live_content({"battery": {}, "power": {}, "headline": None}) is None
+
+
+def test_live_content_for_an_ending_activity_says_so():
+    final = alerts.live_content(_summary(state="scheduled", title="Not charging. Next charge starts at 12 AM."), final=True)
+    assert final["status"] == "Charging finished" and final["untilTs"] is None and final["socPct"] == 42
+
+
+def test_live_step_starts_updates_on_change_refreshes_and_ends():
+    memory: dict = {}
+    first = alerts.live_content(_summary())
+    assert alerts.live_step(memory, None, 0) is None
+    assert alerts.live_step(memory, first, 0) == "start"
+    assert alerts.live_step(memory, first, 60) is None
+    # power alone is not worth a push...
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 120) is None
+    # ...but it rides along on the periodic refresh
+    assert alerts.live_step(memory, alerts.live_content(_summary(grid=900)), 600) == "update"
+    assert memory["content"]["gridW"] == 900
+    # a new level or status goes out at once
+    assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2)), 660) == "update"
+    assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2, state="charging_peak")), 720) == "update"
+    assert alerts.live_step(memory, None, 780) == "end" and memory == {}
+    assert alerts.live_step(memory, None, 840) is None

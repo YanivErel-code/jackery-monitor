@@ -10,12 +10,17 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Added
-- Alerts on your phone through ntfy: battery low, on course to fall below
-  the reserve, plug on but not charging, AC output tripped, charging held
-  by laundry for a long time, lost contact with the battery, and backup
-  failed. Each alert is sent once when its condition starts and re-arms
-  when it clears. Set up under Settings → Alerts in the V2 dashboard, with
-  a test button. Off until a topic is entered.
+- Alerts as push notifications to the Jackery iOS app: battery low, on
+  course to fall below the reserve, plug on but not charging, AC output
+  tripped, charging held by laundry for a long time, lost contact with the
+  battery, and backup failed. Each alert is sent once when its condition
+  starts and re-arms when it clears; one that could not be delivered is
+  tried again on the next pass. Set up under Settings → Alerts: the Apple
+  push key (stored encrypted), the registered phones, per-alert toggles
+  and thresholds, and a test button.
+- A Live Activity on the phone's lock screen while the battery charges
+  from the grid or charging is on hold, started, updated and ended by the
+  monitor.
 - `/api/app/summary`: compact battery, live power and headline for the iOS
   app's widgets.
 - `/app/handoff` for the iOS app: signs in through Cloudflare Access in
@@ -65,9 +70,6 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
-- An alert that could not be delivered is no longer lost: sending retries
-  a dropped connection, and an alert that still fails is tried again on
-  the next pass.
 - V2 chart axis labels were cut off at the left edge for values of 10 kWh and
   up, and axis steps could be awkward fractions.
 - A V2 page left open across a deploy kept running old code against the new

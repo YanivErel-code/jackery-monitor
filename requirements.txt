@@ -2,7 +2,8 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 pycryptodome>=3.19
 pycryptodomex>=3.19
-httpx>=0.27
+# http2: Apple's push service (apns.py) only speaks HTTP/2.
+httpx[http2]>=0.27
 paho-mqtt>=2.0
 python-kasa>=0.10
 # tzdata is needed because python-kasa parses device-reported timezone
