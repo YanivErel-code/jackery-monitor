@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 import advisor_routes
 import alerts
 import api_auth
+import apns
 import auth
 import automation
 import backoff as _backoff
@@ -5063,14 +5064,23 @@ def api_app_summary():
         "headline": None,
         "charging_now": False,
         "next_charge_ts": None,
+        "until_ts": None,
         "reserve_pct": None,
     }
     try:
         overview = api_v2_overview(sn)
     except HTTPException:
         return summary
-    upcoming = [b["start"] for b in overview["plan"]["blocks"] if b["start"] > summary["now"]]
+    blocks = overview["plan"]["blocks"]
+    upcoming = [b["start"] for b in blocks if b["start"] > summary["now"]]
+    # When the current state is due to end: this charging block, or the laundry hold.
+    until = None
+    if overview["headline"]["state"] == "hold":
+        until = overview["laundry"]["charge_not_before_ts"]
+    elif overview["plan"]["charging_now"]:
+        until = next((b["end"] for b in blocks if b["start"] <= summary["now"] < b["end"]), None)
     summary.update(
+        until_ts=until,
         headline=overview["headline"],
         charging_now=overview["plan"]["charging_now"],
         next_charge_ts=min(upcoming) if upcoming else None,
@@ -5089,10 +5099,9 @@ def _alerts_memory() -> dict[str, Any]:
     return _alerts_state
 
 
-def _alert_facts() -> dict[str, Any]:
+def _alert_facts(summary: dict[str, Any]) -> dict[str, Any]:
     """What the alert rules look at, gathered from the same sources the
     dashboard shows so an alert never disagrees with the screen."""
-    summary = api_app_summary()
     headline = summary.get("headline") or {}
     runs = backup.get_status().get("runs") or []
     # A run skipped because no destination is set up is not a failure.
@@ -5107,26 +5116,50 @@ def _alert_facts() -> dict[str, Any]:
     }
 
 
+async def _live_activity_tick(memory: dict[str, Any], config: dict[str, Any],
+                              summary: dict[str, Any], now: float) -> str | None:
+    """Start, refresh or end the charging Live Activity on the phone."""
+    wanted = config["enabled"] and config["live_activity"] and apns.is_configured()
+    content = alerts.live_content(summary) if wanted else None
+    action = alerts.live_step(memory["live"], content, now)
+    error = None
+    if action == "start":
+        headline = summary.get("headline") or {}
+        error = await apns.live_start(content, device_name=summary.get("device_name"),
+                                      alert=(content["status"], headline.get("title") or ""), now=now)
+        if error:
+            memory["live"].clear()          # nothing started: try again next pass
+    elif action == "update":
+        error = await apns.live_update(content, now=now)
+    elif action == "end":
+        error = await apns.live_end(alerts.live_content(summary, final=True), now=now)
+    if error:
+        log.info("live activity %s not delivered: %s", action, error)
+    return action
+
+
 async def _alerts_tick(now: float | None = None) -> list[alerts.Alert]:
-    """One pass: work out which alerts just became true and send them."""
+    """One pass: work out which alerts just became true and send them,
+    then bring the Live Activity up to date."""
     now = time.time() if now is None else now
     memory = _alerts_memory()
     config = alerts.get_config()
-    if not config["enabled"]:
-        if memory["memory"]:
-            memory["memory"].clear()
-            alerts.save_state(memory)
-        return []
-    current = alerts.conditions(_alert_facts(), config, alerts.active_rules(memory["memory"]))
-    before = json.dumps(memory["memory"], sort_keys=True)
-    to_send = alerts.step(memory["memory"], current, now)
-    for alert in to_send:
-        error = await alerts.send_ntfy(config, alert)
-        if error:
-            log.warning("alert %s not delivered: %s", alert.rule, error)
-            alerts.undelivered(memory["memory"], alert)   # try again next pass
-        alerts.record(memory, alert, now, error)
-    if to_send or json.dumps(memory["memory"], sort_keys=True) != before:
+    before = json.dumps([memory["memory"], memory["live"]], sort_keys=True)
+    summary = api_app_summary()
+    to_send: list[alerts.Alert] = []
+    if config["enabled"]:
+        current = alerts.conditions(_alert_facts(summary), config, alerts.active_rules(memory["memory"]))
+        to_send = alerts.step(memory["memory"], current, now)
+        for alert in to_send:
+            error = await apns.send_alert(alert.title, alert.message, priority=alert.priority, rule=alert.rule)
+            if error:
+                log.warning("alert %s not delivered: %s", alert.rule, error)
+                alerts.undelivered(memory["memory"], alert)   # try again next pass
+            alerts.record(memory, alert, now, error)
+    else:
+        memory["memory"].clear()
+    await _live_activity_tick(memory, config, summary, now)
+    if to_send or json.dumps([memory["memory"], memory["live"]], sort_keys=True) != before:
         alerts.save_state(memory)
     return to_send
 
@@ -5144,11 +5177,12 @@ async def alerts_loop() -> None:
 
 @app.get("/api/alerts")
 def api_alerts():
-    """Alert settings, the list of rules with their labels, and the most
-    recent alerts sent."""
+    """Alert settings, the list of rules with their labels, the phones
+    that receive them and the most recent alerts sent."""
     return {
         "config": alerts.get_config(),
         "rules": [{"name": name, "label": label} for name, (label, _) in alerts.RULES.items()],
+        "push": apns.public_status(),
         "recent": _alerts_memory()["recent"],
     }
 
@@ -5162,19 +5196,48 @@ def api_alerts_config(body: dict):
 
 
 @app.post("/api/alerts/test")
-async def api_alerts_test(body: dict | None = None):
-    """Send a test alert. Uses the topic in the request when given, so it
-    can be tried before saving."""
-    config = alerts.get_config()
-    topic = str((body or {}).get("ntfy_topic") or "").strip()
-    if topic:
-        if not alerts.TOPIC_RE.match(topic):
-            raise HTTPException(400, "The topic can only use letters, numbers, dashes and underscores.")
-        config["ntfy_topic"] = topic
-    error = await alerts.send_ntfy(config, alerts.Alert(
-        "test", "Test alert from Jackery monitor",
-        "If you can read this, alerts are working.", tag="white_check_mark"))
+async def api_alerts_test():
+    """Send a test alert to every registered phone."""
+    error = await apns.send_alert(
+        "Test alert from Jackery monitor", "If you can read this, alerts are working.", rule="test")
     return {"ok": error is None, "error": error}
+
+
+@app.post("/api/alerts/push_key")
+def api_alerts_push_key(body: dict):
+    """Store the Apple push key (.p8) with its Team ID, Key ID and the
+    app's bundle ID. The key is encrypted at rest and never returned."""
+    body = body or {}
+    try:
+        apns.save_key(body.get("team_id"), body.get("key_id"), body.get("bundle_id"), body.get("key_pem"))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    return {"ok": True, "push": apns.public_status()}
+
+
+@app.delete("/api/alerts/push_key")
+def api_alerts_push_key_delete():
+    apns.remove_key()
+    return {"ok": True, "push": apns.public_status()}
+
+
+@app.post("/api/app/devices")
+def api_app_devices_register(body: dict):
+    """The iOS app registers itself and its push tokens here after
+    sign-in, and again whenever Apple hands it a new token."""
+    body = body or {}
+    try:
+        apns.register_device(body.get("install_id"), body)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    return {"ok": True}
+
+
+@app.delete("/api/app/devices/{install_id}")
+def api_app_devices_remove(install_id: str):
+    if not apns.remove_device(install_id):
+        raise HTTPException(404, "No such phone")
+    return {"ok": True, "push": apns.public_status()}
 
 
 @app.get("/api/smart_charge/analytics")

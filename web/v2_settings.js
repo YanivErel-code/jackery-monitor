@@ -197,11 +197,34 @@
   // ---------- alerts ----------
   const ALERT_OPTIONS = { threshold_pct: ['at or below', '%', 5, 95], after_min: ['after', 'minutes', 1, 1440] };
   let alertRules = [];
+  function renderPush(push) {
+    const phones = push.devices || [];
+    const ready = phones.filter((d) => d.alerts).length;
+    $('al-state').textContent = !push.configured ? 'Not set up yet: add the Apple push key below.'
+      : !ready ? 'The key is in place, but no phone is registered yet. Open the Jackery app and allow notifications.'
+        : 'Ready: ' + ready + (ready === 1 ? ' phone receives alerts.' : ' phones receive alerts.');
+    $('al-phones').replaceChildren(...(phones.length ? phones.map((d) => {
+      const remove = el('button', { class: 'btn small', type: 'button', text: 'Remove' });
+      remove.addEventListener('click', async () => {
+        const j = await run('al-phone-msg', 'Removing…', () => send('DELETE', '/api/app/devices/' + encodeURIComponent(d.install_id)), 'Removed. The phone registers again the next time the app opens.');
+        if (j) renderPush(j.push);
+      });
+      const can = [d.alerts ? 'alerts' : null, d.live_activity ? 'lock-screen status' : null].filter(Boolean).join(' and ') || 'notifications not allowed yet';
+      return el('div', { class: 'item' },
+        el('div', {}, el('b', { text: d.name || 'iPhone' }), el('div', { class: 'muted small', text: can + ' · last seen ' + when(d.updated_ts) + (d.environment === 'development' ? ' · test build' : '') })),
+        el('div', { class: 'item-side' }, remove));
+    }) : [el('p', { class: 'zero', text: 'No phones yet.' })]));
+    $('al-key-state').textContent = push.configured ? 'Key ' + push.key_id + ' for team ' + push.team_id + ', app ' + push.bundle_id + '.' : 'No key yet. Alerts cannot be sent without it.';
+    $('al-key-remove').hidden = !push.configured;
+    if (push.configured) { $('al-team').value = push.team_id; $('al-bundle').value = push.bundle_id; }
+    else $('al-key-form').open = true;
+  }
   async function loadAlerts() {
     const j = await getJson('/api/alerts');
     alertRules = j.rules || [];
     $('al-enabled').checked = !!j.config.enabled;
-    $('al-topic').value = j.config.ntfy_topic || '';
+    $('al-live').checked = !!j.config.live_activity;
+    renderPush(j.push || {});
     $('al-rules').replaceChildren(...alertRules.map((r) => {
       const cfg = j.config.rules[r.name] || {};
       const box = el('input', { id: 'al-on-' + r.name, type: 'checkbox' });
@@ -235,17 +258,28 @@
       if (opt.value.trim() === '' || !Number.isInteger(n) || n < Number(opt.min) || n > Number(opt.max)) { say('al-msg', r.label + ': enter a whole number from ' + opt.min + ' to ' + opt.max + '.', 'bad'); return; }
       rules[r.name][opt.dataset.key] = n;
     }
-    await run('al-msg', 'Saving…', () => send('POST', '/api/alerts/config', { enabled: $('al-enabled').checked, ntfy_topic: $('al-topic').value.trim(), rules }),
+    await run('al-msg', 'Saving…', () => send('POST', '/api/alerts/config', { enabled: $('al-enabled').checked, live_activity: $('al-live').checked, rules }),
       () => ($('al-enabled').checked ? 'Saved. Alerts are on.' : 'Saved. Alerts are off.'));
   });
   $('al-test').addEventListener('click', async () => {
-    const topic = $('al-topic').value.trim();
-    if (!topic) { say('al-msg', 'Enter an ntfy topic first.', 'bad'); return; }
     say('al-msg', 'Sending…');
     try {
-      const j = await send('POST', '/api/alerts/test', { ntfy_topic: topic });
-      say('al-msg', j.ok ? 'Sent. It should reach your phone within a few seconds.' : 'Not sent: ' + (j.error || 'unknown'), j.ok ? 'ok' : 'bad');
+      const j = await send('POST', '/api/alerts/test');
+      say('al-msg', j.ok ? 'Sent. It should reach your phone within a few seconds.' : 'Not sent. ' + (j.error || 'unknown'), j.ok ? 'ok' : 'bad');
     } catch (e) { say('al-msg', 'Not sent: ' + e.message, 'bad'); }
+  });
+  $('al-key-save').addEventListener('click', async () => {
+    const file = $('al-keyfile').files[0];
+    if (!file) { say('al-key-msg', 'Choose the .p8 file you downloaded from Apple.', 'bad'); return; }
+    if (file.size > 10000) { say('al-key-msg', 'That file is too big to be an Apple push key.', 'bad'); return; }
+    const body = { team_id: $('al-team').value.trim().toUpperCase(), key_id: $('al-keyid').value.trim().toUpperCase(), bundle_id: $('al-bundle').value.trim(), key_pem: await file.text() };
+    const j = await run('al-key-msg', 'Saving…', () => send('POST', '/api/alerts/push_key', body), 'Key saved.');
+    if (j) { $('al-keyfile').value = ''; $('al-keyid').value = ''; $('al-key-form').open = false; renderPush(j.push); }
+  });
+  $('al-key-remove').addEventListener('click', async () => {
+    if (!confirm('Remove the Apple push key? Alerts stop until a key is added again.')) return;
+    const j = await run('al-key-msg', 'Removing…', () => send('DELETE', '/api/alerts/push_key'), 'Key removed.');
+    if (j) renderPush(j.push);
   });
 
   // ---------- backup ----------

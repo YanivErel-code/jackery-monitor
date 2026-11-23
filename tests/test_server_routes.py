@@ -13,6 +13,7 @@ the route-layer tests the audit flagged as missing.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 
 import pytest
@@ -179,7 +180,7 @@ def test_app_summary_is_compact_and_carries_the_headline(client, app):
     body = r.json()
     assert set(body) == {
         "now", "device_sn", "device_name", "connection", "last_update_ts", "battery",
-        "power", "headline", "charging_now", "next_charge_ts", "reserve_pct"}
+        "power", "headline", "charging_now", "next_charge_ts", "until_ts", "reserve_pct"}
     assert set(body["battery"]) == {"soc_pct", "time_remaining_h", "time_to_full_h"}
     assert set(body["power"]) == {"solar_w", "grid_w", "input_w", "output_w"}
     if body["device_sn"]:
@@ -543,60 +544,157 @@ def test_handoff_is_off_when_access_is_not_configured(client, access, monkeypatc
 
 
 # ---------------------------------------------------------------------
-# Alerts: settings API and one pass of the loop.
+# Alerts and Apple push: settings API, phone registration, one pass of the loop.
 # ---------------------------------------------------------------------
+
+_PUSH_TOKEN, _START_TOKEN, _ACTIVITY_TOKEN = "a1" * 32, "b2" * 32, "c3" * 40
+
+
+def _push_key_pem() -> str:
+    from Crypto.PublicKey import ECC
+    return ECC.generate(curve="P-256").export_key(format="PEM", use_pkcs8=True)
+
 
 def test_alerts_api_lists_rules_and_saves_settings(client):
     body = client.get("/api/alerts").json()
     assert body["config"]["enabled"] is False and body["recent"] == []
+    assert body["push"] == {"configured": False, "team_id": None, "key_id": None, "bundle_id": None, "devices": []}
     assert {r["name"] for r in body["rules"]} == set(body["config"]["rules"])
     assert all(r["label"] for r in body["rules"])
 
-    r = client.post("/api/alerts/config", json={"enabled": True})
-    assert r.status_code == 400 and "topic" in r.json()["detail"]
-    r = client.post("/api/alerts/config", json={"enabled": True, "ntfy_topic": "jackery-abc123",
-                                                "rules": {"low_battery": {"threshold_pct": 35}}})
+    r = client.post("/api/alerts/config", json={"rules": {"low_battery": {"threshold_pct": 500}}})
+    assert r.status_code == 400 and "between 5 and 95" in r.json()["detail"]
+    r = client.post("/api/alerts/config", json={"enabled": True, "rules": {"low_battery": {"threshold_pct": 35}}})
     assert r.status_code == 200, r.text
     assert client.get("/api/alerts").json()["config"]["rules"]["low_battery"]["threshold_pct"] == 35
 
 
-def test_alerts_test_button_uses_the_unsaved_topic(client, app, monkeypatch):
-    sent = []
+def test_push_key_and_phone_registration(client, app):
+    r = client.post("/api/alerts/push_key", json={"team_id": "TEAM123456", "key_id": "KEY1234567",
+                                                  "bundle_id": "com.example.jackery", "key_pem": "junk"})
+    assert r.status_code == 400 and ".p8" in r.json()["detail"]
+    r = client.post("/api/alerts/push_key", json={"team_id": "TEAM123456", "key_id": "KEY1234567",
+                                                  "bundle_id": "com.example.jackery", "key_pem": _push_key_pem()})
+    assert r.status_code == 200 and r.json()["push"]["configured"] is True
+    assert "PRIVATE" not in r.text
 
-    async def fake_send(config, alert, **_):
-        sent.append((config["ntfy_topic"], alert.rule))
+    assert client.post("/api/app/devices", json={"install_id": "x"}).status_code == 400
+    r = client.post("/api/app/devices", json={"install_id": "install-0001", "name": "Yaniv's iPhone",
+                                              "environment": "development", "push_token": _PUSH_TOKEN})
+    assert r.json() == {"ok": True}
+    client.post("/api/app/devices", json={"install_id": "install-0001", "start_token": _START_TOKEN})
+    push = client.get("/api/alerts").json()["push"]
+    assert [(d["name"], d["alerts"], d["live_activity"]) for d in push["devices"]] == [("Yaniv's iPhone", True, True)]
+    assert _PUSH_TOKEN not in json.dumps(push)
+
+    assert client.delete("/api/app/devices/install-0001").json()["push"]["devices"] == []
+    assert client.delete("/api/app/devices/install-0001").status_code == 404
+    assert client.delete("/api/alerts/push_key").json()["push"]["configured"] is False
+
+
+def test_phone_registration_requires_sign_in(app):
+    with TestClient(app.app, follow_redirects=False) as c:
+        assert c.post("/api/app/devices", json={"install_id": "install-0001"}).status_code == 401
+
+
+def test_alerts_test_button_reports_what_apple_said(client, app, monkeypatch):
+    assert "key is missing" in client.post("/api/alerts/test").json()["error"]
+
+    async def fake_send(title, message, **kwargs):
         return None
 
-    monkeypatch.setattr(app.alerts, "send_ntfy", fake_send)
-    assert client.post("/api/alerts/test", json={"ntfy_topic": "bad topic"}).status_code == 400
-    r = client.post("/api/alerts/test", json={"ntfy_topic": "jackery-try"})
-    assert r.json() == {"ok": True, "error": None} and sent == [("jackery-try", "test")]
-    assert client.get("/api/alerts").json()["config"]["ntfy_topic"] == ""
+    monkeypatch.setattr(app.apns, "send_alert", fake_send)
+    assert client.post("/api/alerts/test").json() == {"ok": True, "error": None}
 
 
-async def test_alerts_tick_sends_once_and_logs_it(client, app, monkeypatch):
-    sent = []
+def _quiet_summary(state="scheduled", soc=12):
+    return {"now": 0, "device_name": "Explorer", "connection": "connected", "until_ts": 9000.0,
+            "battery": {"soc_pct": soc}, "power": {"grid_w": 900, "solar_w": 0, "output_w": 300},
+            "headline": {"state": state, "tone": "ok", "title": "A headline.", "detail": ""}}
 
-    async def fake_send(config, alert, **_):
-        sent.append(alert.rule)
-        return None
 
-    monkeypatch.setattr(app.alerts, "send_ntfy", fake_send)
+async def test_alerts_tick_sends_once_retries_a_failure_and_logs_it(client, app, monkeypatch):
+    sent, fail = [], [True]
+
+    async def fake_send(title, message, **kwargs):
+        sent.append(kwargs["rule"])
+        return "Apple refused it: InternalServerError" if fail[0] else None
+
+    monkeypatch.setattr(app.apns, "send_alert", fake_send)
     monkeypatch.setattr(app, "_alerts_state", None)
-    low = {"soc_pct": 12, "headline": {"state": "scheduled", "tone": "ok", "title": "Not charging.", "detail": ""},
-           "connection": "connected", "laundry": {"blocked": False}, "watchdog": None, "backup_last_run": None}
-    monkeypatch.setattr(app, "_alert_facts", lambda: low)
+    monkeypatch.setattr(app, "api_app_summary", _quiet_summary)
 
     assert await app._alerts_tick(now=1000) == []          # alerts are off by default
-    app.alerts.set_config({"enabled": True, "ntfy_topic": "jackery-abc123"})
+    app.alerts.set_config({"enabled": True})
     assert [a.rule for a in await app._alerts_tick(now=1060)] == ["low_battery"]
-    assert await app._alerts_tick(now=1120) == []
-    assert sent == ["low_battery"]
+    fail[0] = False
+    assert [a.rule for a in await app._alerts_tick(now=1120)] == ["low_battery"]   # tried again
+    assert await app._alerts_tick(now=1180) == []
+    assert sent == ["low_battery", "low_battery"]
     recent = client.get("/api/alerts").json()["recent"]
-    assert len(recent) == 1 and recent[0]["title"] == "Battery low" and recent[0]["delivered"] is True
+    assert [(r["title"], r["delivered"]) for r in recent] == [("Battery low", True), ("Battery low", False)]
+
+
+async def test_live_activity_follows_charging(client, app, monkeypatch):
+    calls = []
+
+    async def live_start(content, **kwargs):
+        calls.append(("start", content["status"], kwargs["alert"]))
+
+    async def live_update(content, **kwargs):
+        calls.append(("update", content["socPct"]))
+
+    async def live_end(content, **kwargs):
+        calls.append(("end", content["status"]))
+
+    for name, fn in (("live_start", live_start), ("live_update", live_update), ("live_end", live_end)):
+        monkeypatch.setattr(app.apns, name, fn)
+    monkeypatch.setattr(app.apns, "is_configured", lambda: True)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    now_state = {"state": "scheduled", "soc": 50}
+    monkeypatch.setattr(app, "api_app_summary", lambda: _quiet_summary(now_state["state"], now_state["soc"]))
+
+    app.alerts.set_config({"enabled": True})
+    await app._alerts_tick(now=0)
+    assert calls == []                                      # nothing going on
+    now_state["state"] = "charging"
+    await app._alerts_tick(now=60)
+    await app._alerts_tick(now=120)                         # no change: no push
+    now_state["soc"] = 51
+    await app._alerts_tick(now=180)
+    now_state["state"] = "scheduled"
+    await app._alerts_tick(now=240)
+    assert calls == [("start", "Charging", ("Charging", "A headline.")), ("update", 51), ("end", "Charging finished")]
+
+    # switched off in settings: a running activity is ended, none is started
+    now_state["state"] = "charging"
+    await app._alerts_tick(now=300)
+    app.alerts.set_config({"live_activity": False})
+    await app._alerts_tick(now=360)
+    now_state["soc"] = 52
+    await app._alerts_tick(now=420)
+    assert [c[0] for c in calls[3:]] == ["start", "end"]
+
+
+async def test_a_live_activity_that_could_not_start_is_tried_again(client, app, monkeypatch):
+    starts = []
+
+    async def live_start(content, **kwargs):
+        starts.append(1)
+        return "No phone is registered." if len(starts) == 1 else None
+
+    monkeypatch.setattr(app.apns, "live_start", live_start)
+    monkeypatch.setattr(app.apns, "is_configured", lambda: True)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    monkeypatch.setattr(app, "api_app_summary", lambda: _quiet_summary("charging", 50))
+    app.alerts.set_config({"enabled": True})
+    await app._alerts_tick(now=0)
+    await app._alerts_tick(now=60)
+    await app._alerts_tick(now=120)
+    assert len(starts) == 2
 
 
 def test_alert_facts_come_from_the_live_status(client, app):
-    facts = app._alert_facts()
+    facts = app._alert_facts(app.api_app_summary())
     assert set(facts) == {"soc_pct", "headline", "connection", "laundry", "watchdog", "backup_last_run"}
     assert facts["laundry"] == {"blocked": False}

@@ -37,6 +37,8 @@ def isolated_data(tmp_path, monkeypatch):
     monkeypatch.setenv("JACKERY_COST_FILE",            str(data / "cost.json"))
     monkeypatch.setenv("JACKERY_ALERTS_FILE",          str(data / "alerts.json"))
     monkeypatch.setenv("JACKERY_ALERTS_STATE_FILE",    str(data / "alerts-state.json"))
+    monkeypatch.setenv("JACKERY_APNS_FILE",            str(data / "apns.json"))
+    monkeypatch.setenv("JACKERY_APP_DEVICES_FILE",     str(data / "app-devices.json"))
     monkeypatch.setenv("JACKERY_SMART_CHARGE_FILE",    str(data / "smart_charge.json"))
     monkeypatch.setenv("JACKERY_LG_THINQ_CREDS_FILE",  str(data / "lg-thinq-creds.json"))
     monkeypatch.setenv("JACKERY_CLAUDE_KEY_FILE",      str(data / ".claude-key"))
