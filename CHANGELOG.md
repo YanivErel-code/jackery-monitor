@@ -70,6 +70,8 @@ limitations still apply; a major version is not a hardware safety guarantee.
   different build.
 
 ### Fixed
+- The lock-screen battery level could read one point below the dashboard
+  (26.5% showed as 26% on one and 27% on the other).
 - V2 chart axis labels were cut off at the left edge for values of 10 kWh and
   up, and axis steps could be awkward fractions.
 - A V2 page left open across a deploy kept running old code against the new
