@@ -5122,7 +5122,7 @@ async def _live_activity_tick(memory: dict[str, Any], config: dict[str, Any],
                               summary: dict[str, Any], now: float) -> str | None:
     """Start, refresh or end the charging Live Activity on the phone."""
     wanted = config["enabled"] and config["live_activity"] and apns.is_configured()
-    content = alerts.live_content(summary) if wanted else None
+    content = alerts.live_content(summary, solar=config["live_solar"]) if wanted else None
     # A phone that lost its card (an app update removes it) asked for it back.
     restart = memory["live"].pop("restart", None)
     if restart and content is not None and memory["live"] and "ended_ts" not in memory["live"]:
@@ -5137,11 +5137,13 @@ async def _live_activity_tick(memory: dict[str, Any], config: dict[str, Any],
     else:
         action = alerts.live_step(memory["live"], content, now)
     error = None
-    if action in ("start", "resume"):
+    if action in ("start", "resume", "rotate"):
         headline = summary.get("headline") or {}
         start = {"device_name": summary.get("device_name"), "now": now,
                  "alert": (content["status"], headline.get("title") or "")}
-        if action == "start":
+        if action == "rotate":
+            await apns.live_end(content, now=now)       # the old card leaves at once
+        if action in ("start", "rotate"):
             error = await apns.live_start(content, **start)
             if error:
                 memory["live"].clear()      # nothing started: try again next pass

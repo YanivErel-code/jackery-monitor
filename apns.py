@@ -43,6 +43,7 @@ HOSTS = {"production": "https://api.push.apple.com",
 PROVIDER_TOKEN_TTL_S = 50 * 60        # Apple rejects tokens older than an hour
 LIVE_ACTIVITY_TYPE = "ChargingAttributes"
 LIVE_STALE_AFTER_S = 30 * 60
+ENDED_REPORT_WINDOW_S = 120
 TOKEN_RE = re.compile(r"^[0-9a-fA-F]{32,400}$")
 ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 DEAD_TOKEN_REASONS = {"BadDeviceToken", "Unregistered", "ExpiredToken", "DeviceTokenNotForTopic"}
@@ -185,7 +186,8 @@ def register_device(install_id: str, patch: dict[str, Any], now: float | None = 
                 raise ValueError(f"{field} is not a valid push token.")
             device[field] = token or None
     device["updated_ts"] = time.time() if now is None else now
-    if patch.get("activity_gone") == "dismissed":
+    # A card the monitor ended itself also reports as dismissed; that is not the owner's doing.
+    if patch.get("activity_gone") == "dismissed" and device["updated_ts"] - device.get("ended_ts", 0) > ENDED_REPORT_WINDOW_S:
         # The owner swiped the lock-screen card away: do not bring it back
         # for this charging session.
         device["activity_dismissed_ts"] = device["updated_ts"]
@@ -235,11 +237,14 @@ def _forget_token(install_id: str, field: str, token: str) -> None:
         _save_devices(found)
 
 
-def clear_activity_tokens() -> None:
-    """A new Live Activity gets new tokens; the old ones are useless."""
+def clear_activity_tokens(*, ended_ts: float | None = None) -> None:
+    """A new Live Activity gets new tokens; the old ones are useless.
+    `ended_ts` notes that the monitor ended the card itself."""
     found = devices()
     if any(d.get("activity_token") for d in found.values()):
         for device in found.values():
+            if ended_ts is not None and device.get("activity_token"):
+                device["ended_ts"] = ended_ts
             device["activity_token"] = None
         _save_devices(found)
 
@@ -393,5 +398,5 @@ async def live_end(content: dict, *, now: float | None = None,
     now = time.time() if now is None else now
     error = await _send_to_all("activity_token", live_payload("end", content, now),
                                push_type="liveactivity", priority=10, client=client)
-    clear_activity_tokens()
+    clear_activity_tokens(ended_ts=now)
     return error

@@ -269,3 +269,16 @@ async def test_ending_the_card_removes_it_at_once(ready):
     assert aps["event"] == "end" and aps["dismissal-date"] == 1000
     assert ready.devices()["install-0001"]["activity_token"] is None
 
+
+
+async def test_a_card_the_monitor_ended_is_not_taken_for_one_swiped_away(ready):
+    """The phone reports any removed card as dismissed, including one the
+    monitor has just ended; only the owner's swipe should count."""
+    ready.register_device("install-0001", {"activity_token": "d4" * 40})
+    seen, client = _capture()
+    async with client:
+        await ready.live_end(CONTENT, now=1000, client=client)
+    ready.register_device("install-0001", {"activity_token": "", "activity_gone": "dismissed"}, now=1003)
+    assert not ready.devices()["install-0001"].get("activity_dismissed_ts")
+    ready.register_device("install-0001", {"activity_token": "", "activity_gone": "dismissed"}, now=2000)
+    assert ready.devices()["install-0001"]["activity_dismissed_ts"] == 2000
