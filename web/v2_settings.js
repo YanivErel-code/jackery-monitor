@@ -202,19 +202,19 @@
     const ready = phones.filter((d) => d.alerts).length;
     $('al-state').textContent = !push.configured ? 'Not set up yet: add the Apple push key below.'
       : !ready ? 'The key is in place, but no phone is registered yet. Open the Jackery app and allow notifications.'
-        : 'Ready: ' + ready + (ready === 1 ? ' phone receives alerts.' : ' phones receive alerts.');
+        : 'Ready: ' + ready + (ready === 1 ? ' phone receives notifications.' : ' phones receive notifications.');
     $('al-phones').replaceChildren(...(phones.length ? phones.map((d) => {
       const remove = el('button', { class: 'btn small', type: 'button', text: 'Remove' });
       remove.addEventListener('click', async () => {
         const j = await run('al-phone-msg', 'Removing…', () => send('DELETE', '/api/app/devices/' + encodeURIComponent(d.install_id)), 'Removed. The phone registers again the next time the app opens.');
         if (j) renderPush(j.push);
       });
-      const can = [d.alerts ? 'alerts' : null, d.live_activity ? 'lock-screen status' : null].filter(Boolean).join(' and ') || 'notifications not allowed yet';
+      const can = [d.alerts ? 'notifications' : null, d.live_activity ? 'lock-screen status' : null].filter(Boolean).join(' and ') || 'notifications not allowed yet';
       return el('div', { class: 'item' },
         el('div', {}, el('b', { text: d.name || 'iPhone' }), el('div', { class: 'muted small', text: can + ' · last seen ' + when(d.updated_ts) + (d.environment === 'development' ? ' · test build' : '') })),
         el('div', { class: 'item-side' }, remove));
     }) : [el('p', { class: 'zero', text: 'No phones yet.' })]));
-    $('al-key-state').textContent = push.configured ? 'Key ' + push.key_id + ' for team ' + push.team_id + ', app ' + push.bundle_id + '.' : 'No key yet. Alerts cannot be sent without it.';
+    $('al-key-state').textContent = push.configured ? 'Key ' + push.key_id + ' for team ' + push.team_id + ', app ' + push.bundle_id + '.' : 'No key yet. Notifications cannot be sent without it.';
     $('al-key-remove').hidden = !push.configured;
     if (push.configured) { $('al-team').value = push.team_id; $('al-bundle').value = push.bundle_id; }
     else $('al-key-form').open = true;
@@ -246,7 +246,7 @@
       el('td', { class: 'left', text: when(a.ts) }),
       el('td', { class: 'left' }, el('b', { text: a.title }), el('div', { class: 'muted small', text: a.message })),
       el('td', { class: 'left', text: a.delivered ? 'Yes' : 'No: ' + (a.error || 'unknown') })))
-      : [el('tr', {}, el('td', { colspan: '3', class: 'zero', text: 'No alerts have been sent yet.' }))]));
+      : [el('tr', {}, el('td', { colspan: '3', class: 'zero', text: 'No notifications have been sent yet.' }))]));
   }
   $('al-save').addEventListener('click', async () => {
     const rules = {};
@@ -259,7 +259,7 @@
       rules[r.name][opt.dataset.key] = n;
     }
     await run('al-msg', 'Saving…', () => send('POST', '/api/alerts/config', { enabled: $('al-enabled').checked, live_activity: $('al-live').checked, rules }),
-      () => ($('al-enabled').checked ? 'Saved. Alerts are on.' : 'Saved. Alerts are off.'));
+      () => ($('al-enabled').checked ? 'Saved. Notifications are on.' : 'Saved. Notifications are off.'));
   });
   $('al-test').addEventListener('click', async () => {
     say('al-msg', 'Sending…');
@@ -277,7 +277,7 @@
     if (j) { $('al-keyfile').value = ''; $('al-keyid').value = ''; $('al-key-form').open = false; renderPush(j.push); }
   });
   $('al-key-remove').addEventListener('click', async () => {
-    if (!confirm('Remove the Apple push key? Alerts stop until a key is added again.')) return;
+    if (!confirm('Remove the Apple push key? Notifications stop until a key is added again.')) return;
     const j = await run('al-key-msg', 'Removing…', () => send('DELETE', '/api/alerts/push_key'), 'Key removed.');
     if (j) renderPush(j.push);
   });
