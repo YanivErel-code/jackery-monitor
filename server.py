@@ -5027,6 +5027,53 @@ def api_v2_overview(device_sn: str | None = None):
     return {**overview, "ui_build": ui_build()}
 
 
+@app.get("/api/app/summary")
+def api_app_summary():
+    """Compact status for the iOS app's widgets and Siri answers: battery,
+    live power and the same plain-language headline the dashboard shows.
+    Small on purpose, because a widget gets little time and data to refresh."""
+    status = serialize_status()
+    t = status.get("telemetry") or {}
+    device = status.get("device") or {}
+    sn = device.get("device_sn")
+    soc = t.get("system_soc_pct")
+    if soc is None:
+        soc = t.get("battery_percent")
+    summary = {
+        "now": time.time(),
+        "device_sn": sn,
+        "device_name": device.get("name"),
+        "connection": status.get("connection_status"),
+        "last_update_ts": status.get("last_update_ts"),
+        "battery": {
+            "soc_pct": soc,
+            "time_remaining_h": t.get("time_remaining_h"),
+            "time_to_full_h": t.get("time_to_full_h"),
+        },
+        "power": {
+            "solar_w": t.get("solar_input_w"),
+            "grid_w": t.get("ac_input_w"),
+            "input_w": t.get("input_power_w"),
+            "output_w": t.get("output_power_w"),
+        },
+        "headline": None,
+        "charging_now": False,
+        "next_charge_ts": None,
+        "reserve_pct": None,
+    }
+    try:
+        overview = api_v2_overview(sn)
+    except HTTPException:
+        return summary
+    upcoming = [b["start"] for b in overview["plan"]["blocks"] if b["start"] > summary["now"]]
+    summary.update(
+        headline=overview["headline"],
+        charging_now=overview["plan"]["charging_now"],
+        next_charge_ts=min(upcoming) if upcoming else None,
+        reserve_pct=overview["battery"]["reserve_pct"])
+    return summary
+
+
 @app.get("/api/smart_charge/analytics")
 def api_smart_charge_analytics(device_sn: str | None = None, days: int = 14):
     """Predicted-vs-actual sunrise SOC pairs for the last N days. Joins

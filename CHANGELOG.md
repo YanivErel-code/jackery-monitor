@@ -10,6 +10,8 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Added
+- `/api/app/summary`: compact battery, live power and headline for the iOS
+  app's widgets.
 - `/app/handoff` for the iOS app: signs in through Cloudflare Access in
   the system browser, where Google sign-in is allowed, and hands the
   result back to the app. Answers only requests that carry a valid Access
