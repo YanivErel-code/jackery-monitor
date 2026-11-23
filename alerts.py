@@ -293,6 +293,7 @@ def record(state: dict[str, Any], alert: Alert, now: float, error: str | None) -
 # Headline states that are worth a place on the lock screen while they last.
 LIVE_STATES = {"charging", "charging_peak", "hold"}
 LIVE_REFRESH_S = 10 * 60
+LIVE_LINGER_S = 15 * 60          # how long a finished card stays on the lock screen
 LIVE_POWER_STEP_W = 50.0
 LIVE_POWER_MIN_GAP_S = 120
 LIVE_STATUS = {
@@ -337,15 +338,32 @@ def _power_moved(before: Any, after: Any) -> bool:
 
 def live_step(memory: dict[str, Any], content: dict[str, Any] | None, now: float) -> str | None:
     """Update `memory` in place and say what to do: "start", "update",
-    "end" or nothing. The card draws the power flowing between solar,
-    grid, battery and home, so a real change in any of them is pushed (at
-    most every two minutes), as is a change of level, status or end time
-    (at once); readings that only wobble wait for the periodic refresh."""
+    "finish", "resume", "end" or nothing. The card draws the power flowing
+    between solar, grid, battery and home, so a real change in any of them
+    is pushed (at most every two minutes), as is a change of level, status
+    or end time (at once); readings that only wobble wait for the periodic
+    refresh.
+
+    When charging stops the card is not ended: it shows the final state
+    ("finish") and is ended only after LIVE_LINGER_S. If charging or a hold
+    begins again meanwhile, the same card carries on ("resume"). Ending it
+    and starting another would leave two on the lock screen, because iOS
+    keeps an ended card for a while and it cannot be removed early."""
     if content is None:
-        if memory:
+        if not memory:
+            return None
+        ended = memory.get("ended_ts")
+        if ended is None:
+            memory["ended_ts"] = now
+            return "finish"
+        if now - ended >= LIVE_LINGER_S:
             memory.clear()
             return "end"
         return None
+    if memory.get("ended_ts") is not None:
+        del memory["ended_ts"]
+        memory.update(content=content, pushed_ts=now, started_ts=now)
+        return "resume"
     previous = memory.get("content")
     if previous is None:
         memory.update(content=content, pushed_ts=now, started_ts=now)

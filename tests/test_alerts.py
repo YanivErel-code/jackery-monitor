@@ -212,8 +212,29 @@ def test_live_step_starts_updates_on_change_refreshes_and_ends():
     # a new level or status goes out at once
     assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2)), 1100) == "update"
     assert alerts.live_step(memory, alerts.live_content(_summary(soc=43.2, state="charging_peak")), 1105) == "update"
-    assert alerts.live_step(memory, None, 1110) == "end" and memory == {}
+    # charging stops: the card shows the final state, and is ended later
+    assert alerts.live_step(memory, None, 1110) == "finish"
     assert alerts.live_step(memory, None, 1170) is None
+    assert alerts.live_step(memory, None, 1110 + alerts.LIVE_LINGER_S) == "end" and memory == {}
+    assert alerts.live_step(memory, None, 1110 + alerts.LIVE_LINGER_S + 60) is None
+
+
+def test_a_session_that_begins_while_the_finished_card_lingers_reuses_it():
+    """Charging stops and the washer starts a hold five minutes later, or
+    the dryer drops out for half a minute: one card throughout, never an
+    ended one beside a new one."""
+    memory: dict = {}
+    assert alerts.live_step(memory, alerts.live_content(_summary()), 0) == "start"
+    assert alerts.live_step(memory, None, 600) == "finish"
+    hold = alerts.live_content(_summary(state="hold"))
+    assert alerts.live_step(memory, hold, 900) == "resume"
+    assert memory["started_ts"] == 900 and "ended_ts" not in memory
+    assert alerts.live_step(memory, hold, 960) is None
+    # the linger is counted from the latest stop, not the first
+    assert alerts.live_step(memory, None, 1000) == "finish"
+    assert alerts.live_step(memory, None, 600 + alerts.LIVE_LINGER_S) is None
+    assert alerts.live_step(memory, None, 1000 + alerts.LIVE_LINGER_S) == "end"
+    assert alerts.live_step(memory, hold, 1000 + alerts.LIVE_LINGER_S + 60) == "start"
 
 
 # ---- widgets ----
