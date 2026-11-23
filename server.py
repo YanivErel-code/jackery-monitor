@@ -5124,22 +5124,37 @@ async def _live_activity_tick(memory: dict[str, Any], config: dict[str, Any],
     wanted = config["enabled"] and config["live_activity"] and apns.is_configured()
     content = alerts.live_content(summary) if wanted else None
     # A phone that lost its card (an app update removes it) asked for it back.
-    if memory["live"].pop("restart", None) and content is not None and memory["live"]:
+    restart = memory["live"].pop("restart", None)
+    if restart and content is not None and memory["live"] and "ended_ts" not in memory["live"]:
         headline = summary.get("headline") or {}
         error = await apns.live_start(content, device_name=summary.get("device_name"), only_missing=True,
                                       alert=(content["status"], headline.get("title") or ""), now=now)
         if error:
             log.info("live activity restart not delivered: %s", error)
-    action = alerts.live_step(memory["live"], content, now)
+    if not wanted and memory["live"]:
+        memory["live"].clear()              # switched off: no lingering
+        action = "end"
+    else:
+        action = alerts.live_step(memory["live"], content, now)
     error = None
-    if action == "start":
+    if action in ("start", "resume"):
         headline = summary.get("headline") or {}
-        error = await apns.live_start(content, device_name=summary.get("device_name"),
-                                      alert=(content["status"], headline.get("title") or ""), now=now)
-        if error:
-            memory["live"].clear()          # nothing started: try again next pass
+        start = {"device_name": summary.get("device_name"), "now": now,
+                 "alert": (content["status"], headline.get("title") or "")}
+        if action == "start":
+            error = await apns.live_start(content, **start)
+            if error:
+                memory["live"].clear()      # nothing started: try again next pass
+        else:
+            # The finished card is still showing: carry on with it. A phone
+            # whose card was swiped away meanwhile gets a new one.
+            error = await apns.live_update(content, now=now)
+            missing = await apns.live_start(content, only_missing=True, **start)
+            error = error and missing       # either one reaching a phone will do
     elif action == "update":
         error = await apns.live_update(content, now=now)
+    elif action == "finish":
+        error = await apns.live_update(alerts.live_content(summary, final=True), now=now)
     elif action == "end":
         error = await apns.live_end(alerts.live_content(summary, final=True), now=now)
     if error:

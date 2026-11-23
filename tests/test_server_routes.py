@@ -638,11 +638,15 @@ async def test_alerts_tick_sends_once_retries_a_failure_and_logs_it(client, app,
 async def test_live_activity_follows_charging(client, app, monkeypatch):
     calls = []
 
+    finals = []
+
     async def live_start(content, **kwargs):
-        calls.append(("start", content["status"], kwargs["alert"]))
+        calls.append(("start", content["status"], kwargs["alert"], *([True] if kwargs.get("only_missing") else [])))
 
     async def live_update(content, **kwargs):
         calls.append(("update", content["socPct"]))
+        if content["status"] == "Charging finished":
+            finals.append(content["status"])
 
     async def live_end(content, **kwargs):
         calls.append(("end", content["status"]))
@@ -664,16 +668,32 @@ async def test_live_activity_follows_charging(client, app, monkeypatch):
     await app._alerts_tick(now=180)
     now_state["state"] = "scheduled"
     await app._alerts_tick(now=240)
-    assert calls == [("start", "Charging", ("Charging", "A headline.")), ("update", 51), ("end", "Charging finished")]
-
-    # switched off in settings: a running activity is ended, none is started
-    now_state["state"] = "charging"
     await app._alerts_tick(now=300)
+    # the same card shows the final state for a while, then is ended
+    assert calls == [("start", "Charging", ("Charging", "A headline.")), ("update", 51), ("update", 51)]
+    assert finals == ["Charging finished"]
+    await app._alerts_tick(now=240 + app.alerts.LIVE_LINGER_S)
+    assert calls[3:] == [("end", "Charging finished")]
+
+    # a hold begins while the finished card is showing: that card carries on
+    del calls[:]
+    now_state["state"] = "charging"
+    await app._alerts_tick(now=2000)
+    now_state["state"] = "scheduled"
+    await app._alerts_tick(now=2060)
+    now_state["state"] = "hold"
+    await app._alerts_tick(now=2120)
+    assert [c[0] for c in calls] == ["start", "update", "update", "start"]
+    assert calls[-1][1:] == ("Charging on hold", ("Charging on hold", "A headline."), True)   # only phones without a card
+    assert "end" not in [c[0] for c in calls]
+
+    # switched off in settings: the card is ended at once, none is started
+    del calls[:]
     app.alerts.set_config({"live_activity": False})
-    await app._alerts_tick(now=360)
+    await app._alerts_tick(now=2180)
     now_state["soc"] = 52
-    await app._alerts_tick(now=420)
-    assert [c[0] for c in calls[3:]] == ["start", "end"]
+    await app._alerts_tick(now=2240)
+    assert [c[0] for c in calls] == ["end"]
 
 
 async def test_a_live_activity_that_could_not_start_is_tried_again(client, app, monkeypatch):

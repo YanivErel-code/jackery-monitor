@@ -42,7 +42,6 @@ HOSTS = {"production": "https://api.push.apple.com",
          "development": "https://api.sandbox.push.apple.com"}
 PROVIDER_TOKEN_TTL_S = 50 * 60        # Apple rejects tokens older than an hour
 LIVE_ACTIVITY_TYPE = "ChargingAttributes"
-LIVE_DISMISS_AFTER_S = 15 * 60
 LIVE_STALE_AFTER_S = 30 * 60
 TOKEN_RE = re.compile(r"^[0-9a-fA-F]{32,400}$")
 ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
@@ -239,23 +238,10 @@ def _forget_token(install_id: str, field: str, token: str) -> None:
 def clear_activity_tokens() -> None:
     """A new Live Activity gets new tokens; the old ones are useless."""
     found = devices()
-    if any(d.get("activity_token") or d.get("lingering") for d in found.values()):
+    if any(d.get("activity_token") for d in found.values()):
         for device in found.values():
             device["activity_token"] = None
-            device.pop("lingering", None)
         _save_devices(found)
-
-
-def _keep_lingering(content: dict, now: float) -> None:
-    """Remember each ended card's token while it is still on the lock
-    screen, so it can be cleared away if a new card starts meanwhile."""
-    found = devices()
-    for device in found.values():
-        if device.get("activity_token"):
-            device["lingering"] = {"token": device["activity_token"], "content": content,
-                                   "until": now + LIVE_DISMISS_AFTER_S}
-        device["activity_token"] = None
-    _save_devices(found)
 
 
 def public_status() -> dict[str, Any]:
@@ -290,10 +276,11 @@ def alert_payload(title: str, message: str, *, priority: str, rule: str, page: s
 
 
 def live_payload(event: str, content: dict, now: float, *, device_name: str | None = None,
-                 alert: tuple[str, str] | None = None, linger_s: float = LIVE_DISMISS_AFTER_S) -> dict:
+                 alert: tuple[str, str] | None = None) -> dict:
     """`content` must match the app's ChargingAttributes.ContentState
     field for field, or the phone silently ignores the push. An ended
-    card stays on the lock screen for `linger_s`; 0 removes it at once."""
+    card leaves the lock screen at once: the monitor keeps a finished
+    card up by not ending it yet (see `alerts.live_step`)."""
     aps: dict[str, Any] = {"timestamp": int(now), "event": event, "content-state": content}
     if event == "start":
         aps["attributes-type"] = LIVE_ACTIVITY_TYPE
@@ -301,7 +288,7 @@ def live_payload(event: str, content: dict, now: float, *, device_name: str | No
         title, body = alert or ("Jackery", content.get("status") or "")
         aps["alert"] = {"title": title, "body": body}
     if event == "end":
-        aps["dismissal-date"] = int(now + linger_s)
+        aps["dismissal-date"] = int(now)
     else:
         aps["stale-date"] = int(now + LIVE_STALE_AFTER_S)
     return {"aps": aps}
@@ -386,7 +373,6 @@ async def live_start(content: dict, *, device_name: str | None, alert: tuple[str
     card that is still showing alone."""
     now = time.time() if now is None else now
     if not only_missing:
-        await _remove_lingering(now, client=client)
         clear_activity_tokens()
     return await _send_to_all(
         "start_token", live_payload("start", content, now, device_name=device_name, alert=alert),
@@ -403,31 +389,9 @@ async def live_update(content: dict, *, now: float | None = None,
 
 async def live_end(content: dict, *, now: float | None = None,
                    client: httpx.AsyncClient | None = None) -> str | None:
-    """End the card. It stays on the lock screen for a while showing its
-    final state, unless a new card starts first (see `_remove_lingering`)."""
+    """End the card and take it off the lock screen."""
     now = time.time() if now is None else now
     error = await _send_to_all("activity_token", live_payload("end", content, now),
                                push_type="liveactivity", priority=10, client=client)
-    _keep_lingering(content, now)
+    clear_activity_tokens()
     return error
-
-
-async def _remove_lingering(now: float, *, client: httpx.AsyncClient | None = None) -> None:
-    """Take a just-ended card off the lock screen before a new one starts,
-    so there are never two. (Charging stops, then the washer starts a
-    hold five minutes later: without this both cards show.)"""
-    config = _config()
-    targets = [(d.get("environment") or "production", d["lingering"]) for d in devices().values()
-               if (d.get("lingering") or {}).get("until", 0) > now]
-    if not config or not targets:
-        return
-    owned = client is None
-    client = client or httpx.AsyncClient(http2=True, timeout=10)
-    try:
-        for environment, old in targets:
-            await _post(client, config, environment, old["token"],
-                        live_payload("end", old["content"], now, linger_s=0),
-                        push_type="liveactivity", priority=10)
-    finally:
-        if owned:
-            await client.aclose()
