@@ -430,6 +430,7 @@
         <button type="button" role="tab" data-sec="rates" aria-selected="false">Rates</button>
         <button type="button" role="tab" data-sec="ai" aria-selected="false">AI</button>
         <button type="button" role="tab" data-sec="laundry" aria-selected="false">Laundry</button>
+        <button type="button" role="tab" data-sec="alerts" aria-selected="false">Alerts</button>
         <button type="button" role="tab" data-sec="backup" aria-selected="false">Backup</button>
         <button type="button" role="tab" data-sec="device" aria-selected="false">Device</button>
         <button type="button" role="tab" data-sec="logs" aria-selected="false">Logs</button>
@@ -531,6 +532,24 @@
             <p class="muted small">Create a token at connect-pat.lgthinq.com.</p>
           </details>
           <span id="lg-msg" class="form-msg" role="status"></span>
+        </section>
+      </div>
+
+      <div data-sec="alerts" class="stack-lg" hidden>
+        <section class="card">
+          <h2>Alerts on your phone</h2>
+          <p class="muted">Sent through ntfy, a free notification app. Install ntfy on your phone, subscribe to a topic name you make up, and enter the same name here. Anyone who knows the name can read the alerts, so make it hard to guess.</p>
+          <div class="f-row check"><label class="f-label" for="al-enabled"><b>Send alerts</b></label>
+            <div class="f-control"><input id="al-enabled" type="checkbox"></div></div>
+          <div class="f-row"><label class="f-label" for="al-topic"><b>ntfy topic</b><span>Letters, numbers, dashes and underscores.</span></label>
+            <div class="f-control"><input id="al-topic" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="64"></div></div>
+          <h3>What to alert on</h3>
+          <div id="al-rules" class="form"></div>
+          <div class="form-foot"><button id="al-save" class="btn primary" type="button">Save</button><button id="al-test" class="btn" type="button">Send a test alert</button><span id="al-msg" class="form-msg" role="status"></span></div>
+        </section>
+        <section class="card">
+          <h2>Recent alerts</h2>
+          <div class="table-wrap"><table id="al-table"><thead><tr><th scope="col" class="left">When</th><th scope="col" class="left">Alert</th><th scope="col" class="left">Sent</th></tr></thead><tbody></tbody></table></div>
         </section>
       </div>
 

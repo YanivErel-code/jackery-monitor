@@ -540,3 +540,63 @@ def test_handoff_is_off_when_access_is_not_configured(client, access, monkeypatc
     r = client.get("/app/handoff", follow_redirects=False,
                    headers={access.HEADER_NAME: _HANDOFF_TOKEN})
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------
+# Alerts: settings API and one pass of the loop.
+# ---------------------------------------------------------------------
+
+def test_alerts_api_lists_rules_and_saves_settings(client):
+    body = client.get("/api/alerts").json()
+    assert body["config"]["enabled"] is False and body["recent"] == []
+    assert {r["name"] for r in body["rules"]} == set(body["config"]["rules"])
+    assert all(r["label"] for r in body["rules"])
+
+    r = client.post("/api/alerts/config", json={"enabled": True})
+    assert r.status_code == 400 and "topic" in r.json()["detail"]
+    r = client.post("/api/alerts/config", json={"enabled": True, "ntfy_topic": "jackery-abc123",
+                                                "rules": {"low_battery": {"threshold_pct": 35}}})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/alerts").json()["config"]["rules"]["low_battery"]["threshold_pct"] == 35
+
+
+def test_alerts_test_button_uses_the_unsaved_topic(client, app, monkeypatch):
+    sent = []
+
+    async def fake_send(config, alert, **_):
+        sent.append((config["ntfy_topic"], alert.rule))
+        return None
+
+    monkeypatch.setattr(app.alerts, "send_ntfy", fake_send)
+    assert client.post("/api/alerts/test", json={"ntfy_topic": "bad topic"}).status_code == 400
+    r = client.post("/api/alerts/test", json={"ntfy_topic": "jackery-try"})
+    assert r.json() == {"ok": True, "error": None} and sent == [("jackery-try", "test")]
+    assert client.get("/api/alerts").json()["config"]["ntfy_topic"] == ""
+
+
+async def test_alerts_tick_sends_once_and_logs_it(client, app, monkeypatch):
+    sent = []
+
+    async def fake_send(config, alert, **_):
+        sent.append(alert.rule)
+        return None
+
+    monkeypatch.setattr(app.alerts, "send_ntfy", fake_send)
+    monkeypatch.setattr(app, "_alerts_state", None)
+    low = {"soc_pct": 12, "headline": {"state": "scheduled", "tone": "ok", "title": "Not charging.", "detail": ""},
+           "connection": "connected", "laundry": {"blocked": False}, "watchdog": None, "backup_last_run": None}
+    monkeypatch.setattr(app, "_alert_facts", lambda: low)
+
+    assert await app._alerts_tick(now=1000) == []          # alerts are off by default
+    app.alerts.set_config({"enabled": True, "ntfy_topic": "jackery-abc123"})
+    assert [a.rule for a in await app._alerts_tick(now=1060)] == ["low_battery"]
+    assert await app._alerts_tick(now=1120) == []
+    assert sent == ["low_battery"]
+    recent = client.get("/api/alerts").json()["recent"]
+    assert len(recent) == 1 and recent[0]["title"] == "Battery low" and recent[0]["delivered"] is True
+
+
+def test_alert_facts_come_from_the_live_status(client, app):
+    facts = app._alert_facts()
+    assert set(facts) == {"soc_pct", "headline", "connection", "laundry", "watchdog", "backup_last_run"}
+    assert facts["laundry"] == {"blocked": False}

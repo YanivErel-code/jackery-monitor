@@ -10,6 +10,12 @@ limitations still apply; a major version is not a hardware safety guarantee.
 ## [Unreleased]
 
 ### Added
+- Alerts on your phone through ntfy: battery low, on course to fall below
+  the reserve, plug on but not charging, AC output tripped, charging held
+  by laundry for a long time, lost contact with the battery, and backup
+  failed. Each alert is sent once when its condition starts and re-arms
+  when it clears. Set up under Settings → Alerts in the V2 dashboard, with
+  a test button. Off until a topic is entered.
 - `/api/app/summary`: compact battery, live power and headline for the iOS
   app's widgets.
 - `/app/handoff` for the iOS app: signs in through Cloudflare Access in

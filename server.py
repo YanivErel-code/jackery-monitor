@@ -39,6 +39,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import advisor_routes
+import alerts
 import api_auth
 import auth
 import automation
@@ -3682,6 +3683,7 @@ async def lifespan(app: FastAPI):
             get_keep_count=lambda: user_settings.get("backup_keep_count"),
         ),
     )
+    state.alerts_task = asyncio.create_task(alerts_loop())
     yield
     for task in lg_tasks:
         task.cancel()
@@ -3698,6 +3700,8 @@ async def lifespan(app: FastAPI):
         state.forecast_recorder_task.cancel()
     if getattr(state, "backup_task", None):
         state.backup_task.cancel()
+    if getattr(state, "alerts_task", None):
+        state.alerts_task.cancel()
     try:
         await state.client.disconnect()
     except Exception:
@@ -5072,6 +5076,104 @@ def api_app_summary():
         next_charge_ts=min(upcoming) if upcoming else None,
         reserve_pct=overview["battery"]["reserve_pct"])
     return summary
+
+
+ALERTS_INTERVAL_S = 60
+_alerts_state: dict[str, Any] | None = None
+
+
+def _alerts_memory() -> dict[str, Any]:
+    global _alerts_state
+    if _alerts_state is None:
+        _alerts_state = alerts.load_state()
+    return _alerts_state
+
+
+def _alert_facts() -> dict[str, Any]:
+    """What the alert rules look at, gathered from the same sources the
+    dashboard shows so an alert never disagrees with the screen."""
+    summary = api_app_summary()
+    headline = summary.get("headline") or {}
+    runs = backup.get_status().get("runs") or []
+    # A run skipped because no destination is set up is not a failure.
+    last_run = next((r for r in runs if not r.get("skipped_reason")), None)
+    return {
+        "soc_pct": summary["battery"]["soc_pct"],
+        "headline": headline,
+        "connection": summary.get("connection"),
+        "laundry": {"blocked": headline.get("state") == "hold"},
+        "watchdog": serialize_status().get("inverter_watchdog"),
+        "backup_last_run": last_run,
+    }
+
+
+async def _alerts_tick(now: float | None = None) -> list[alerts.Alert]:
+    """One pass: work out which alerts just became true and send them."""
+    now = time.time() if now is None else now
+    memory = _alerts_memory()
+    config = alerts.get_config()
+    if not config["enabled"]:
+        if memory["memory"]:
+            memory["memory"].clear()
+            alerts.save_state(memory)
+        return []
+    current = alerts.conditions(_alert_facts(), config, alerts.active_rules(memory["memory"]))
+    before = json.dumps(memory["memory"], sort_keys=True)
+    to_send = alerts.step(memory["memory"], current, now)
+    for alert in to_send:
+        error = await alerts.send_ntfy(config, alert)
+        if error:
+            log.warning("alert %s not delivered: %s", alert.rule, error)
+        alerts.record(memory, alert, now, error)
+    if to_send or json.dumps(memory["memory"], sort_keys=True) != before:
+        alerts.save_state(memory)
+    return to_send
+
+
+async def alerts_loop() -> None:
+    while True:
+        await asyncio.sleep(ALERTS_INTERVAL_S)
+        try:
+            await _alerts_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("alerts tick failed")
+
+
+@app.get("/api/alerts")
+def api_alerts():
+    """Alert settings, the list of rules with their labels, and the most
+    recent alerts sent."""
+    return {
+        "config": alerts.get_config(),
+        "rules": [{"name": name, "label": label} for name, (label, _) in alerts.RULES.items()],
+        "recent": _alerts_memory()["recent"],
+    }
+
+
+@app.post("/api/alerts/config")
+def api_alerts_config(body: dict):
+    try:
+        return {"ok": True, "config": alerts.set_config(body or {})}
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+
+
+@app.post("/api/alerts/test")
+async def api_alerts_test(body: dict | None = None):
+    """Send a test alert. Uses the topic in the request when given, so it
+    can be tried before saving."""
+    config = alerts.get_config()
+    topic = str((body or {}).get("ntfy_topic") or "").strip()
+    if topic:
+        if not alerts.TOPIC_RE.match(topic):
+            raise HTTPException(400, "The topic can only use letters, numbers, dashes and underscores.")
+        config["ntfy_topic"] = topic
+    error = await alerts.send_ntfy(config, alerts.Alert(
+        "test", "Test alert from Jackery monitor",
+        "If you can read this, alerts are working.", tag="white_check_mark"))
+    return {"ok": error is None, "error": error}
 
 
 @app.get("/api/smart_charge/analytics")
