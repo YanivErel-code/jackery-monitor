@@ -2012,6 +2012,25 @@ def _smart_charge_floor_pct(device_sn: str | None) -> float | None:
     return None
 
 
+LOAD_HISTORY_DAYS = 56
+_load_history_cache: dict[str, tuple[int, list[dict]]] = {}
+
+
+def _load_history(device_sn: str, now: float) -> list[dict]:
+    """Eight weeks of hourly home use for the forecaster's home-use model.
+
+    Only completed hours matter, so one read serves every forecast made
+    within the same clock hour."""
+    hour = int(now // 3600)
+    cached = _load_history_cache.get(device_sn)
+    if cached and cached[0] == hour:
+        return cached[1]
+    rows = state.energy.history(device_sn, hours=LOAD_HISTORY_DAYS * 24, bucket_s=3600,
+                                until_ts=hour * 3600)
+    _load_history_cache[device_sn] = (hour, rows)
+    return rows
+
+
 def _car_load_w(device_sn: str | None) -> float:
     """Configured EV-charger draw for the solar-charge plug.
 
@@ -2111,7 +2130,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     model_keys = ("solar_coefficient", "solar_model", "solar_diffuse_ratio", "fit_samples", "diurnal_shape", "solar_intraday_calibration",
                   "charge_efficiency",
                   "ac_input_excludes_load", "ac_supply_limit_w",
-                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w", "night_standby_w", "model_correction",
+                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w", "night_standby_w", "model_correction", "home_use",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
                   "solar_cap_w", "charge_ceiling_pct", "readiness", "drain_calibration",
                   "pack_baseline_applied_w", "load_nowcast")
@@ -2360,6 +2379,7 @@ async def _smart_charge_evaluate(record: bool = True,
         log.warning("smart_charge recent planning evidence unavailable: %s", error)
         evidence = {"power": [], "previous_inputs": None}
     nowcast_inputs = {
+        "load_history": _load_history(device_sn, now),
         "recent_power": evidence["power"],
         "load_hold_until_ts": (lg_context or {}).get("charge_not_before_ts"),
         "appliance_active": bool((lg_context or {}).get("blocked_now")),
@@ -3149,6 +3169,7 @@ async def _solar_charge_evaluate(record: bool = True,
                 sc_tz_off = int(weather.get("utc_offset_seconds")
                                 or device_location.get_tz_offset() or 0)
                 sc_car_load_w = float(cfg.get("car_load_w") or 1400)
+                sc_load_history = _load_history(device_sn, time.time())
                 fcast_baseline = forecaster.build_forecast(
                     **_ac_metering_settings(device_sn),
                     energy_history=energy_hist,
@@ -3159,6 +3180,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     car_load_w=sc_car_load_w,
                     pack_count=_pack_count_for(device_sn),
                     utc_offset_seconds=sc_tz_off,
+                    load_history=sc_load_history,
                 )
                 # The simulator's floor for distributing extra_load_w is
                 # the controller's ON threshold (target + margin +
@@ -3186,6 +3208,7 @@ async def _solar_charge_evaluate(record: bool = True,
                     car_load_w=sc_car_load_w,
                     pack_count=_pack_count_for(device_sn),
                     utc_offset_seconds=sc_tz_off,
+                    load_history=sc_load_history,
                 )
 
                 def _sunrise_from(fcast):

@@ -49,6 +49,11 @@ def day_error(snapshot: dict, *, made_at: float, start_ts: int, start_soc: float
     by_ts = {row["ts"]: row for row in hours}
     if capacity <= 0:
         return None
+    # The car plug has no meter and may be on with a full car, so the car is
+    # only credited with what an hour drew above the plug-off level.
+    plug_off = sorted(float(row.get("output_wh") or 0) for row in hours
+                      if not row.get("solar_charge_plug_on_frac"))
+    plug_off_wh = plug_off[len(plug_off) // 2] if plug_off else 0.0
     out: dict[str, Any] = {"start_ts": start_ts}
     grid_wh = car_wh = solar_wh = home_wh = 0.0
     for offset in range(NEXT_CHECK_H):
@@ -57,7 +62,8 @@ def day_error(snapshot: dict, *, made_at: float, start_ts: int, start_soc: float
             return None
         ac = float(row.get("ac_input_wh") or 0)
         output = float(row.get("output_wh") or 0)
-        car = float(row.get("solar_charge_plug_on_frac") or 0) * min(car_load_w, output)
+        car = min(float(row.get("solar_charge_plug_on_frac") or 0) * car_load_w,
+                  max(0.0, output - plug_off_wh))
         grid_wh += ac * efficiency + (output * (1 + overhead) if ac > 50 else 0)
         car_wh += car * (1 + overhead)
         solar_wh += float(row.get("solar_wh") or 0)

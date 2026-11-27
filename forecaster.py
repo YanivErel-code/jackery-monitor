@@ -1645,13 +1645,20 @@ def fit_load_profile(
     # on-fraction * car_load_w and subtract it — emeter-independent.
     # Fall back to the recorded diverted_wh only when no plug-state
     # covered the bucket (controller off, or pre-decision-log history).
+    # A plug that is on is not a car that is charging: only what the hour
+    # drew above the plug-off level can be the car (see fit_home_use).
+    plug_off = sorted(float(r["output_w"]) for r in energy_history
+                      if r.get("output_w") is not None and not r.get("solar_charge_plug_on_frac"))
+    plug_off_w = plug_off[len(plug_off) // 2] if plug_off else 0.0
+
     def _net_load_w(r: dict) -> float | None:
         out_w = r.get("output_w")
         if out_w is None:
             return None
         frac = r.get("solar_charge_plug_on_frac")
         if frac is not None and car_load_w:
-            return max(0.0, float(out_w) - float(frac) * float(car_load_w))
+            return float(out_w) - min(float(frac) * float(car_load_w),
+                                      max(0.0, float(out_w) - plug_off_w))
         diverted_wh = float(r.get("solar_charge_diverted_wh") or 0)
         if diverted_wh <= 0:
             return float(out_w)
@@ -1738,6 +1745,117 @@ def fit_load_profile(
         profile[key] = min(blended, bucket_ceiling)
 
     return profile
+
+
+# Home use on this kind of rig is a flat baseline plus, on some days, one
+# block of heavy use: 81 blocks in 190 days on the 5-pack rig (2026-05 to
+# 2026-11), typically 3-4 hours at 1.2-2.3 kW between 9 AM and 4 PM, about
+# 5.5 kWh, on 57% of Wednesdays and 12% of Mondays. A per-hour median can
+# only say "always" or "never", so it missed by a whole block either way.
+# The forecast instead carries the expected extra: the average over past
+# days, leaning on the same weekday, and for the rest of today only over
+# past days that had reached the same point (block started or not).
+HOME_USE_MIN_DAYS = 21
+HOME_USE_NOISE_W = 150.0          # above the hour's quiet level before it counts as extra
+HOME_USE_STARTED_WH = 300.0       # extra so far today that means a block has started
+HOME_USE_HEAVY_NOW_W = 600.0      # live draw above the quiet level that means one is running
+HOME_USE_WEEKDAY_PRIOR_DAYS = 4.0  # all-days evidence a weekday's own days are blended with
+HOME_USE_MIN_MATCHING_DAYS = 5
+
+
+def fit_home_use(
+    load_history: list[dict[str, Any]],
+    *,
+    now_ts: float,
+    utc_offset_seconds: int = 0,
+    car_load_w: float | None = None,
+    current_output_w: float | None = None,
+) -> dict[str, Any] | None:
+    """Baseline and expected extra home use by local hour, or None without enough days.
+
+    Returns ``expected`` {(weekday, hour): W} for days ahead and
+    ``expected_today`` {hour: W} for the hours left today.
+    """
+    offset = int(utc_offset_seconds)
+    rows = [row for row in load_history or []
+            if row.get("ts") is not None and row.get("output_w") is not None
+            and row["ts"] <= now_ts and row.get("history_complete", True)]
+    # The car plug has no meter, and a plug that is on is not a car that is
+    # charging (a full car draws nothing). Take the car's share only out of
+    # what the hour drew above the level seen with the plug off; subtracting
+    # the full charger rating erased the home's own use on those hours.
+    plug_off = sorted(float(row["output_w"]) for row in rows
+                      if not row.get("solar_charge_plug_on_frac"))
+    plug_off_w = plug_off[len(plug_off) // 2] if plug_off else 0.0
+    days: dict[int, dict[int, float]] = {}
+    for row in rows:
+        output = float(row["output_w"])
+        car = min(float(row.get("solar_charge_plug_on_frac") or 0) * float(car_load_w or 0),
+                  max(0.0, output - plug_off_w))
+        local = int(row["ts"]) + offset
+        days.setdefault(local // 86400, {})[(local % 86400) // 3600] = output - car
+    today = (int(now_ts) + offset) // 86400
+    hour_now = ((int(now_ts) + offset) % 86400) // 3600
+    past = {day: hours for day, hours in days.items() if day < today and len(hours) >= 20}
+    if len(past) < HOME_USE_MIN_DAYS:
+        return None
+    # The quiet level of each hour (lower quartile) is only used to tell
+    # whether a block has started; the forecast itself is a plain average.
+    quiet, typical = {}, {}
+    for hour in range(24):
+        values = sorted(hours[hour] for hours in past.values() if hour in hours)
+        quiet[hour] = values[len(values) // 4] if values else IDLE_LOAD_W
+        typical[hour] = sum(values) / len(values) if values else IDLE_LOAD_W
+
+    def extra_wh(hours: dict[int, float], until_hour: int) -> float:
+        return sum(max(0.0, hours[hour] - quiet[hour] - HOME_USE_NOISE_W)
+                   for hour in range(until_hour) if hour in hours)
+
+    def mean_w(selected: list[int], hour: int) -> float:
+        values = [past[day][hour] for day in selected if hour in past[day]]
+        return sum(values) / len(values) if values else typical[hour]
+
+    def blended(selected: list[int], weekday: int, hour: int) -> float:
+        same = [day for day in selected if (day + 3) % 7 == weekday]
+        overall = mean_w(selected, hour)
+        if not same:
+            return overall
+        weight = len(same) / (len(same) + HOME_USE_WEEKDAY_PRIOR_DAYS)
+        return weight * mean_w(same, hour) + (1 - weight) * overall
+
+    all_days = sorted(past)
+    expected = {(weekday, hour): blended(all_days, weekday, hour)
+                for weekday in range(7) for hour in range(24)}
+    # The rest of today: only past days that stood where today stands now.
+    heavy_now = (current_output_w is not None
+                 and current_output_w > quiet[hour_now] + HOME_USE_HEAVY_NOW_W)
+    seen_until = hour_now + 1 if heavy_now else hour_now
+    today_extra_wh = extra_wh(days.get(today, {}), hour_now)
+    started = heavy_now or today_extra_wh >= HOME_USE_STARTED_WH
+    matching = [day for day in all_days
+                if (extra_wh(past[day], seen_until) >= HOME_USE_STARTED_WH) == started]
+    weekday_today = (today + 3) % 7
+    if len(matching) >= HOME_USE_MIN_MATCHING_DAYS:
+        expected_today = {hour: (mean_w(matching, hour) if started
+                                 else blended(matching, weekday_today, hour))
+                          for hour in range(24)}
+    else:
+        expected_today = {hour: expected[(weekday_today, hour)] for hour in range(24)}
+    return {
+        "expected": expected, "expected_today": expected_today, "quiet": quiet,
+        "today": today, "hour_now": hour_now, "utc_offset_seconds": offset,
+        "days": len(past), "matching_days": len(matching), "started_today": started,
+        "today_extra_wh": round(today_extra_wh, 1),
+    }
+
+
+def expected_home_output_w(home_use: dict[str, Any], ts: int) -> float:
+    """Expected metered home draw for the hour starting at `ts`."""
+    local = int(ts) + home_use["utc_offset_seconds"]
+    day, hour = local // 86400, (local % 86400) // 3600
+    if day == home_use["today"]:
+        return home_use["expected_today"][hour]
+    return home_use["expected"][((day + 3) % 7, hour)]
 
 
 def expected_load_w(
@@ -2297,6 +2415,7 @@ def build_forecast(
     recent_power: list[PowerSample] | None = None,
     load_hold_until_ts: float | None = None,
     appliance_active: bool = False,
+    load_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Glue: fit models + simulate. Returns a UI-ready dict.
 
@@ -2429,6 +2548,15 @@ def build_forecast(
     future = [w for w in weather_hourly if int(w.get("ts") or 0) > cutoff]
     future = future[:horizon_hours]
 
+    load_nowcast = fit_load_nowcast(
+        recent_power or [], now_ts=now_ts, appliance_active=appliance_active,
+        hold_until_ts=load_hold_until_ts,
+    )
+    home_use = fit_home_use(
+        load_history or [], now_ts=now_ts, utc_offset_seconds=utc_offset_seconds,
+        car_load_w=car_load_w,
+        current_output_w=load_nowcast["observed_output_w"] if load_nowcast else None,
+    )
     forecast_hours = []
     for w in future:
         ts = int(w["ts"])
@@ -2449,9 +2577,13 @@ def build_forecast(
         if solar_cap is not None and solar_w > solar_cap:
             solar_w = solar_cap
             capped = True
-        load_w = expected_load_w(profile, interval_start,
-                                  idle_overhead_w=prior_effective_parasitic_w,
-                                  inverter_overhead_pct=overhead_pct)
+        if home_use:
+            load_w = (expected_home_output_w(home_use, interval_start) * (1 + overhead_pct)
+                      + prior_effective_parasitic_w)
+        else:
+            load_w = expected_load_w(profile, interval_start,
+                                      idle_overhead_w=prior_effective_parasitic_w,
+                                      inverter_overhead_pct=overhead_pct)
         forecast_hours.append({
             "ts": ts,
             "duration_h": round(duration_h, 6),
@@ -2496,10 +2628,6 @@ def build_forecast(
         hour["model_correction_w"] = model_correction[
             f"{_correction_regime(hour['solar_w'])}_w"] or 0.0
 
-    load_nowcast = fit_load_nowcast(
-        recent_power or [], now_ts=now_ts, appliance_active=appliance_active,
-        hold_until_ts=load_hold_until_ts,
-    )
     forecast_hours = _apply_load_nowcast(forecast_hours, load_nowcast, overhead_pct)
     simulated = simulate_soc(
         starting_soc_pct, capacity_wh, forecast_hours,
@@ -2562,6 +2690,10 @@ def build_forecast(
         # Measured-minus-modelled battery power from the last two weeks,
         # already applied to every forecast hour (see fit_model_correction).
         "model_correction": model_correction,
+        # None until enough days of hourly use exist; the per-hour median
+        # profile is used meanwhile.
+        "home_use": ({key: home_use[key] for key in (
+            "days", "matching_days", "started_today", "today_extra_wh")} if home_use else None),
         "drain_calibration": drain_calibration or {"source": "legacy_priors", "n_runs": 0},
         "pack_baseline_applied_w": round(pack_baseline_w, 1) if any(
             hour["drain_baseline_applied_w"] == round(prior_effective_parasitic_w, 1)
