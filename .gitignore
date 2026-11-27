@@ -55,3 +55,6 @@ Thumbs.db
 .env
 .env.local
 *.local.plist
+
+# Browser automation scratch output
+.playwright-cli/

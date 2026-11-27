@@ -383,6 +383,59 @@ def _recent_code_changes() -> list[dict[str, Any]]:
     when interpreting historical samples / predictions / decisions."""
     return [
         {
+            "ts_iso": "2026-11-27T20:30:00+00:00",
+            "subsystem": "forecaster/smart_charge",
+            "summary": (
+                "FORECAST AND SCHEDULER REWORK (PRs #66-#71). Forecasts and "
+                "decisions before this timestamp were made by different code; "
+                "do not bill the current code for them. (1) SOLAR is "
+                "k * (direct + solar_diffuse_ratio * diffuse) * diurnal_shape "
+                "when split weather is available (solar_model="
+                "'direct_diffuse'), plain k * GHI otherwise. (2) SURPLUS "
+                "HOURS: charge_efficiency is fitted as stored / (input - "
+                "output), so it already holds standby and inverter losses of "
+                "a charging hour; the simulator now nets a surplus hour "
+                "against metered output_w instead of the full load_w, which "
+                "had counted about 350W twice. (3) STANDBY: the fixed "
+                "50W + 60W-per-pack prior is replaced by night_standby_w, the "
+                "upper quartile of clean night runs of 4h+ over 14 days at "
+                "any SOC (228W when shipped; 131 runs over 7 months gave a "
+                "median of 183W). (4) SELF-CORRECTION: model_correction "
+                "{sun_w, night_w} is the median measured-minus-modelled "
+                "battery power from replaying 14 days of real solar and "
+                "output through the model; it is added to every forecast "
+                "hour as model_correction_w (cap 300W). While night_w exists "
+                "the SOC-band drain calibration is set aside "
+                "(drain_calibration.superseded_by='model_correction'); do "
+                "not flag the empty soc_bands. (5) HOME USE: with 21+ days "
+                "of hourly history the per-hour median profile is replaced "
+                "by home_use: a conditional average over past days (blended "
+                "toward the same weekday; for the rest of today only over "
+                "days in the same state, heavy block started or not). Car "
+                "charging is credited only with draw above the plug-off "
+                "level, because the car plug has no meter and is often on "
+                "with a full car; the old full-rating subtraction left the "
+                "learned profile about 100W low. This closes the "
+                "2026-08-31T18:05 item: the standby correction and the "
+                "home-use correction have now landed together. (6) "
+                "SCHEDULER: overnight charging is kept as one run (the plan "
+                "no longer drops the piece starting now), an idle plug stays "
+                "off within 1 point under the sunrise target and a running "
+                "charge continues to 1 point above it, and energy the "
+                "overnight hours cannot supply is placed as late as possible "
+                "instead of at dawn. Short repeated ON runs and 45-minute "
+                "dawn charges before this timestamp are the old behaviour. "
+                "(7) DRIFT CHECK: /api/forecast/health compares the 8 AM "
+                "forecast with the level at 5 PM and 7 AM next day and "
+                "reports status ok/drifting/learning with solar, home and "
+                "model shares. Backtest over 192 days: battery-model error "
+                "at the next 7 AM went from -20 to about -2 points. Known "
+                "open items: the solar estimate is now the largest error; "
+                "the baseline forecast does not include car charging the "
+                "solar-charge controller may start at night."
+            ),
+        },
+        {
             "ts_iso": "2026-11-20T19:00:00+00:00",
             "subsystem": "advisor/smart_charge",
             "summary": (
