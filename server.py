@@ -51,6 +51,7 @@ import backup_discover
 import charge_rate
 import cost as cost_module
 import energy_db
+import forecast_drift
 import forecast_guard
 import forecaster
 import inverter_watchdog
@@ -2105,11 +2106,12 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     forecast_keys = ("ts", "duration_h", "solar_w", "load_w", "predicted_soc", "net_w",
                      "output_w", "ac_battery_charge_w", "ac_wall_input_w", "ac_bypass_active",
                      "load_without_baseline_w", "drain_baseline_prior_w",
-                     "drain_baseline_applied_w", "load_nowcast_applied", "nowcast_split")
+                     "drain_baseline_applied_w", "load_nowcast_applied", "nowcast_split",
+                     "model_correction_w")
     model_keys = ("solar_coefficient", "solar_model", "solar_diffuse_ratio", "fit_samples", "diurnal_shape", "solar_intraday_calibration",
                   "charge_efficiency",
                   "ac_input_excludes_load", "ac_supply_limit_w",
-                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w", "night_standby_w",
+                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w", "night_standby_w", "model_correction",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
                   "solar_cap_w", "charge_ceiling_pct", "readiness", "drain_calibration",
                   "pack_baseline_applied_w", "load_nowcast")
@@ -5093,6 +5095,69 @@ def api_smart_charge_status(device_sn: str | None = None):
             "history": history}
 
 
+_forecast_health_cache: dict[str, tuple[float, dict]] = {}
+FORECAST_HEALTH_TTL_S = 1800
+
+
+def _forecast_health(device_sn: str, now: float | None = None) -> dict:
+    """Recent morning forecasts against what the battery then did (cached)."""
+    now = time.time() if now is None else now
+    cached = _forecast_health_cache.get(device_sn)
+    if cached and now - cached[0] < FORECAST_HEALTH_TTL_S:
+        return cached[1]
+    tz_off = int(device_location.get_tz_offset() or 0)
+    today = int((now + tz_off) // 86400) * 86400 - tz_off
+    lookback = forecast_drift.WINDOW_DAYS + 3
+    main_wh, pack_wh = _capacity_hints(device_sn)
+    rows = state.energy.history(
+        device_sn, hours=(lookback + 1) * 24, bucket_s=3600,
+        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh)
+    hours_by_ts = {row["ts"]: row for row in rows}
+
+    def soc_at(ts: int) -> float | None:
+        row = hours_by_ts.get(ts)
+        if row is None:
+            return None
+        return row.get("system_soc", row.get("battery_pct"))
+
+    days = []
+    for back in range(lookback, 0, -1):
+        start = today - back * 86400 + forecast_drift.START_HOUR * 3600
+        if start + forecast_drift.NEXT_CHECK_H * 3600 > now - 3600:
+            continue
+        with state.energy._conn() as connection:
+            row = connection.execute(
+                """SELECT decided_at, current_soc_pct FROM smart_charge_decisions
+                   WHERE device_sn=? AND decided_at>=? AND decided_at<? AND input_snapshot_json IS NOT NULL
+                   ORDER BY decided_at LIMIT 1""", (device_sn, start, start + 1800)).fetchone()
+        if not row or row["current_soc_pct"] is None:
+            continue
+        snapshot = state.energy.smart_charge_decision_inputs(device_sn, row["decided_at"])
+        if not snapshot or not snapshot.get("baseline_forecast"):
+            continue
+        if "model_correction" not in (snapshot.get("model") or {}):
+            continue            # made before the forecast corrected itself; not this model's error
+        day = forecast_drift.day_error(
+            snapshot, made_at=row["decided_at"], start_ts=start, start_soc=row["current_soc_pct"],
+            hours=rows, soc_at=soc_at, car_load_w=_car_load_w(device_sn))
+        if day:
+            days.append(day)
+    health = forecast_drift.assess(days)
+    _forecast_health_cache[device_sn] = (now, health)
+    return health
+
+
+@app.get("/api/forecast/health")
+def api_forecast_health(device_sn: str | None = None):
+    """Whether recent morning forecasts have stayed off, and the likely cause."""
+    if not device_sn:
+        device_sn = state.device.device_sn if state.device else None
+    if not device_sn:
+        raise HTTPException(400, "no active device")
+    _require_portable_device(device_sn)
+    return _forecast_health(device_sn)
+
+
 @app.get("/api/v2/overview")
 def api_v2_overview(device_sn: str | None = None):
     """Everything the V2 dashboard needs to explain the charging plan in
@@ -5196,6 +5261,17 @@ def _alerts_memory() -> dict[str, Any]:
     return _alerts_state
 
 
+def _forecast_health_for_alerts() -> dict | None:
+    sn = state.device.device_sn if state.device else None
+    if not sn or _is_home_device(sn):
+        return None
+    try:
+        return _forecast_health(sn)
+    except Exception as error:
+        log.debug("forecast health unavailable: %s", error)
+        return None
+
+
 def _alert_facts(summary: dict[str, Any]) -> dict[str, Any]:
     """What the alert rules look at, gathered from the same sources the
     dashboard shows so an alert never disagrees with the screen."""
@@ -5210,6 +5286,7 @@ def _alert_facts(summary: dict[str, Any]) -> dict[str, Any]:
         "laundry": {"blocked": headline.get("state") == "hold"},
         "watchdog": serialize_status().get("inverter_watchdog"),
         "backup_last_run": last_run,
+        "forecast_health": _forecast_health_for_alerts(),
     }
 
 

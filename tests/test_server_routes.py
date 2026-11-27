@@ -740,7 +740,8 @@ async def test_a_live_activity_that_could_not_start_is_tried_again(client, app, 
 
 def test_alert_facts_come_from_the_live_status(client, app):
     facts = app._alert_facts(app.api_app_summary())
-    assert set(facts) == {"soc_pct", "headline", "connection", "laundry", "watchdog", "backup_last_run"}
+    assert set(facts) == {"soc_pct", "headline", "connection", "laundry", "watchdog", "backup_last_run",
+                          "forecast_health"}
     assert facts["laundry"] == {"blocked": False}
 
 

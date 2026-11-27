@@ -2150,3 +2150,52 @@ def test_night_standby_ignores_runs_with_charging_and_never_goes_negative():
     for row in history:
         row["ac_input_wh"] = 500
     assert forecaster.fit_night_standby_w(history, 30000, overhead_pct=0.1) == (None, 0)
+
+
+def _model_history(error_w, *, days=6, capacity_wh=100000, sun_error_w=0.0):
+    """Hourly rows whose battery moves as the model says, plus a fixed error."""
+    rows, soc = [], 60.0
+    for hour in range(days * 24):
+        solar = 3000.0 if 10 <= hour % 24 < 16 else 0.0
+        rows.append({"ts": hour * 3600, "system_soc": soc, "battery_pct": soc, "output_wh": 500.0,
+                     "solar_wh": solar, "ac_input_wh": 0})
+        modelled = (solar - 500.0) * 0.9 if solar else -(500.0 * 1.1 + 300.0)
+        soc += (modelled + (sun_error_w if solar else error_w)) / capacity_wh * 100
+    return rows
+
+
+def _correction(history, **overrides):
+    return forecaster.fit_model_correction(
+        history, 100000, **{"charge_efficiency": 0.9, "overhead_pct": 0.1, "standby_w": 300.0, **overrides})
+
+
+def test_model_correction_recovers_the_error_of_each_regime():
+    fit = _correction(_model_history(120.0, sun_error_w=-60.0))
+    assert fit["night_w"] == pytest.approx(120.0, abs=1)
+    assert fit["sun_w"] == pytest.approx(-60.0, abs=1)
+
+
+def test_model_correction_is_zero_for_a_model_that_already_fits():
+    fit = _correction(_model_history(0.0))
+    assert fit["night_w"] == pytest.approx(0.0, abs=1)
+    assert fit["sun_w"] == pytest.approx(0.0, abs=1)
+
+
+def test_model_correction_is_capped_and_waits_for_enough_runs():
+    assert _correction(_model_history(120.0, days=3))["night_w"] is None
+    fit = _correction(_model_history(700.0, sun_error_w=-1800.0))
+    assert fit["night_w"] == forecaster.MODEL_CORRECTION_CAP_W
+    assert fit["sun_w"] == -forecaster.MODEL_CORRECTION_CAP_W
+
+
+def test_model_correction_skips_hours_with_grid_charging():
+    history = _model_history(120.0)
+    for row in history:
+        row["ac_input_wh"] = 400
+    assert _correction(history) == {"sun_w": None, "night_w": None, "sun_runs": 0, "night_runs": 0}
+
+
+def test_simulator_applies_the_correction_as_stored_power():
+    hour = [{"ts": 3600, "duration_h": 1.0, "solar_w": 0.0, "load_w": 800.0, "model_correction_w": 100.0}]
+    trace = forecaster.simulate_soc(50.0, 10000, hour, charge_efficiency=0.9, round_soc=False)
+    assert trace[0]["predicted_soc"] == pytest.approx(50.0 - 700 / 100)

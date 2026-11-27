@@ -360,3 +360,13 @@ def test_daily_summary_config_is_validated(isolated_data):
             alerts.set_config({"daily_summary": {"hour": bad}})
     assert alerts.get_config()["daily_summary"] == {"enabled": True, "hour": 6}
 
+
+
+def test_forecast_drift_alerts_quietly_once_per_episode():
+    config = alerts.default_config()
+    facts = {"forecast_health": {"status": "drifting", "direction": "high",
+                                 "message": "Over the last 7 days the morning forecast has been about 12 points too high."}}
+    found = alerts.conditions(facts, config)["forecast_drift"]
+    assert (found.title, found.priority, found.page, found.key) == (
+        "Forecast running too high", "low", "history", "")
+    assert "forecast_drift" not in alerts.conditions({"forecast_health": {"status": "ok"}}, config)

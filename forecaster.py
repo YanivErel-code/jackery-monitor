@@ -1909,10 +1909,102 @@ def _net_inflow_w(hour: dict[str, Any], solar_w: float, load_w: float,
     return net
 
 
+# Self-correction. Every forecast replays the last two weeks of completed
+# hours through the battery model with the solar and home use that really
+# happened, and compares the modelled change in charge with the measured one.
+# What is left over is model error alone (weather and home-use guesses play
+# no part), and its typical value is added back to new forecasts. Sunlit and
+# dark hours are corrected separately because they fail differently: the
+# model ran 5 points low by 5 PM and 14 by the next sunrise for seven months
+# (2026-05 to 2026-11) without anything noticing.
+MODEL_CORRECTION_QUANTILE = 0.5
+MODEL_CORRECTION_MIN_RUNS = 5
+MODEL_CORRECTION_MIN_RUN_HOURS = 3
+MODEL_CORRECTION_CAP_W = 300.0
+MODEL_CORRECTION_SUN_WH = 20.0
+
+
+def _correction_regime(solar_w: float) -> str:
+    return "sun" if solar_w > MODEL_CORRECTION_SUN_WH else "night"
+
+
+def fit_model_correction(
+    energy_history: list[dict[str, Any]],
+    capacity_wh: int,
+    *,
+    charge_efficiency: float,
+    overhead_pct: float,
+    standby_w: float,
+    drain_calibration_bands: list[SocDrainBand] | None = None,
+    soc_ceiling_pct: float | None = None,
+) -> dict[str, Any]:
+    """Typical measured-minus-modelled battery power, in stored watts, per regime.
+
+    A regime with fewer than MODEL_CORRECTION_MIN_RUNS clean runs gets no
+    correction. Hours with grid charging, excluded or incomplete history, or
+    a battery near its ceiling are left out; the result is capped so a
+    metering fault cannot swing the forecast.
+    """
+    out: dict[str, Any] = {"sun_w": None, "night_w": None, "sun_runs": 0, "night_runs": 0}
+    if MODEL_CORRECTION_QUANTILE is None or capacity_wh <= 0:
+        return out
+    rows = sorted((r for r in (energy_history or []) if r.get("ts") is not None),
+                  key=lambda r: r["ts"])
+    require_system = any(_row_has_system_soc(r) for r in rows)
+    top = min(95.0, soc_ceiling_pct - 2.0) if soc_ceiling_pct is not None else 95.0
+    runs: dict[str, list[float]] = {"sun": [], "night": []}
+    current: list[float] = []
+    current_regime: str | None = None
+
+    def close() -> None:
+        if current_regime and len(current) >= MODEL_CORRECTION_MIN_RUN_HOURS:
+            runs[current_regime].append(sum(current) / len(current))
+        current.clear()
+
+    for a, b in pairwise(rows):
+        soc_a, soc_b = _row_soc(a), _row_soc(b)
+        usable = (
+            b["ts"] - a["ts"] == 3600
+            and soc_a is not None and soc_b is not None
+            and (not require_system or (_row_has_system_soc(a) and _row_has_system_soc(b)))
+            and not a.get("soc_fit_excluded") and a.get("history_complete", True)
+            and (a.get("ac_input_wh") or 0) <= 20
+            and 10 <= soc_a <= top and 10 <= soc_b <= top
+        )
+        if not usable:
+            close()
+            current_regime = None
+            continue
+        solar = float(a.get("solar_wh") or 0)
+        output = float(a.get("output_wh") or 0)
+        base = output * (1 + overhead_pct)
+        hour = {"duration_h": 1.0, "solar_w": solar, "output_w": output,
+                "load_without_baseline_w": base, "drain_baseline_prior_w": standby_w,
+                "load_w": base + standby_w}
+        load = _calibrated_load(hour, soc_a, capacity_wh, drain_calibration_bands or [])
+        net = _net_inflow_w(hour, solar, load)
+        modelled_w = net * charge_efficiency if net > 0 else net
+        regime = _correction_regime(solar)
+        if regime != current_regime:
+            close()
+            current_regime = regime
+        current.append((soc_b - soc_a) * capacity_wh / 100.0 - modelled_w)
+    close()
+    for regime, values in runs.items():
+        out[f"{regime}_runs"] = len(values)
+        if len(values) < MODEL_CORRECTION_MIN_RUNS:
+            continue
+        values.sort()
+        value = values[min(len(values) - 1, int((len(values) - 1) * MODEL_CORRECTION_QUANTILE))]
+        out[f"{regime}_w"] = round(max(-MODEL_CORRECTION_CAP_W, min(MODEL_CORRECTION_CAP_W, value)), 1)
+    return out
+
+
 def _advance_soc(soc: float, net_w: float, duration_h: float, capacity_wh: int,
-                 charge_efficiency: float, ceiling_pct: float | None) -> float:
+                 charge_efficiency: float, ceiling_pct: float | None,
+                 correction_w: float = 0.0) -> float:
     """Limit new charging without erasing already measured battery energy."""
-    net = net_w * charge_efficiency if net_w > 0 else net_w
+    net = (net_w * charge_efficiency if net_w > 0 else net_w) + correction_w
     updated = soc + net * duration_h / capacity_wh * 100
     if net_w > 0 and ceiling_pct is not None:
         updated = min(updated, max(soc, ceiling_pct))
@@ -2003,8 +2095,11 @@ def simulate_soc(
         net = (float(h.get("solar_w") or 0) + float(h.get("ac_battery_charge_w") or 0)
                if h.get("ac_bypass_active")
                else _net_inflow_w(h, float(h.get("solar_w") or 0), natural_load))
-        updated_soc = _advance_soc(natural_soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
-        nat_hourly_pp.append((net * eff if net > 0 else net) * duration_h / capacity_wh * 100.0)
+        correction = 0.0 if h.get("ac_bypass_active") else float(h.get("model_correction_w") or 0)
+        updated_soc = _advance_soc(natural_soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct,
+                                   correction)
+        nat_hourly_pp.append(((net * eff if net > 0 else net) + correction)
+                             * duration_h / capacity_wh * 100.0)
         natural_soc = updated_soc
     # cum_nat[i] = cumulative natural SOC delta from start to start of hour i
     cum_nat = [0.0] * (n + 1)
@@ -2040,7 +2135,8 @@ def simulate_soc(
                 h, soc, capacity_wh, drain_calibration_bands or [], additional_load_w=extra_w,
             )
             tentative_net = _net_inflow_w(h, solar, tentative_load, extra_w)
-            tentative_soc = _advance_soc(soc, tentative_net, duration_h, capacity_wh, eff, soc_ceiling_pct)
+            tentative_soc = _advance_soc(soc, tentative_net, duration_h, capacity_wh, eff,
+                                         soc_ceiling_pct, float(h.get("model_correction_w") or 0))
             # From start of hour i+1 onward, assume natural-only (the
             # controller stops). Worst-case SOC achieved:
             #   min_future = tentative_soc + (min_cum_from[i+1] - cum_nat[i+1])
@@ -2064,6 +2160,8 @@ def simulate_soc(
                     future_duration = max(0.0, min(1.0, float(future_hour.get("duration_h", 1.0))))
                     future_soc = _advance_soc(
                         future_soc, future_net, future_duration, capacity_wh, eff, soc_ceiling_pct,
+                        0.0 if future_hour.get("ac_bypass_active")
+                        else float(future_hour.get("model_correction_w") or 0),
                     )
                     min_future_soc = min(min_future_soc, future_soc)
             if min_future_soc >= extra_floor:
@@ -2079,7 +2177,8 @@ def simulate_soc(
         # net inflow positive — discharge already accounts for inverter
         # losses on the load side.
         net = _net_inflow_w(h, solar, load, applied_extra)
-        soc = _advance_soc(soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
+        soc = _advance_soc(soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct,
+                           float(h.get("model_correction_w") or 0))
         # Smart-charge floor — the user has Kasa-driven grid top-up that
         # holds SOC at or above target_sunrise_soc_pct. Modeling it as a
         # hard floor undercounts how much grid energy is actually used
@@ -2375,6 +2474,16 @@ def build_forecast(
         forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
         forecast_hours[-1]["drain_baseline_prior_w"] = prior_effective_parasitic_w
 
+    model_correction = fit_model_correction(
+        energy_history, capacity_wh, charge_efficiency=charge_eff, overhead_pct=overhead_pct,
+        standby_w=prior_effective_parasitic_w,
+        drain_calibration_bands=drain_calibration["soc_bands"] if drain_calibration else None,
+        soc_ceiling_pct=soc_ceiling,
+    )
+    for hour in forecast_hours:
+        hour["model_correction_w"] = model_correction[
+            f"{_correction_regime(hour['solar_w'])}_w"] or 0.0
+
     load_nowcast = fit_load_nowcast(
         recent_power or [], now_ts=now_ts, appliance_active=appliance_active,
         hold_until_ts=load_hold_until_ts,
@@ -2438,6 +2547,9 @@ def build_forecast(
         # Learned from recent clean night runs; None keeps the fixed prior.
         "night_standby_w": round(night_standby_w, 1) if night_standby_w is not None else None,
         "night_standby_n_runs": night_standby_n,
+        # Measured-minus-modelled battery power from the last two weeks,
+        # already applied to every forecast hour (see fit_model_correction).
+        "model_correction": model_correction,
         "drain_calibration": drain_calibration or {"source": "legacy_priors", "n_runs": 0},
         "pack_baseline_applied_w": round(pack_baseline_w, 1) if any(
             hour["drain_baseline_applied_w"] == round(prior_effective_parasitic_w, 1)
