@@ -155,6 +155,17 @@ def test_projection_adds_planned_charging_to_the_no_charge_forecast():
     assert by_ts[NOW + 17 * 3600] > by_ts[NOW + 10 * 3600]
 
 
+def test_charge_estimate_includes_home_use_the_grid_carries():
+    forecast = [{"ts": MIDNIGHT + (h + 1) * 3600, "duration_h": 1.0, "net_w": -500.0, "output_w": 500.0}
+                for h in range(-12, 8)]
+    plain = _overview(snapshot=_snapshot(baseline_forecast=forecast))["plan"]
+    bypass = _overview(snapshot=_snapshot(baseline_forecast=forecast),
+                       config={**CONFIG, "ac_input_excludes_load": True})["plan"]
+    assert plain["est_kwh"] == round(7 * 0.939, 1)
+    assert bypass["est_kwh"] == round(7 * (0.939 + 0.5), 1)
+    assert bypass["est_cost"] > plain["est_cost"]
+
+
 def test_projection_follows_the_validated_path_then_the_forecast():
     """The chart line must agree with the sunrise number, which comes from the
     scheduler's own trajectory, not from a re-integration of the hourly rows."""

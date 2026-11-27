@@ -74,3 +74,32 @@ def test_existing_dashboard_saves_preserve_metering_settings(tmp_path, monkeypat
     assert saved['ac_input_excludes_load'] is True
     assert saved['ac_supply_limit_w'] == 1750
     assert smart_charge.get_config('B')['ac_input_excludes_load'] is False
+
+
+def test_grid_purchases_include_home_use_carried_while_charging(tmp_path, monkeypatch):
+    """On a bypass device the AC input reading is the battery's share only; the
+    grid also carries the home for every minute the unit is taking AC."""
+    import time
+
+    import cost
+    db = EnergyDB(str(tmp_path/'energy.db'))
+    start = int(time.time()) // 3600 * 3600 - 7200
+    with db._conn() as c:
+        # One hour charging at 900 W with the home drawing 480 W, then one hour
+        # on battery alone. Wh per minute: 15 into the battery, 8 to the home.
+        c.executemany('INSERT INTO samples(device_sn,bucket,input_wh,output_wh,ac_input_wh,'
+                      'last_ac_input_w,last_output_w) VALUES(?,?,?,?,?,?,?)',
+                      [('A', start + m*60, 15, 8, 15, 900, 480) for m in range(60)]
+                      + [('A', start + 3600 + m*60, 0, 8, 0, 0, 480) for m in range(60)])
+    rows = db.history('A', hours=3, bucket_s=3600)
+    assert [(r['ac_input_wh'], r['grid_wh'], r['grid_w']) for r in rows] == [(900, 900, 900), (0, 0, 0)]
+    monkeypatch.setattr(EnergyDB, 'grid_carries_home', staticmethod(lambda sn: sn == 'A'))
+    rows = db.history('A', hours=3, bucket_s=3600)
+    # The battery-side reading the forecaster learns from is untouched.
+    assert [(r['ac_input_wh'], r['grid_wh'], r['grid_w']) for r in rows] == [(900, 1380, 1380), (0, 0, 0)]
+    assert db.totals('A')['lifetime']['grid_wh'] == 1380
+    assert db.readonly_reader().totals('A')['lifetime']['grid_wh'] == 1380
+    assert sum(d['grid_kwh'] for d in db.daily_rollup('A', days=2)) == pytest.approx(1.38)
+    money = cost.compute_savings(rows, {'type': 'flat', 'rate_per_kwh': 0.25, 'currency': 'USD'})
+    # 0.96 kWh of home use valued at the rate, less everything bought from the grid.
+    assert (money['grid_kwh'], money['grid_cost'], money['net_savings']) == (1.38, 0.34, pytest.approx(-0.10))

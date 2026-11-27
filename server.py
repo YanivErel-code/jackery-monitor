@@ -937,6 +937,22 @@ def _pack_count_for(device_sn: str | None) -> int:
     return 0
 
 
+def _grid_carries_home(device_sn: str | None) -> bool:
+    return smart_charge.get_config(device_sn).get("ac_input_excludes_load") is True
+
+
+EnergyDB.grid_carries_home = staticmethod(_grid_carries_home)
+
+
+def _grid_w(telemetry: dict, device_sn: str | None) -> float | None:
+    """Power being bought from the grid right now: the battery's AC input
+    plus, on a bypass device, the home loads the grid carries meanwhile."""
+    ac = telemetry.get("ac_input_w")
+    if ac is None or ac <= energy_db.GRID_ON_W or not _grid_carries_home(device_sn):
+        return ac
+    return ac + float(telemetry.get("output_power_w") or 0)
+
+
 def _in_progress_savings_row() -> dict | None:
     """A synthetic energy_db.history row covering [last_db_record, now]
     so the cost display reflects current grid/output use without waiting
@@ -958,6 +974,7 @@ def _in_progress_savings_row() -> dict | None:
         "input_wh":    float(t.get("input_power_w") or 0) * h,
         "solar_wh":    float(t.get("solar_input_w") or 0) * h,
         "ac_input_wh": float(t.get("ac_input_w") or 0) * h,
+        "grid_wh": float(_grid_w(t, state.device.device_sn if state.device else None) or 0) * h,
     }
 
 
@@ -1353,6 +1370,8 @@ def serialize_status(view_device_id: str | None = None) -> dict[str, Any]:
     if view_sn and _inverter_watchdog_enabled(view_sn, model_code):
         watchdog_state = inverter_watchdog.state_to_dict(
             inverter_watchdog.get_state(view_sn))
+    if telemetry and not is_home:
+        telemetry = {**telemetry, "grid_w": _grid_w(telemetry, view_sn)}
     result = {
         "connection_status": state.connection_status,
         "connection_error": state.connection_error,
@@ -5075,7 +5094,7 @@ def api_app_summary():
         },
         "power": {
             "solar_w": t.get("solar_input_w"),
-            "grid_w": t.get("ac_input_w"),
+            "grid_w": t.get("grid_w", t.get("ac_input_w")),
             "input_w": t.get("input_power_w"),
             "output_w": t.get("output_power_w"),
         },
