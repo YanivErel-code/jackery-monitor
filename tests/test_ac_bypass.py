@@ -41,6 +41,9 @@ def test_shared_supply_caps_battery_charging_and_blocks_excessive_load(output, e
                             margin_seconds=0)
     assert result['scheduled_sunrise_soc_pct'] == pytest.approx(expected_soc, abs=0.06)
     assert bool(result['planned_intervals']) == (output < 1750)
+    # The stored path is the validated one: it ends on the reported sunrise level.
+    assert result['scheduled_trajectory'][-1] == {
+        'ts': 3600, 'soc': result['scheduled_sunrise_soc_pct']}
 
 
 def test_history_identifies_complete_ac_hours_without_changing_energy(tmp_path):

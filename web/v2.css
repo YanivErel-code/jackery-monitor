@@ -218,6 +218,13 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
 .chart .now-line { stroke: var(--ink); }
 .chart .now-dot { fill: var(--amber); stroke: var(--ink); stroke-width: 2; }
 .chart .charge { fill: var(--blue); }
+.chart { touch-action: pan-y; }
+.chart .tip { pointer-events: none; }
+.chart .tip line { stroke: var(--text3); stroke-dasharray: 3 3; }
+.chart .tip circle { fill: var(--card); stroke: var(--ink); stroke-width: 2; }
+.chart .tip rect { fill: var(--card); stroke: var(--ctl-border); }
+.chart .tip text { fill: var(--ink); font-size: 12px; }
+.chart .tip .when { fill: var(--text3); }
 .chart .bar-solar { fill: var(--amber); } .chart .bar-grid { fill: var(--blue); }
 .chart .area-solar { fill: var(--amber); opacity: .28; }
 .chart .area-sun { fill: var(--amber); opacity: .55; }

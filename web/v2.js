@@ -429,6 +429,42 @@
   const path = (f, rows, key) => rows.filter((r) => num(r[key]) != null)
     .map((r) => f.X(r.ts).toFixed(1) + ',' + f.Y(Math.min(r[key], f.yMax)).toFixed(1)).join(' ');
 
+  const nearest = (rows, ts) => rows.reduce((best, r) => (!best || Math.abs(r.ts - ts) < Math.abs(best.ts - ts) ? r : best), null);
+  // Point at a chart (mouse or finger) to read the values at that time.
+  // `lookup(x)` gets the chart's x value under the pointer and returns
+  // { ts, lines, y?, x?, title? } or null; `x` and `title` are for charts whose
+  // x axis is not a time of day. The chart is redrawn on
+  // every refresh, so the listeners are attached once per svg and always call
+  // the lookup of the latest drawing.
+  function hover(f, lookup) {
+    const svg = f.svg;
+    const show = (ev) => {
+      const h = svg._hover;
+      svg.querySelector('.tip')?.remove();
+      if (!h || !ev) return;
+      const rect = svg.getBoundingClientRect();
+      const x = (ev.clientX - rect.left) * h.f.W / rect.width;
+      if (x < h.f.box.l || x > h.f.box.r) return;
+      const hit = h.lookup(h.f.x0 + (x - h.f.box.l) / (h.f.box.r - h.f.box.l) * (h.f.x1 - h.f.x0));
+      if (!hit) return;
+      const lines = [hit.title ?? clock(hit.ts, true), ...hit.lines];
+      const px = h.f.X(hit.x ?? hit.ts), w = Math.max(...lines.map((s) => s.length)) * 7 + 20, ht = lines.length * 18 + 10;
+      const left = px + 10 + w > h.f.box.r ? px - 10 - w : px + 10;
+      const g = svgEl('g', { class: 'tip' },
+        svgEl('line', { x1: px, x2: px, y1: h.f.box.t, y2: h.f.box.b }));
+      if (hit.y != null) g.append(svgEl('circle', { cx: px, cy: hit.y, r: 4 }));
+      g.append(svgEl('rect', { x: left, y: h.f.box.t + 4, width: w, height: ht, rx: 6 }));
+      lines.forEach((s, i) => g.append(svgEl('text', { class: i ? '' : 'when', x: left + 10, y: h.f.box.t + 22 + i * 18 }, s)));
+      svg.append(g);
+    };
+    if (!svg._hover) {
+      svg.addEventListener('pointermove', show);
+      svg.addEventListener('pointerdown', show);
+      svg.addEventListener('pointerleave', () => show(null));
+    }
+    svg._hover = { f, lookup };
+  }
+
   function drawBattery() {
     const svg = $('chart-battery');
     if (!overview || !svg.clientWidth) return;
@@ -458,7 +494,10 @@
       const xa = f.X(Math.max(a, f.x0)), xb = f.X(Math.min(b, f.x1));
       if (xb > xa) svg.append(svgEl('rect', { class: 'charge', x: xa, y: f.box.b + 4, width: Math.max(2, xb - xa), height: 10, rx: 3 }));
     }
-    svg.append(svgEl('polyline', { class: 'measured', points: path(f, history6.filter((r) => r.ts <= now), 'battery_pct') }));
+    // Whole-system level (main unit plus packs), the same number as "Now".
+    const measured = history6.filter((r) => r.ts <= now)
+      .map((r) => ({ ts: r.ts, soc: num(r.system_soc) ?? num(r.battery_pct), ac: r.ac_input_w || 0 }));
+    svg.append(svgEl('polyline', { class: 'measured', points: path(f, measured, 'soc') }));
     const proj = o.projection.filter((p) => p.ts <= f.x1);
     svg.append(svgEl('polyline', { class: 'forecast', points: path(f, proj, 'soc') }));
     const soc = num(o.battery.soc_pct);
@@ -474,6 +513,22 @@
       svg.append(svgEl('text', { class: 'lbl', x: f.X(sunrise) - (nearEdge ? 8 : 0), y: f.Y(o.plan.sunrise_soc_pct) - 12, 'text-anchor': nearEdge ? 'end' : 'middle' },
         'Sunrise ' + Math.round(o.plan.sunrise_soc_pct) + '%'));
     }
+    hover(f, (ts) => {
+      if (ts <= now) {
+        const r = nearest(measured.filter((m) => m.soc != null), ts);
+        if (!r) return null;
+        const lines = ['Measured ' + Math.round(r.soc) + '%'];
+        if (r.ac > 50) lines.push('Grid charging ' + watts(r.ac));
+        return { ts: r.ts, y: f.Y(r.soc), lines };
+      }
+      const i = proj.findIndex((p) => p.ts >= ts);
+      if (i < 1) return null;
+      const a = proj[i - 1], b = proj[i];
+      const soc = a.soc + (b.soc - a.soc) * (ts - a.ts) / (b.ts - a.ts);
+      const lines = ['Forecast ' + Math.round(soc) + '%'];
+      if (o.plan.blocks.some((k) => k.start <= ts && ts < k.end)) lines.push('Grid charging planned');
+      return { ts, y: f.Y(soc), lines };
+    });
   }
 
   function drawPower() {
@@ -491,6 +546,10 @@
     svg.append(svgEl('polyline', { class: 's-home', points: path(f, powerRows, 'output_w') }));
     svg.append(svgEl('polyline', { class: 's-grid', points: path(f, powerRows, 'ac_input_w') }));
     svg.append(svgEl('polyline', { class: 's-solar', points: path(f, powerRows, 'solar_w') }));
+    hover(f, (ts) => {
+      const r = nearest(powerRows, ts);
+      return r && { ts: r.ts, lines: ['Solar ' + watts(r.solar_w || 0), 'Grid ' + watts(r.ac_input_w || 0), 'Home ' + watts(r.output_w || 0)] };
+    });
   }
   function drawCharts() { drawBattery(); drawPower(); if (pages[current]?.draw) pages[current].draw(); }
   let resizeTimer = null;
@@ -574,7 +633,7 @@
 
   // Shared with the per-page scripts loaded after this one.
   window.V2 = {
-    $, el, svgEl, num, pct, watts, usd, clock, tz, getJson, deviceSn, frame, axes, path, niceMax, xLabel,
+    $, el, svgEl, num, pct, watts, usd, clock, tz, getJson, deviceSn, frame, axes, path, niceMax, xLabel, hover, nearest,
     status: () => status,
     register(name, page) { pages[name] = page; if (location.hash.slice(1) === name) route(); },
   };

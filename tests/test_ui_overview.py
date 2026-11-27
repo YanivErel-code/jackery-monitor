@@ -155,6 +155,21 @@ def test_projection_adds_planned_charging_to_the_no_charge_forecast():
     assert by_ts[NOW + 17 * 3600] > by_ts[NOW + 10 * 3600]
 
 
+def test_projection_follows_the_validated_path_then_the_forecast():
+    """The chart line must agree with the sunrise number, which comes from the
+    scheduler's own trajectory, not from a re-integration of the hourly rows."""
+    forecast = [{"ts": NOW + (i + 1) * 3600, "duration_h": 1.0, "net_w": -500.0} for i in range(17)]
+    path = [{"ts": NOW + 3600, "soc": 49.0}, {"ts": NOW + 2 * 3600, "soc": 58.0},
+            {"ts": NOW + 3 * 3600, "soc": 52.4}]
+    snapshot = _snapshot(baseline_forecast=forecast)
+    snapshot["schedule_projection"]["scheduled_trajectory"] = path
+    points = _overview(snapshot=snapshot)["projection"]
+    assert points[:4] == [{"ts": NOW, "soc": 50.7}, *path]
+    # Past the validated path the hourly forecast carries on from where it ended.
+    assert points[4] == {"ts": NOW + 4 * 3600, "soc": round(52.4 - 500 / 30240 * 100, 1)}
+    assert len(points) == 1 + 17
+
+
 def test_activity_reports_changes_not_ticks():
     def row(offset, action, reason, soc):
         return {"decided_at": int(NOW) + offset, "action": action, "executed": True,

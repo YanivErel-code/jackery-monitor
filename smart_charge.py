@@ -305,6 +305,7 @@ class Plan:
     planned_intervals: list[dict[str, int]] | None = None
     scheduled_sunrise_soc_pct: float | None = None
     scheduled_min_soc_pct: float | None = None
+    scheduled_trajectory: list[dict[str, float]] | None = None
     reserve_soc_pct: float | None = None
     plan_feasible: bool | None = None
     warnings: list[str] | None = None

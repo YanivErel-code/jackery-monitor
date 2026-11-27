@@ -2071,7 +2071,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
         "planned_hours": plan.planned_hours, "extension_active": plan.extension_active,
         "planned_intervals": plan.planned_intervals,
         "schedule_projection": {key: getattr(plan, key) for key in (
-            "scheduled_sunrise_soc_pct", "scheduled_min_soc_pct", "reserve_soc_pct",
+            "scheduled_sunrise_soc_pct", "scheduled_min_soc_pct", "scheduled_trajectory", "reserve_soc_pct",
             "plan_feasible", "warnings", "trajectory_validated", "remaining_charge_seconds", "retained_charge_until_ts", "schedule_policy")},
         "lg_protection": plan.lg_protection,
     }
@@ -4011,11 +4011,15 @@ def api_energy_history(hours: int = 24, device_sn: str | None = None):
     hours = max(1, min(hours, 24 * 365))
     # Auto-pick a sensible bucket size: ~120 points across the window
     bucket_s = max(60, (hours * 3600) // 120)
+    # Capacity hints add `system_soc` (main unit plus packs) to each row;
+    # `battery_pct` alone is the main unit only.
+    main_wh, pack_wh = _capacity_hints(device_sn)
     return {
         "device_sn": device_sn,
         "hours": hours,
         "bucket_s": bucket_s,
-        "history": state.energy.history(device_sn, hours=hours, bucket_s=bucket_s),
+        "history": state.energy.history(device_sn, hours=hours, bucket_s=bucket_s,
+                                        main_capacity_wh=main_wh, pack_capacity_wh=pack_wh),
     }
 
 
