@@ -344,12 +344,17 @@ def build_overview(*, now: float, device_sn: str, decision: dict | None, snapsho
             "charge_not_before_ts": lg.get("charge_not_before_ts"),
             "monitoring_degraded": bool(lg.get("monitoring_degraded")),
         },
-        "verification": {"status": (snapshot.get("charge_verification") or {}).get("status")},
+        "verification": {key: (snapshot.get("charge_verification") or {}).get(key)
+                         for key in ("status", "waiting_on")},
         "projection": projection(snapshot, blocks, now, soc) if mode == "active" else [],
         "grid_today": grid_today(cost_plan, hourly_rows, day_start, tz),
         "activity": activity(decision_rows, tz),
         "config": {key: config.get(key) for key in (
             "target_sunrise_soc_pct", "reserve_soc_pct", "kasa_device_host",
             "ac_supply_limit_w", "lg_interlock_enabled", "max_charge_w")}
-        | {"measured_supply_w": _num((snapshot.get("outlet_supply") or {}).get("value"))},
+        | {"measured_supply_w": _num((snapshot.get("outlet_supply") or {}).get("value")),
+           # What the planner used, learned from charging history; the saved
+           # setting is only the 1,000 W starting value.
+           "max_charge_w": (_num((snapshot.get("config") or {}).get("max_charge_w"))
+                            or config.get("max_charge_w"))},
     }

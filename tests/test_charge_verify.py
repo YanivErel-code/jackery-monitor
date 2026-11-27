@@ -104,3 +104,28 @@ async def test_plug_read_back_contradicting_on_is_not_executed(monitor, monkeypa
     latest = monitor.state.energy.list_smart_charge_decisions("MAIN", limit=1)[0]
     assert not latest["executed"]
     assert any("did not confirm ON" in w for w in plan.warnings)
+
+
+def with_solar(rows, solar_w):
+    return [{**row, "last_solar_w": solar_w} for row in rows]
+
+
+def test_weak_dawn_light_waits_instead_of_alarming():
+    # 2026-11-26 07:06: plug on, 20 W of solar, AC input began 17 minutes later.
+    rows = with_solar(minutes(ON, 16, 0), 20)
+    verdict = charge_verify.assess(on_since=ON, now=ON + 15 * 60, buckets=rows, soc_pct=52.8)
+    assert (verdict["status"], verdict["waiting_on"]) == ("pending", "weak_sunlight")
+
+
+@pytest.mark.parametrize("solar_w", [0, 400])
+def test_darkness_or_real_sun_still_alarm_after_the_normal_grace(solar_w):
+    rows = with_solar(minutes(ON, 6, 0), solar_w)
+    verdict = charge_verify.assess(on_since=ON, now=ON + 303, buckets=rows, soc_pct=52.8)
+    assert verdict["status"] == "not_charging"
+
+
+def test_weak_light_allowance_runs_out():
+    count = charge_verify.WEAK_SOLAR_GRACE_S // 60 + 2
+    rows = with_solar(minutes(ON, count, 0), 20)
+    verdict = charge_verify.assess(on_since=ON, now=ON + count * 60, buckets=rows, soc_pct=52.8)
+    assert verdict["status"] == "not_charging"

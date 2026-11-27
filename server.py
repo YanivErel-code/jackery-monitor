@@ -2192,7 +2192,7 @@ async def _smart_charge_verify_charging(device_sn: str, host: str | None, *, now
                ORDER BY decided_at""", (device_sn, now - 86400, now)).fetchall()
         on_since = charge_verify.commanded_on_since([dict(row) for row in decisions])
         buckets = [] if on_since is None else [dict(row) for row in connection.execute(
-            """SELECT bucket, ac_input_wh, last_ac_input_w, last_source_ts FROM samples
+            """SELECT bucket, ac_input_wh, last_ac_input_w, last_solar_w, last_source_ts FROM samples
                WHERE device_sn=? AND bucket>=? ORDER BY bucket""",
             (device_sn, int(on_since // 60 * 60)))]
     verdict = charge_verify.assess(on_since=on_since, now=now, buckets=buckets, soc_pct=soc_pct)
