@@ -187,12 +187,12 @@ def test_set_label_backfills_existing_record(tmp_path, monkeypatch):
     """Lazy-fill path: a record saved without a label gets one stamped
     on later (e.g. after a successful reverse-geocode call)."""
     loc = _fresh_location(monkeypatch, tmp_path)
-    loc.set(37.2232, -121.8809)  # no label
+    loc.set(37.3382, -121.8863)  # no label
     assert loc.get().get("label") is None
     assert loc.set_label("Almaden Valley") is True
     assert loc.get()["label"] == "Almaden Valley"
     # Coords preserved through the label update.
-    assert abs(loc.get()["latitude"] - 37.2232) < 1e-6
+    assert abs(loc.get()["latitude"] - 37.3382) < 1e-6
 
 
 def test_set_label_rejects_empty_or_unset_record(tmp_path, monkeypatch):

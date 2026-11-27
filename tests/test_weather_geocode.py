@@ -140,7 +140,7 @@ def test_reverse_geocode_returns_locality_when_present():
         "principalSubdivision": "California",
     }))
     try:
-        name = _run(weather_client.reverse_geocode(37.2232, -121.8809))
+        name = _run(weather_client.reverse_geocode(37.3382, -121.8863))
     finally:
         cm.stop()
     assert name == "Almaden Valley"
