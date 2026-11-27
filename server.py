@@ -1699,6 +1699,7 @@ def _flag_unknown_models(cloud_meta: dict | None) -> None:
 _param_fit_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _PARAM_FIT_CACHE_TTL_S = 60.0
 _charge_rate_cache: dict[tuple[int, str], tuple[float, charge_rate.ChargeRate]] = {}
+_outlet_supply_cache: dict[tuple[int, str], tuple[float, charge_rate.OutletSupply]] = {}
 
 
 def _resolved_capacity_wh(device_sn: str | None) -> int:
@@ -1722,8 +1723,32 @@ def _resolved_capacity_wh(device_sn: str | None) -> int:
 
 
 def _ac_metering_settings(device_sn: str | None) -> dict:
+    """How AC input is metered and the most the outlet supplies.
+
+    On a bypass device the supply is measured from charging history; the
+    configured circuit limit stays as an upper bound on it."""
     cfg = smart_charge.get_config(device_sn)
-    return {key: cfg.get(key) for key in ("ac_input_excludes_load", "ac_supply_limit_w")}
+    out = {key: cfg.get(key) for key in ("ac_input_excludes_load", "ac_supply_limit_w")}
+    if out["ac_input_excludes_load"] and device_sn and not _is_home_device(device_sn):
+        measured = _learned_outlet_supply(device_sn)["value"]
+        if measured:
+            out["ac_supply_limit_w"] = min(measured, out["ac_supply_limit_w"] or measured)
+    return out
+
+
+def _planning_charge_settings(device_sn: str) -> dict:
+    """Charging power and supply the planner should assume, from measurements.
+
+    With a measured outlet supply the battery gets what the home leaves of
+    it, up to the most it has been seen to take; the six-minute charge rate
+    alone is just that difference at one moment's home load."""
+    rate = _learned_charge_rate(device_sn)["value"]
+    metering = _ac_metering_settings(device_sn)
+    if metering["ac_input_excludes_load"]:
+        cap = _learned_outlet_supply(device_sn)["charge_cap_w"]
+        if cap:
+            rate = max(rate, cap)
+    return {"max_charge_w": rate, **metering}
 
 
 def _cached_history(device_sn: str) -> list[dict]:
@@ -1773,6 +1798,23 @@ def _learned_charge_rate(device_sn: str) -> charge_rate.ChargeRate:
                                   note=rate["note"])
     _charge_rate_cache[cache_key] = (now, rate)
     return rate
+
+
+def _learned_outlet_supply(device_sn: str) -> charge_rate.OutletSupply:
+    now = time.time()
+    cache_key = (state.account_generation, device_sn)
+    cached = _outlet_supply_cache.get(cache_key)
+    if cached and 0 <= now - cached[0] < 600:
+        return cached[1]
+    try:
+        history = state.energy.history(device_sn, hours=charge_rate.LOOKBACK_DAYS * 24,
+                                       bucket_s=60, until_ts=int(now // 60) * 60)
+        supply = charge_rate.learn_outlet_supply(history, now_ts=now)
+    except Exception:
+        log.warning("outlet supply history unavailable; using the configured limit", exc_info=True)
+        supply = charge_rate.learn_outlet_supply([], now_ts=now)
+    _outlet_supply_cache[cache_key] = (now, supply)
+    return supply
 
 
 def resolve_device_param(device_sn: str, key: str) -> dict[str, Any]:
@@ -2277,8 +2319,9 @@ async def _smart_charge_evaluate(record: bool = True,
                 input_snapshot={"version": 1, **inputs, "unavailable_reason": unavailable})
         return plan
     learned_rate = _learned_charge_rate(device_sn)
-    cfg = {**cfg, "max_charge_w": learned_rate["value"]}
+    cfg = {**cfg, **_planning_charge_settings(device_sn)}
     inputs["charge_rate"] = {key: value for key, value in learned_rate.items() if key != "samples"}
+    inputs["outlet_supply"] = _learned_outlet_supply(device_sn)
     # If packs are attached, the forecaster needs the system-wide SOC to
     # match the system-wide capacity it'll be paired with.
     starting_soc = inputs["system_soc_pct"]

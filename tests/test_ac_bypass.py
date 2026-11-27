@@ -103,3 +103,53 @@ def test_grid_purchases_include_home_use_carried_while_charging(tmp_path, monkey
     money = cost.compute_savings(rows, {'type': 'flat', 'rate_per_kwh': 0.25, 'currency': 'USD'})
     # 0.96 kWh of home use valued at the rate, less everything bought from the grid.
     assert (money['grid_kwh'], money['grid_cost'], money['net_savings']) == (1.38, 0.34, pytest.approx(-0.10))
+
+
+def _minute(ts, ac, home, soc=50):
+    return dict(ts=ts, ac_input_w=ac, output_w=home, battery_pct=soc,
+                soc_source_ts_min=ts, soc_source_ts_max=ts + 30)
+
+
+def test_outlet_supply_is_learned_when_charging_plus_home_sits_at_one_level():
+    import charge_rate
+    now = 1_000_000 * 60
+    # The battery takes what the home leaves of a 1,400 W supply.
+    homes = [420, 450, 480, 520, 580, 700]
+    rows = [_minute(now - (m + 2) * 60, 1400 - homes[m % 6] + (m % 3 - 1) * 5, homes[m % 6])
+            for m in range(120)]
+    supply = charge_rate.learn_outlet_supply(rows, now_ts=now)
+    assert supply['source'] == 'fit' and supply['n_samples'] == 120
+    assert supply['value'] == pytest.approx(1400, abs=5)
+    assert supply['charge_cap_w'] == pytest.approx(980, abs=10)
+
+
+def test_outlet_supply_is_not_learned_from_too_little_or_from_an_unlimited_charger():
+    import charge_rate
+    now = 1_000_000 * 60
+    few = [_minute(now - (m + 2) * 60, 950, 450) for m in range(30)]
+    assert charge_rate.learn_outlet_supply(few, now_ts=now)['value'] is None
+    # A steady 950 W whatever the home draws: the outlet is not what limits it.
+    homes = [300, 500, 700, 900]
+    free = [_minute(now - (m + 2) * 60, 950, homes[m % 4]) for m in range(120)]
+    assert charge_rate.learn_outlet_supply(free, now_ts=now)['value'] is None
+    # Tapering near full and stale readings teach nothing either.
+    full = [_minute(now - (m + 2) * 60, 950, 450, soc=95) for m in range(120)]
+    assert charge_rate.learn_outlet_supply(full, now_ts=now)['n_samples'] == 0
+
+
+def test_last_interval_is_trimmed_so_the_plan_does_not_overshoot_the_target():
+    hours = [dict(ts=(h + 1) * 3600, duration_h=1, solar_w=0, load_w=500, output_w=500) for h in range(8)]
+    common = dict(current_soc_pct=60, capacity_wh=30000, now=0, sunrise=8 * 3600, target=50, reserve=10,
+                  power_w=1000, budget_seconds=8 * 3600, cost_plan={'type': 'flat', 'rate_per_kwh': 0.25},
+                  tz_offset_seconds=0, charge_not_before_ts=None, unavailable=False, margin_seconds=0)
+    data = dict(charge_efficiency=0.9, ac_input_excludes_load=True, ac_supply_limit_w=1400, forecast=hours)
+    result = build_schedule(forecast=data, **common)
+    # Without charging: 60% - 8 h x 500 W = 46.7%. Each charging hour adds 900 W x 0.9
+    # stored plus 500 W not drained, 4.37 points, so one whole hour would land on 51.0%.
+    assert 51.0 <= result['scheduled_sunrise_soc_pct'] <= 51.4
+    assert result['plan_feasible']
+    # A lower target needs less: the trim follows it instead of buying the whole hour.
+    lower = build_schedule(forecast=data, **{**common, 'target': 48})
+    lower_seconds = sum(i['end'] - i['start'] for i in lower['planned_intervals'])
+    assert 0 < lower_seconds < 3600 and lower_seconds % 300 == 0
+    assert 49.0 <= lower['scheduled_sunrise_soc_pct'] <= 49.4

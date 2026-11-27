@@ -289,10 +289,10 @@
       ? (p.minutes / 60).toFixed(1) + ' hours planned' + more + '. About ' + p.est_kwh + ' kWh, about ' + usd(p.est_cost) + '.'
       : '';
     $('stat-now').textContent = pct(o.battery.soc_pct);
-    $('stat-low').textContent = pct(p.min_soc_pct);
+    // The card reads as before and after: how low the battery would get
+    // without this charge, and where the charge leaves it at sunrise.
+    $('stat-low').textContent = pct(p.no_charge_min_soc_pct ?? p.min_soc_pct);
     $('stat-sunrise').textContent = pct(p.sunrise_soc_pct);
-    $('next-nocharge').textContent = num(p.no_charge_sunrise_soc_pct) != null && p.minutes
-      ? 'Without charging, the battery would be at about ' + pct(p.no_charge_sunrise_soc_pct) + ' by sunrise.' : '';
 
     const checks = [];
     const l = o.laundry;
@@ -338,6 +338,7 @@
       ['Never go below', pct(c.reserve_soc_pct)],
       ['Charger plug', c.kasa_device_host || 'Not set'],
       ['Circuit limit', watts(c.ac_supply_limit_w)],
+      ...(num(c.measured_supply_w) != null ? [['Measured from the outlet while charging', watts(c.measured_supply_w)]] : []),
       ['Hold charging during laundry', c.lg_interlock_enabled ? 'On' : 'Off'],
       ['Measured charging power', watts(c.max_charge_w)],
     ];

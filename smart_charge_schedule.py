@@ -16,6 +16,12 @@ SCHEDULE_POLICY = "overnight_first_v1"
 MIN_CHARGE_BLOCK_S = 45 * 60
 
 
+# A trimmed interval ends on this grid and leaves this much above the sunrise
+# target, so a small forecast drift does not restart charging minutes later.
+TRIM_STEP_S = 300
+TRIM_HEADROOM_PCT = 1.0
+
+
 def _finite(value, *, minimum=None, maximum=None):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError("Forecast contains an invalid numeric input")
@@ -349,6 +355,37 @@ def _build_schedule(
                 and projected[-1]["predicted_soc"] >= target - SOC_EPSILON
             ):
                 selected, trace = candidate, projected
+        # Whole slots usually buy more than the target needs. Shorten the
+        # interval the plan values least until the path only just holds, so
+        # the battery is not charged past the target.
+        trimmable = [
+            interval for interval in expensive_first
+            if interval is not retained_interval and any(item is interval for item in selected)
+        ]
+        if trimmable:
+            interval = trimmable[0]
+            others = [item for item in selected if item is not interval]
+
+            def shortened(steps):
+                # The start stays put: an interval may begin now to protect
+                # the reserve, and only its end is free to move.
+                return {"start": interval["start"], "end": interval["start"] + steps * TRIM_STEP_S}
+
+            def holds(projected):
+                return (violation(projected) is None
+                        and projected[-1]["predicted_soc"] >= target + TRIM_HEADROOM_PCT - SOC_EPSILON)
+
+            low, high = 1, (interval["end"] - interval["start"]) // TRIM_STEP_S
+            if high >= 1 and holds(project([*others, shortened(high)])):
+                while low < high:
+                    middle = (low + high) // 2
+                    if holds(project([*others, shortened(middle)])):
+                        high = middle
+                    else:
+                        low = middle + 1
+                if low * TRIM_STEP_S < interval["end"] - interval["start"]:
+                    selected = [*others, shortened(low)]
+                    trace = project(selected)
     selected.sort(key=lambda interval: interval["start"])
     minimum = min([soc, *(hour["predicted_soc"] for hour in trace)])
     scheduled_sunrise = trace[-1]["predicted_soc"]

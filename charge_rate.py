@@ -14,6 +14,11 @@ from typing import TypedDict
 DEFAULT_CHARGE_W = 1000
 LOOKBACK_DAYS = 14
 WINDOW_MINUTES = 6
+# Outlet supply: fewest charging minutes that make a fit, how many of the
+# newest ones to use, and how tightly their totals must agree.
+SUPPLY_MIN_MINUTES = 60
+SUPPLY_MAX_MINUTES = 1500
+SUPPLY_MAX_SPREAD = 0.10
 
 
 class ChargeSample(TypedDict):
@@ -134,4 +139,67 @@ def learn_charge_rate(
         )
         result["samples"] = stable
         break
+    return result
+
+
+class OutletSupply(TypedDict):
+    value: float | None
+    charge_cap_w: float | None
+    source: str
+    n_samples: int
+    note: str
+
+
+def learn_outlet_supply(
+    history: Sequence[Mapping[str, object]], *, now_ts: float
+) -> OutletSupply:
+    """Measure what the outlet delivers while the unit charges on bypass.
+
+    The grid then feeds the battery and the home together. When their sum
+    stays at one level whatever the home draws, that level is the supply the
+    unit takes from the outlet, and the battery only ever gets what the home
+    leaves of it. A sum that moves with the home load means the outlet is not
+    the limit, so nothing is learned. `charge_cap_w` is the most the battery
+    was seen to take, which bounds the plan where the home draws less than it
+    did in any measured minute.
+    """
+    result: OutletSupply = {"value": None, "charge_cap_w": None, "source": "none",
+                            "n_samples": 0, "note": "Not enough charging minutes measured yet"}
+    completed_until = int(now_ts // 60) * 60
+    minutes: list[tuple[float, float, float]] = []
+    for row in history:
+        timestamp = _number(row.get("ts"))
+        received_min = _number(row.get("soc_source_ts_min"))
+        received_max = _number(row.get("soc_source_ts_max"))
+        soc = _number(row.get("battery_pct"))
+        ac_power = _number(row.get("ac_input_w"))
+        home = _number(row.get("output_w"))
+        if (
+            timestamp is None or received_min is None or received_max is None
+            or soc is None or not 0 <= soc < 90
+            or ac_power is None or not 100 <= ac_power <= 5000
+            or home is None or not 0 <= home <= 20000
+            or row.get("measurement_suspect")
+            or timestamp % 60
+            or timestamp < now_ts - LOOKBACK_DAYS * 86400
+            or timestamp + 60 > completed_until
+            or not timestamp - 120 <= received_min <= received_max < timestamp + 60
+        ):
+            continue
+        minutes.append((timestamp, ac_power, home))
+    minutes = sorted(minutes)[-SUPPLY_MAX_MINUTES:]
+    result["n_samples"] = len(minutes)
+    if len(minutes) < SUPPLY_MIN_MINUTES:
+        return result
+    totals = sorted(ac + home for _, ac, home in minutes)
+    center = median(totals)
+    low, high = totals[len(totals) // 10], totals[len(totals) * 9 // 10]
+    if high - low > center * SUPPLY_MAX_SPREAD:
+        result["note"] = "Charging plus home use does not sit at one level, so the outlet is not the limit"
+        return result
+    charging = sorted(ac for _, ac, _ in minutes)
+    result.update(value=float(round(center)), source="fit",
+                  charge_cap_w=float(round(charging[len(charging) * 95 // 100])),
+                  note="Median of battery charging plus home use over recent charging minutes; "
+                       "updates automatically")
     return result

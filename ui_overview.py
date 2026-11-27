@@ -281,6 +281,8 @@ def build_overview(*, now: float, device_sn: str, decision: dict | None, snapsho
     hours = [(_num(r.get("ts"), 0.0), _num(r.get("duration_h"), 0.0), _num(r.get("output_w"), _num(r.get("load_w"), 0.0)))
              for r in snapshot.get("baseline_forecast") or []] if bypass else []
 
+    supply_w = _num((snapshot.get("outlet_supply") or {}).get("value")) if bypass else None
+
     def home_w(ts: float) -> float:
         return next((w for end, dur, w in hours if end - dur * HOUR_S <= ts < end), 0.0)
 
@@ -289,10 +291,20 @@ def build_overview(*, now: float, device_sn: str, decision: dict | None, snapsho
         cursor = max(block["start"], now)
         while cursor < block["end"]:
             step = min(block["end"], (int(cursor // 900) + 1) * 900) - cursor
-            kwh = (charge_w + home_w(cursor)) * step / HOUR_S / 1000.0
+            wall_w = charge_w + home_w(cursor)
+            kwh = (min(wall_w, supply_w) if supply_w else wall_w) * step / HOUR_S / 1000.0
             est_kwh += kwh
             est_cost += kwh * cost_module.rate_at(cost_plan, cursor, tz)
             cursor += step
+
+    sunrise_ts = _num((decision or {}).get("sunrise_ts"))
+    no_charge = _num((decision or {}).get("predicted_sunrise_soc_pct"))
+    # Lowest level on the way to sunrise if the plug stayed off.
+    no_charge_low = min(
+        [v for v in [soc, no_charge] if v is not None]
+        + [_num(r.get("predicted_soc"), 100.0) for r in snapshot.get("baseline_forecast") or []
+           if sunrise_ts and now < _num(r.get("ts"), 0.0) <= sunrise_ts],
+        default=None)
 
     return {
         "device_sn": device_sn,
@@ -317,7 +329,8 @@ def build_overview(*, now: float, device_sn: str, decision: dict | None, snapsho
             "sunrise_ts": (decision or {}).get("sunrise_ts"),
             "sunrise_soc_pct": _num(proj.get("scheduled_sunrise_soc_pct")),
             "min_soc_pct": _num(proj.get("scheduled_min_soc_pct")),
-            "no_charge_sunrise_soc_pct": _num((decision or {}).get("predicted_sunrise_soc_pct")),
+            "no_charge_sunrise_soc_pct": no_charge,
+            "no_charge_min_soc_pct": no_charge_low,
             "feasible": proj.get("plan_feasible"),
             "warnings": list(proj.get("warnings") or []),
         },
@@ -337,5 +350,6 @@ def build_overview(*, now: float, device_sn: str, decision: dict | None, snapsho
         "activity": activity(decision_rows, tz),
         "config": {key: config.get(key) for key in (
             "target_sunrise_soc_pct", "reserve_soc_pct", "kasa_device_host",
-            "ac_supply_limit_w", "lg_interlock_enabled", "max_charge_w")},
+            "ac_supply_limit_w", "lg_interlock_enabled", "max_charge_w")}
+        | {"measured_supply_w": _num((snapshot.get("outlet_supply") or {}).get("value"))},
     }
