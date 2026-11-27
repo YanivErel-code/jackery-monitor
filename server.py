@@ -2109,7 +2109,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
     model_keys = ("solar_coefficient", "solar_model", "solar_diffuse_ratio", "fit_samples", "diurnal_shape", "solar_intraday_calibration",
                   "charge_efficiency",
                   "ac_input_excludes_load", "ac_supply_limit_w",
-                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w",
+                  "charge_efficiency_source", "parasitic_w", "effective_parasitic_w", "night_standby_w",
                   "pack_baseline_w", "inverter_overhead_pct", "inverter_overhead_source",
                   "solar_cap_w", "charge_ceiling_pct", "readiness", "drain_calibration",
                   "pack_baseline_applied_w", "load_nowcast")

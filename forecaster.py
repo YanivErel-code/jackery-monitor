@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime
@@ -1073,6 +1074,7 @@ def _clean_discharge_runs(
     capacity_wh: int,
     *,
     require_system_soc: bool = False,
+    min_start_soc_pct: float | None = None,
 ) -> list[tuple[float, float, float]]:
     """Walk consecutive clean-discharge buckets (no solar, no AC charge,
     SOC available) and emit one `(avg_load_w, observed_drain_w, dt_h)`
@@ -1155,7 +1157,7 @@ def _clean_discharge_runs(
         soc_a, soc_b = _row_soc(a), _row_soc(b)
         if soc_a is None or soc_b is None:
             continue
-        if soc_a < MIN_RUN_START_SOC_PCT:
+        if soc_a < (MIN_RUN_START_SOC_PCT if min_start_soc_pct is None else min_start_soc_pct):
             continue
         soc_drop = soc_a - soc_b
         min_pp = (MIN_RUN_SOC_DROP_PCT_SYSTEM
@@ -1172,6 +1174,51 @@ def _clean_discharge_runs(
             continue
         out.append((avg_load_w, observed_drain_w, dt_h))
     return out
+
+
+# Night standby learned from the device's own recent nights. The fixed
+# prior (main-unit parasitic plus 60 W per pack) sat near the 90th
+# percentile of what 131 clean night runs showed on the 5-pack rig from
+# 2026-04 to 2026-11 (median 183 W, 75th percentile 249 W, prior 300-350 W),
+# and `fit_drain_model` cannot correct it below 85% SOC, where the rig
+# spends the whole winter. The upper quartile keeps the forecast on the
+# cautious side of a drain that varies from night to night.
+NIGHT_STANDBY_QUANTILE: float | None = 0.75
+NIGHT_STANDBY_MIN_RUNS = 5
+NIGHT_STANDBY_MIN_RUN_HOURS = 4.0
+NIGHT_STANDBY_MIN_START_SOC_PCT = 20.0
+
+
+def fit_night_standby_w(
+    energy_history: list[dict[str, Any]],
+    capacity_wh: int,
+    *,
+    overhead_pct: float,
+) -> tuple[float | None, int]:
+    """Standby drain beyond metered output plus overhead, from clean night runs.
+
+    Returns ``(watts, n_runs)``; watts is ``None`` with too few runs, so the
+    caller keeps its prior. The level is measured against the same SOC
+    reading the forecast is judged by, at whatever SOC the rig actually
+    operates, which is why it does not use the 85% floor of the physical fit.
+    """
+    if NIGHT_STANDBY_QUANTILE is None or capacity_wh <= 0:
+        return None, 0
+    rows = sorted((r for r in (energy_history or []) if r.get("ts") is not None),
+                  key=lambda r: r["ts"])
+    runs = _clean_discharge_runs(
+        rows, capacity_wh,
+        require_system_soc=any(_row_has_system_soc(r) for r in rows),
+        min_start_soc_pct=NIGHT_STANDBY_MIN_START_SOC_PCT,
+    )
+    implied = sorted(
+        drain_w - load_w * (1.0 + overhead_pct)
+        for load_w, drain_w, hours in runs if hours >= NIGHT_STANDBY_MIN_RUN_HOURS
+    )
+    if len(implied) < NIGHT_STANDBY_MIN_RUNS:
+        return None, len(implied)
+    value = implied[min(len(implied) - 1, math.ceil((len(implied) - 1) * NIGHT_STANDBY_QUANTILE))]
+    return max(0.0, min(1000.0, value)), len(implied)
 
 
 def _length_weighted_median(
@@ -2219,6 +2266,10 @@ def build_forecast(
     # get pack_baseline=0 and behave exactly as before.
     pack_baseline_w = per_pack_baseline_w(pack_count)
     effective_parasitic_w = parasitic_w + pack_baseline_w
+    night_standby_w, night_standby_n = fit_night_standby_w(
+        energy_history, capacity_wh, overhead_pct=overhead_pct)
+    if night_standby_w is not None:
+        effective_parasitic_w = night_standby_w
     prior_effective_parasitic_w = effective_parasitic_w
     drain_calibration = fit_system_residual(
         energy_history, capacity_wh, pack_count=pack_count, overhead_pct=overhead_pct,
@@ -2384,6 +2435,9 @@ def build_forecast(
         "pack_baseline_w": round(pack_baseline_w, 1),
         "pack_count": int(pack_count),
         "effective_parasitic_w": round(effective_parasitic_w, 1),
+        # Learned from recent clean night runs; None keeps the fixed prior.
+        "night_standby_w": round(night_standby_w, 1) if night_standby_w is not None else None,
+        "night_standby_n_runs": night_standby_n,
         "drain_calibration": drain_calibration or {"source": "legacy_priors", "n_runs": 0},
         "pack_baseline_applied_w": round(pack_baseline_w, 1) if any(
             hour["drain_baseline_applied_w"] == round(prior_effective_parasitic_w, 1)
