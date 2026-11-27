@@ -2199,3 +2199,73 @@ def test_simulator_applies_the_correction_as_stored_power():
     hour = [{"ts": 3600, "duration_h": 1.0, "solar_w": 0.0, "load_w": 800.0, "model_correction_w": 100.0}]
     trace = forecaster.simulate_soc(50.0, 10000, hour, charge_efficiency=0.9, round_soc=False)
     assert trace[0]["predicted_soc"] == pytest.approx(50.0 - 700 / 100)
+
+
+HOME_BASE = 1_800_000_000 // 86400 * 86400      # a UTC midnight
+
+
+def _home_history(days, *, block_days=(), block_hours=(10, 11, 12), plug_on_hours=()):
+    """Hourly rows: 500 W around the clock, plus a 2 kW block on `block_days`."""
+    rows = []
+    for day in range(days):
+        for hour in range(24):
+            heavy = day in block_days and hour in block_hours
+            rows.append({"ts": HOME_BASE + day * 86400 + hour * 3600,
+                         "output_w": 2500.0 if heavy else 500.0,
+                         "solar_charge_plug_on_frac": 1.0 if hour in plug_on_hours else 0.0})
+    return rows
+
+
+def _home(history, *, day, hour, **kwargs):
+    return forecaster.fit_home_use(history, now_ts=HOME_BASE + day * 86400 + hour * 3600, **kwargs)
+
+
+def test_home_use_needs_three_weeks_of_days():
+    assert _home(_home_history(20), day=20, hour=7) is None
+    assert _home(_home_history(28), day=28, hour=7)["days"] == 28
+
+
+def test_home_use_carries_the_expected_share_of_a_block_not_all_or_nothing():
+    # A block on every other day: tomorrow morning carries about half of it.
+    history = _home_history(28, block_days=range(0, 28, 2))
+    fit = _home(history, day=28, hour=7)
+    at_eleven = forecaster.expected_home_output_w(fit, HOME_BASE + 28 * 86400 + 11 * 3600)
+    assert at_eleven == pytest.approx(1500)
+    assert forecaster.expected_home_output_w(fit, HOME_BASE + 28 * 86400 + 20 * 3600) == pytest.approx(500)
+
+
+def test_home_use_leans_on_the_same_weekday():
+    weekly = _home_history(56, block_days=range(0, 56, 7))
+    fit = _home(weekly, day=56, hour=7)
+    block_day = forecaster.expected_home_output_w(fit, HOME_BASE + 56 * 86400 + 11 * 3600)
+    other_day = forecaster.expected_home_output_w(fit, HOME_BASE + 57 * 86400 + 11 * 3600)
+    assert block_day > 1500 > 1000 > other_day
+
+
+def test_a_quiet_morning_rules_out_most_of_the_block():
+    history = _home_history(28, block_days=range(0, 28, 2)) + [
+        {"ts": HOME_BASE + 28 * 86400 + hour * 3600, "output_w": 500.0} for hour in range(11)]
+    fit = _home(history, day=28, hour=11)
+    assert not fit["started_today"]
+    assert forecaster.expected_home_output_w(fit, HOME_BASE + 28 * 86400 + 12 * 3600) == pytest.approx(500)
+
+
+def test_a_block_that_has_started_is_carried_through_its_usual_hours():
+    history = _home_history(28, block_days=range(0, 28, 2)) + [
+        {"ts": HOME_BASE + 28 * 86400 + hour * 3600, "output_w": 2500.0 if hour == 10 else 500.0}
+        for hour in range(11)]
+    fit = _home(history, day=28, hour=11)
+    assert fit["started_today"]
+    assert forecaster.expected_home_output_w(fit, HOME_BASE + 28 * 86400 + 12 * 3600) > 2000
+    assert forecaster.expected_home_output_w(fit, HOME_BASE + 28 * 86400 + 15 * 3600) == pytest.approx(500)
+    live = _home(_home_history(28, block_days=range(0, 28, 2)), day=28, hour=10, current_output_w=2400.0)
+    assert live["started_today"]
+
+
+def test_plug_on_with_an_idle_car_does_not_erase_home_use():
+    history = _home_history(28, plug_on_hours=range(0, 6))
+    fit = _home(history, day=28, hour=7, car_load_w=1300.0)
+    assert forecaster.expected_home_output_w(fit, HOME_BASE + 28 * 86400 + 3 * 3600) == pytest.approx(500)
+    charging = _home_history(28, block_days=range(28), block_hours=(1, 2), plug_on_hours=(1, 2))
+    fit = _home(charging, day=28, hour=7, car_load_w=1300.0)
+    assert forecaster.expected_home_output_w(fit, HOME_BASE + 29 * 86400 + 3600) == pytest.approx(2500 - 1300)
