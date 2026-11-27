@@ -143,3 +143,62 @@ async def test_serves_last_good_db_forecast_when_api_down(monkeypatch):
     assert "error" not in out
     fut = [h for h in out["hourly"] if h["ts"] >= now]
     assert len(fut) >= 100                     # served the stored 5-day curve
+
+
+class _ScriptedClient:
+    """Answers each request from a function of its params and records them."""
+    def __init__(self, answer, calls):
+        self._answer, self._calls = answer, calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, params=None):
+        self._calls.append(dict(params or {}))
+        result = self._answer(params or {})
+        if isinstance(result, Exception):
+            raise result
+        return httpx.Response(200, json=result, request=httpx.Request("GET", url))
+
+
+def _payload(ghi):
+    return {"hourly": {"time": [3600 * (i + 1) for i in range(len(ghi))], "shortwave_radiation": ghi,
+                       "cloud_cover": [0] * len(ghi), "direct_radiation": ghi,
+                       "diffuse_radiation": [0] * len(ghi)}}
+
+
+def _scripted(monkeypatch, answer):
+    calls = []
+    monkeypatch.setattr(weather_client.httpx, "AsyncClient", lambda *a, **k: _ScriptedClient(answer, calls))
+    monkeypatch.setattr(weather_client, "WEATHER_MODEL", "ecmwf_ifs025")
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_asks_for_the_preferred_weather_model(monkeypatch):
+    calls = _scripted(monkeypatch, lambda params: _payload([100.0, 200.0]))
+    out = await weather_client.fetch_irradiance(37.0, -122.0)
+    assert [call.get("models") for call in calls] == ["ecmwf_ifs025"]
+    assert out["model"] == "ecmwf_ifs025"
+    assert [row["ghi_w_m2"] for row in out["hourly"]] == [100.0, 200.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preferred", [_payload([100.0, None]), httpx.ConnectTimeout("")])
+async def test_falls_back_to_the_default_model_on_gaps_or_failure(monkeypatch, preferred):
+    calls = _scripted(monkeypatch, lambda params: preferred if "models" in params else _payload([50.0, 60.0]))
+    out = await weather_client.fetch_irradiance(37.0, -122.0)
+    assert [call.get("models") for call in calls] == ["ecmwf_ifs025", None]
+    assert out["model"] == "best_match"
+    assert [row["ghi_w_m2"] for row in out["hourly"]] == [50.0, 60.0]
+
+
+@pytest.mark.asyncio
+async def test_empty_setting_uses_the_default_model_only(monkeypatch):
+    calls = _scripted(monkeypatch, lambda params: _payload([50.0]))
+    monkeypatch.setattr(weather_client, "WEATHER_MODEL", "")
+    await weather_client.fetch_irradiance(37.0, -122.0)
+    assert [call.get("models") for call in calls] == [None]

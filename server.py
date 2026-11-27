@@ -2142,7 +2142,7 @@ def _smart_charge_input_snapshot(inputs: dict, cfg: dict, cost_plan: dict,
         "cost_plan": {"type": cost_plan.get("type"), "rate_per_kwh": cost_plan.get("rate_per_kwh"),
                       "tou_rates": [{k: rate.get(k) for k in ("start_hour", "end_hour", "rate", "months")
                                     if k in rate} for rate in cost_plan.get("tou_rates") or []]},
-        "weather": {"fetched_at": weather.get("fetched_at"),
+        "weather": {"fetched_at": weather.get("fetched_at"), "model": weather.get("model"),
                     "stale": bool(weather.get("stale")),
                     "utc_offset_seconds": weather.get("utc_offset_seconds"),
                     "hourly": [{k: h.get(k) for k in weather_keys}
