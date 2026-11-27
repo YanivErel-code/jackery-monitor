@@ -225,3 +225,19 @@ def test_diversion_lookahead_cannot_spend_energy_that_a_charge_ceiling_curtails(
         extra_load_floor_pct=25,
     )
     assert all(hour["extra_load_w_applied"] == 0 for hour in result)
+
+
+def test_night_correction_replaces_the_soc_bands_instead_of_stacking_on_them():
+    history = clean_history()
+    for row in history:
+        row.update(
+            output_w=500, output_wh=500, solar_wh=0, ac_input_wh=0, battery_pct=60, system_soc=60
+        )
+    now = BASE + 5 * 86400
+    weather = [{"ts": now + hour * 3600, "ghi_w_m2": 0} for hour in range(1, 9)]
+    result = forecaster.build_forecast(history, weather, 60, CAPACITY, now_ts=now, pack_count=5)
+    assert result["model_correction"]["night_w"] is not None
+    assert result["drain_calibration"]["soc_bands"] == []
+    assert result["drain_calibration"]["superseded_by"] == "model_correction"
+    applied = {hour["drain_baseline_applied_w"] for hour in result["forecast"]}
+    assert len(applied) == 1
