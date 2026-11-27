@@ -253,6 +253,17 @@
     $('bat-low').textContent = pct(o.plan.min_soc_pct);
     $('bat-sunrise').textContent = pct(o.plan.sunrise_soc_pct);
     if (o.plan.sunrise_ts) $('bat-sunrise-label').textContent = 'At sunrise, ' + clock(o.plan.sunrise_ts);
+    // The two rows above already include the planned grid charge. Say so,
+    // and show where the battery would be at sunrise without it.
+    const planned = o.plan.minutes > 0 && num(o.plan.no_charge_sunrise_soc_pct) != null;
+    const b0 = o.plan.blocks[0];
+    $('bat-nocharge-row').hidden = !planned;
+    if (planned) {
+      $('bat-nocharge-label').textContent = o.plan.blocks.length === 1 && !o.plan.charging_now
+        ? 'Without the ' + clock(b0.start) + ' – ' + clock(b0.end) + ' charge'
+        : 'Without the planned charging';
+      $('bat-nocharge').textContent = pct(o.plan.no_charge_sunrise_soc_pct);
+    }
 
     const g = o.grid_today;
     $('cost-total').textContent = usd(g.cost);
