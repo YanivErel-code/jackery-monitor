@@ -2272,6 +2272,20 @@ def _smart_charge_min_block_until(device_sn: str, *, now: float, sunrise: float 
     return until if until > now else None
 
 
+def _smart_charge_run_active(device_sn: str, *, now: float, sunrise: float | None,
+                             config: dict) -> bool:
+    """Whether the latest executed command, for this sunrise cycle, left the plug on."""
+    if not sunrise or config.get("mode") != "active" or not config.get("kasa_device_host"):
+        return False
+    with state.energy._conn() as connection:
+        latest = connection.execute(
+            """SELECT action, sunrise_ts FROM smart_charge_decisions
+               WHERE device_sn=? AND decided_at>=? AND decided_at<=?
+               AND mode='active' AND executed=1 AND action IN ('on','off')
+               ORDER BY decided_at DESC LIMIT 1""", (device_sn, now - 600, now)).fetchone()
+    return bool(latest and latest["action"] == "on" and latest["sunrise_ts"] == sunrise)
+
+
 async def _smart_charge_evaluate(record: bool = True,
                                  device_sn: str | None = None):
     """Pull the inputs the smart-charge module needs, compute a Plan, and
@@ -2410,6 +2424,8 @@ async def _smart_charge_evaluate(record: bool = True,
             device_sn, now=now, sunrise=sunrise, config=cfg, capacity_wh=capacity)
         min_block_until_ts = _smart_charge_min_block_until(
             device_sn, now=now, sunrise=sunrise, config=cfg)
+        charging_now = _smart_charge_run_active(
+            device_sn, now=now, sunrise=sunrise, config=cfg)
     except Exception as error:
         log.warning("smart_charge duration history unavailable; skipping control: %s", error)
         return smart_charge.Plan(action="skip", reason="charging duration history unavailable",
@@ -2437,6 +2453,7 @@ async def _smart_charge_evaluate(record: bool = True,
         elapsed_on_seconds=elapsed_on_seconds,
         committed_until_ts=committed_until_ts,
         min_block_until_ts=min_block_until_ts,
+        charging_now=charging_now,
     )
     if plan.trajectory_validated is False:
         plan.action = "skip"

@@ -1,4 +1,5 @@
 from datetime import datetime
+from itertools import pairwise
 
 import pytest
 
@@ -172,3 +173,49 @@ def test_overnight_commitment_stays_bounded_and_does_not_slide_forward():
 def test_policy_version_is_saved_with_the_plan():
     result = build_schedule(**arguments())
     assert result["schedule_policy"] == "overnight_first_v1"
+
+
+def contiguous(intervals):
+    return all(later["start"] == earlier["end"] for earlier, later in pairwise(intervals))
+
+
+def test_overnight_charging_is_one_run_from_now_not_a_gap_then_a_later_hour():
+    inputs = arguments(now="2026-10-25T00:20:00-07:00", soc=36)
+    result = build_schedule(**inputs)
+    intervals = result["planned_intervals"]
+    assert result["action"] == "on"
+    assert intervals[0]["start"] == inputs["now"]
+    assert len(intervals) > 1 and contiguous(intervals)
+    assert result["scheduled_sunrise_soc_pct"] < 32
+
+
+def test_idle_plug_ignores_a_forecast_dip_just_under_the_target():
+    inputs = arguments(now="2026-10-25T00:20:00-07:00", soc=42.8)
+    result = build_schedule(**inputs)
+    assert 29 <= result["scheduled_sunrise_soc_pct"] < 30
+    assert result["action"] == "off"
+    assert not result["planned_intervals"]
+    assert result["plan_feasible"] and not result["warnings"]
+    assert build_schedule(**{**inputs, "current_soc_pct": 41.8})["action"] == "on"
+
+
+def test_running_charge_continues_to_the_headroom_above_the_target():
+    inputs = arguments(now="2026-10-25T00:20:00-07:00", soc=43.8)
+    assert build_schedule(**inputs)["action"] == "off"
+    result = build_schedule(**inputs, charging_now=True)
+    assert result["action"] == "on"
+    assert result["scheduled_sunrise_soc_pct"] >= 31
+    assert build_schedule(**{**inputs, "current_soc_pct": 44.5}, charging_now=True)["action"] == "off"
+
+
+def test_target_shortfall_is_bought_beside_the_overnight_block_not_in_the_morning():
+    inputs = arguments(now="2026-10-24T08:30:00-07:00", soc=60, target=95)
+    inputs["budget_seconds"] = 24 * 3600
+    inputs["cost_plan"]["tou_rates"].insert(0, {"start_hour": 7, "end_hour": 15, "rate": 0.10})
+    result = build_schedule(**inputs)
+    intervals = result["planned_intervals"]
+    assert result["action"] == "off"
+    assert midnight(inputs) - 2 * 3600 <= intervals[0]["start"] < midnight(inputs)
+    assert contiguous(intervals)
+    assert result["scheduled_sunrise_soc_pct"] >= 95
+    assert result["plan_feasible"]
