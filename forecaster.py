@@ -2474,12 +2474,24 @@ def build_forecast(
         forecast_hours[-1]["load_without_baseline_w"] = round(load_w - prior_effective_parasitic_w, 1)
         forecast_hours[-1]["drain_baseline_prior_w"] = prior_effective_parasitic_w
 
-    model_correction = fit_model_correction(
-        energy_history, capacity_wh, charge_efficiency=charge_eff, overhead_pct=overhead_pct,
-        standby_w=prior_effective_parasitic_w,
-        drain_calibration_bands=drain_calibration["soc_bands"] if drain_calibration else None,
-        soc_ceiling_pct=soc_ceiling,
-    )
+    # A night correction is measured against the plain standby level and
+    # replaces the SOC-band calibration. Layering the two left hours outside
+    # the bands under-drained: the correction was learned on evenings inside
+    # a 345 W band and then applied on top of the 228 W prior below it
+    # (2026-11-27). Without enough night runs the bands stay in force.
+    correction_inputs = {"charge_efficiency": charge_eff, "overhead_pct": overhead_pct,
+                         "standby_w": prior_effective_parasitic_w, "soc_ceiling_pct": soc_ceiling}
+    model_correction = fit_model_correction(energy_history, capacity_wh, **correction_inputs)
+    if model_correction["night_w"] is not None:
+        if drain_calibration:
+            drain_calibration = {**drain_calibration, "soc_bands": [],
+                                 "superseded_by": "model_correction"}
+        # What dark hours are charged in total, for the diagnostics.
+        effective_parasitic_w = max(0.0, prior_effective_parasitic_w - model_correction["night_w"])
+    elif drain_calibration:
+        model_correction = fit_model_correction(
+            energy_history, capacity_wh, **correction_inputs,
+            drain_calibration_bands=drain_calibration["soc_bands"])
     for hour in forecast_hours:
         hour["model_correction_w"] = model_correction[
             f"{_correction_regime(hour['solar_w'])}_w"] or 0.0
