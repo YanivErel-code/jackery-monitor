@@ -20,6 +20,11 @@ MIN_CHARGE_BLOCK_S = 45 * 60
 # target, so a small forecast drift does not restart charging minutes later.
 TRIM_STEP_S = 300
 TRIM_HEADROOM_PCT = 1.0
+# An idle plug stays off while the forecast sits this close under the sunrise
+# target, and a running charge carries on to the trim headroom above it.
+# Together they stop a forecast wobbling around the target from switching the
+# plug (a six-minute run at 04:05 on 2026-11-27 for a 0.2-point dip).
+RESTART_DEADBAND_PCT = 1.0
 
 
 def _finite(value, *, minimum=None, maximum=None):
@@ -81,6 +86,7 @@ def build_schedule(
     margin_seconds,
     committed_until_ts=None,
     min_block_until_ts=None,
+    charging_now=False,
 ):
     """Prefer earliest low-rate overnight charging while preserving a valid SOC path."""
     inputs = {
@@ -100,6 +106,7 @@ def build_schedule(
         "margin_seconds": margin_seconds,
         "committed_until_ts": committed_until_ts,
         "min_block_until_ts": min_block_until_ts,
+        "charging_now": charging_now,
     }
     result = _build_schedule(**inputs, overnight_first=True)
     preference_relaxed = False
@@ -147,6 +154,7 @@ def _build_schedule(
     margin_seconds,
     committed_until_ts,
     min_block_until_ts,
+    charging_now,
     overnight_first,
 ):
     """Repair reserve and sunrise SOC before applying the requested slot preference.
@@ -252,7 +260,16 @@ def _build_schedule(
                 return hour["ts"]
         return None
 
+    # `accept` is the sunrise level the plan must reach to count as feasible;
+    # `stop_at` is where it stops adding (and keeps) charging.
+    accept = stop_at = target
+    if charging_now:
+        stop_at = target + TRIM_HEADROOM_PCT
+    elif (violation(baseline) is None
+          and baseline[-1]["predicted_soc"] >= target - RESTART_DEADBAND_PCT - SOC_EPSILON):
+        accept = stop_at = min(target, baseline[-1]["predicted_soc"])
     selected = []
+    end_anchored = []
     unused = list(range(len(slots)))
     remaining = max(0, budget_seconds)
     trace = baseline
@@ -270,7 +287,7 @@ def _build_schedule(
     if committed_until_ts is not None:
         baseline_covered = (
             min(soc, *(hour["predicted_soc"] for hour in baseline)) >= reserve - SOC_EPSILON
-            and baseline[-1]["predicted_soc"] >= target - SOC_EPSILON
+            and baseline[-1]["predicted_soc"] >= accept - SOC_EPSILON
         )
         if (
             committed_until_ts > now
@@ -293,7 +310,7 @@ def _build_schedule(
                     break
     while unused and remaining >= 1:
         breach = violation(trace)
-        if breach is None and trace[-1]["predicted_soc"] >= target - SOC_EPSILON:
+        if breach is None and trace[-1]["predicted_soc"] >= stop_at - SOC_EPSILON:
             break
         metric_time = breach if breach is not None else sunrise
         previous = value_at(trace, metric_time)
@@ -303,11 +320,9 @@ def _build_schedule(
             if slot["start"] >= metric_time:
                 continue
             duration = min(slot["end"] - slot["start"], int(remaining))
-            start = (
-                slot["start"]
-                if breach is not None or (overnight_first and slot["start"] >= overnight_start)
-                else slot["end"] - duration
-            )
+            from_start = breach is not None or (
+                overnight_first and slot["start"] >= overnight_start)
+            start = slot["start"] if from_start else slot["end"] - duration
             interval = {"start": start, "end": start + duration}
             projected = project([*selected, interval])
             gain = value_at(projected, metric_time) - previous
@@ -320,19 +335,28 @@ def _build_schedule(
             margin = slot["start"] >= sunrise - margin_seconds and breach is None
             if overnight_first and slot["start"] >= overnight_start:
                 priority = (0, slot["rate"], slot["start"], round(price / gain, 9))
+            elif overnight_first and breach is None:
+                # Energy the overnight hours cannot supply is bought as late
+                # as possible, so it joins the overnight block and is still
+                # open to revision. A dawn forecast of the next sunrise runs
+                # far too low (9% forecast, about 40% real on 2026-11-26) and
+                # used to buy a morning top-up that was never needed.
+                priority = (1, -slot["start"])
             elif overnight_first:
                 priority = (1, round(price / gain, 9), margin, -slot["start"])
             else:
                 priority = (round(price / gain, 9), margin, -slot["start"])
-            choices.append((priority, index, interval, projected))
+            choices.append((priority, index, interval, projected, from_start))
         if not choices:
             break
-        _, index, interval, trace = min(choices, key=lambda choice: choice[0])
+        _, index, interval, trace, from_start = min(choices, key=lambda choice: choice[0])
         selected.append(interval)
+        if not from_start:
+            end_anchored.append(interval)
         unused.remove(index)
         remaining -= interval["end"] - interval["start"]
 
-    feasible = violation(trace) is None and trace[-1]["predicted_soc"] >= target - SOC_EPSILON
+    feasible = violation(trace) is None and trace[-1]["predicted_soc"] >= accept - SOC_EPSILON
     if feasible:
         expensive_first = sorted(
             selected,
@@ -345,16 +369,27 @@ def _build_schedule(
             ),
             reverse=True,
         )
+        # Overnight charging is one run: once a later interval has to stay,
+        # the earlier ones at that rate stay too. Dropping them instead left
+        # a gap after "now" on every replan, which switched the plug off
+        # mid-charge and back on minutes later (five runs on 2026-11-25).
+        kept_rates = set()
         for interval in expensive_first:
             if interval is retained_interval:
+                continue
+            overnight = overnight_first and interval["start"] >= overnight_start
+            rate = rate_at(cost_plan, interval["start"], tz_offset_seconds)
+            if overnight and rate in kept_rates:
                 continue
             candidate = [item for item in selected if item is not interval]
             projected = project(candidate)
             if (
                 violation(projected) is None
-                and projected[-1]["predicted_soc"] >= target - SOC_EPSILON
+                and projected[-1]["predicted_soc"] >= min(stop_at, trace[-1]["predicted_soc"]) - SOC_EPSILON
             ):
                 selected, trace = candidate, projected
+            elif overnight:
+                kept_rates.add(rate)
         # Whole slots usually buy more than the target needs. Shorten the
         # interval the plan values least until the path only just holds, so
         # the battery is not charged past the target.
@@ -366,9 +401,15 @@ def _build_schedule(
             interval = trimmable[0]
             others = [item for item in selected if item is not interval]
 
+            from_end = interval["start"] > now and any(item is interval for item in end_anchored)
+
             def shortened(steps):
-                # The start stays put: an interval may begin now to protect
-                # the reserve, and only its end is free to move.
+                # An interval placed against the end of its slot keeps that
+                # end, so it still runs into the charging that follows it.
+                # Otherwise the start stays put: the interval may begin now
+                # to protect the reserve, and only its end is free to move.
+                if from_end:
+                    return {"start": interval["end"] - steps * TRIM_STEP_S, "end": interval["end"]}
                 return {"start": interval["start"], "end": interval["start"] + steps * TRIM_STEP_S}
 
             def holds(projected):
@@ -394,7 +435,7 @@ def _build_schedule(
         warnings.append(
             f"Reserve {reserve:g}% cannot be maintained by this plan (projected minimum {minimum:.1f}%)"
         )
-    if scheduled_sunrise < target - SOC_EPSILON:
+    if scheduled_sunrise < accept - SOC_EPSILON:
         warnings.append(
             f"Sunrise target {target:g}% is not achievable by this plan (projected {scheduled_sunrise:.1f}%); check charging power, duration budget and holds"
         )
