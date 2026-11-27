@@ -2115,3 +2115,38 @@ def test_diverted_load_still_reduces_a_surplus_hour():
     trace = forecaster.simulate_soc(50.0, 10000, _one_hour(2000.0, output_w=500.0),
                                     charge_efficiency=0.9, extra_load_w=400.0, round_soc=False)
     assert trace[0]["predicted_soc"] == pytest.approx(50.0 + 1100 * 0.9 / 100)
+
+
+def _night_history(standby_by_night, *, load_w=500.0, capacity_wh=30000, start_soc=60.0):
+    """Six clean discharge hours per night, each with its own standby drain."""
+    rows = []
+    for night, standby_w in enumerate(standby_by_night):
+        soc = start_soc
+        for hour in range(7):
+            rows.append({"ts": night * 86400 + hour * 3600, "system_soc": soc, "battery_pct": soc,
+                         "output_wh": load_w, "solar_wh": 0, "ac_input_wh": 0})
+            soc -= (load_w * 1.1 + standby_w) / capacity_wh * 100
+        rows.append({"ts": night * 86400 + 12 * 3600, "system_soc": soc, "battery_pct": soc,
+                     "output_wh": 0, "solar_wh": 900, "ac_input_wh": 0})
+    return rows
+
+
+def test_night_standby_is_the_upper_quartile_of_recent_nights_at_any_soc():
+    history = _night_history([100, 150, 200, 250, 300])
+    watts, runs = forecaster.fit_night_standby_w(history, 30000, overhead_pct=0.1)
+    assert runs == 5
+    assert watts == pytest.approx(250, abs=1)
+
+
+def test_night_standby_needs_five_nights_before_it_replaces_the_prior():
+    watts, runs = forecaster.fit_night_standby_w(
+        _night_history([100, 150, 200, 250]), 30000, overhead_pct=0.1)
+    assert (watts, runs) == (None, 4)
+
+
+def test_night_standby_ignores_runs_with_charging_and_never_goes_negative():
+    history = _night_history([-400] * 5)
+    assert forecaster.fit_night_standby_w(history, 30000, overhead_pct=0.1)[0] == 0.0
+    for row in history:
+        row["ac_input_wh"] = 500
+    assert forecaster.fit_night_standby_w(history, 30000, overhead_pct=0.1) == (None, 0)
