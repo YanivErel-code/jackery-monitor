@@ -12,6 +12,13 @@ commanded intervals showed AC input in the first or second bucket), so a
 three-minute grace period is long enough to avoid false alarms and short
 enough to catch the failure on the next five-minute controller tick.
 
+The exception is weak light at dawn and dusk. With the panels producing a
+trickle the Jackery often holds AC charging off until solar picks up or
+stops: of 132 commanded runs to 2026-11-27, 123 started within 75 s, and six
+of the nine slow or failed ones began with 2-30 W of solar (delays of 17, 26,
+34 and 71 minutes). Nothing is broken in that state, so the verdict stays
+"pending" while the panels are in that band, for up to WEAK_SOLAR_GRACE_S.
+
 Pure functions only; callers fetch rows and decide what to do with the
 verdict.
 """
@@ -25,6 +32,9 @@ RECENT_WINDOW_S = 600    # "still charging?" looks at the last 10 minutes
 MIN_AC_W = 100           # below this the charger is not meaningfully running
 MAX_TELEMETRY_AGE_S = 180
 FULL_SOC_PCT = 99.0      # a full battery legitimately stops drawing AC
+WEAK_SOLAR_MIN_W = 1     # panels awake ...
+WEAK_SOLAR_MAX_W = 150   # ... but not yet producing in earnest
+WEAK_SOLAR_GRACE_S = 90 * 60
 
 
 def commanded_on_since(decisions: Iterable[Mapping]) -> float | None:
@@ -69,7 +79,8 @@ def assess(*, on_since: float | None, now: float, buckets: Iterable[Mapping],
 
     status:
       idle                   no open ON command
-      pending                ON for less than ``grace_s``
+      pending                ON for less than ``grace_s``, or the panels are
+                             in weak light (``waiting_on`` = "weak_sunlight")
       charging               AC input >= min_ac_w within the recent window
       full                   no AC input but SOC is at/above FULL_SOC_PCT
       telemetry_unavailable  cannot judge: no fresh device telemetry
@@ -78,7 +89,7 @@ def assess(*, on_since: float | None, now: float, buckets: Iterable[Mapping],
     result = {
         "status": "idle", "on_since": on_since, "checked_at": now,
         "on_for_s": None, "last_ac_ts": None, "max_recent_ac_w": None,
-        "newest_source_ts": None, "minutes_without_ac": None,
+        "newest_source_ts": None, "minutes_without_ac": None, "waiting_on": None,
     }
     if on_since is None:
         return result
@@ -107,6 +118,11 @@ def assess(*, on_since: float | None, now: float, buckets: Iterable[Mapping],
         return result
     if soc_pct is not None and soc_pct >= FULL_SOC_PCT:
         result["status"] = "full"
+        return result
+    recent_solar = max((float(row.get("last_solar_w") or 0) for row in rows
+                        if float(row["bucket"]) + 60 > window_start), default=0.0)
+    if WEAK_SOLAR_MIN_W <= recent_solar <= WEAK_SOLAR_MAX_W and on_for < WEAK_SOLAR_GRACE_S:
+        result.update(status="pending", waiting_on="weak_sunlight")
         return result
     reference = last_ac_ts + 60 if last_ac_ts is not None else on_since
     result["minutes_without_ac"] = round(max(0.0, now - reference) / 60, 1)

@@ -305,6 +305,7 @@
     const v = o.verification.status;
     if (v === 'not_charging') checks.push(['alert', 'Plug is on but the battery is not charging', 'Check the charger cable and the garage plug.']);
     else if (v === 'charging') checks.push(['ok', 'Charging confirmed', 'The battery is taking power while the plug is on.']);
+    else if (v === 'pending' && o.verification.waiting_on === 'weak_sunlight') checks.push(['warn', 'Plug is on, waiting for the battery to start', 'In weak morning or evening light the battery can take a while to accept power. Nothing needs fixing.']);
     else checks.push(['ok', 'Charge check is ready', 'Each charge is confirmed by watching the battery take power.']);
     const reserve = num(o.battery.reserve_pct), low = num(p.min_soc_pct);
     // Same test as the headline: the reserve is only at risk when the

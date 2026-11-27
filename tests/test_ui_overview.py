@@ -204,3 +204,17 @@ def test_missing_decision_still_returns_a_page():
     assert out["headline"]["state"] == "manual"
     assert out["grid_today"] == {"kwh": 0.0, "cost": 0.0, "tiers": [{"rate": 0.3, "tier": "low", "kwh": 0.0, "cost": 0.0}]}
     assert len(out["rates"]) == 1
+
+
+def test_charging_power_shown_is_the_learned_one_the_planner_used():
+    snapshot = _snapshot()
+    snapshot["config"] = {"max_charge_w": 972.0}
+    assert _overview(snapshot=snapshot, config={**CONFIG, "max_charge_w": 1000})["config"]["max_charge_w"] == 972.0
+    snapshot["config"] = {}
+    assert _overview(snapshot=snapshot, config={**CONFIG, "max_charge_w": 1000})["config"]["max_charge_w"] == 1000
+
+
+def test_a_charge_waiting_on_weak_sunlight_is_passed_to_the_page():
+    snapshot = _snapshot()
+    snapshot["charge_verification"] = {"status": "pending", "waiting_on": "weak_sunlight", "on_since": NOW - 600}
+    assert _overview(snapshot=snapshot)["verification"] == {"status": "pending", "waiting_on": "weak_sunlight"}

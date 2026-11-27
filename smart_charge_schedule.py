@@ -343,7 +343,14 @@ def _build_schedule(
                 # used to buy a morning top-up that was never needed.
                 priority = (1, -slot["start"])
             elif overnight_first:
-                priority = (1, round(price / gain, 9), margin, -slot["start"])
+                # Protecting the reserve: cheapest tariff first, and within
+                # it the slot closest before the dip, so the purchase can
+                # still be withdrawn as the forecast firms up. Ranking by
+                # modelled cost per point instead favoured sunless hours
+                # (grid power there also spares the battery the home's
+                # draw) and bought "right now" at 07:00-10:00, hours ahead
+                # of dips the forecast later dropped (2026-11-11 to 11-21).
+                priority = (1, slot["rate"], margin, -slot["start"])
             else:
                 priority = (round(price / gain, 9), margin, -slot["start"])
             choices.append((priority, index, interval, projected, from_start))

@@ -219,3 +219,24 @@ def test_target_shortfall_is_bought_beside_the_overnight_block_not_in_the_mornin
     assert contiguous(intervals)
     assert result["scheduled_sunrise_soc_pct"] >= 95
     assert result["plan_feasible"]
+
+
+def test_reserve_protection_buys_the_cheapest_slot_closest_before_the_dip():
+    # 500 W of load takes 30% to the 10% reserve by mid-afternoon. Grid power
+    # also carries the home here, so an hour with a little more home use buys
+    # slightly more battery per dollar; the timing must not chase that.
+    inputs = arguments(now="2026-10-24T08:30:00-07:00", soc=30, load=500)
+    inputs["forecast"].update(ac_input_excludes_load=True, ac_supply_limit_w=3000,
+                              charge_efficiency=0.8)
+    inputs["forecast"]["forecast"][1]["load_w"] = 540      # 09:00-10:00
+    result = build_schedule(**inputs)
+    daytime = [item for item in result["planned_intervals"] if item["start"] < midnight(inputs)]
+    assert result["action"] == "off"
+    assert daytime and daytime[0]["start"] >= inputs["now"] + 2 * 3600
+    assert result["scheduled_min_soc_pct"] >= 10
+    assert result["plan_feasible"]
+    # A dearer afternoon makes the cheap morning hours the ones to use.
+    inputs["cost_plan"]["tou_rates"].insert(0, {"start_hour": 11, "end_hour": 24, "rate": 0.60})
+    pricey = build_schedule(**inputs)
+    assert min(item["start"] for item in pricey["planned_intervals"]) < inputs["now"] + 2 * 3600
+    assert pricey["scheduled_min_soc_pct"] >= 10
