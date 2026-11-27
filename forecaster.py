@@ -1841,6 +1841,27 @@ def _calibrated_load(hour: dict[str, Any], soc: float, capacity_wh: int, bands: 
     return base + float(hour.get("drain_baseline_prior_w") or 0)
 
 
+def _net_inflow_w(hour: dict[str, Any], solar_w: float, load_w: float,
+                  extra_load_w: float = 0.0) -> float:
+    """Net power into the battery for one forecast interval.
+
+    `fit_charge_efficiency` divides the stored energy by input minus metered
+    output, so the fitted efficiency already contains the standby and
+    inverter losses of a charging hour. Charging that efficiency on top of
+    `load_w` (output plus overhead plus the standby baseline) counted those
+    losses twice: about 350 W for every solar-surplus hour on the 5-pack
+    rig, which left the dawn forecast of the next midnight some 15 points
+    low (2026-11-11 to 11-26). A surplus hour therefore nets against the
+    metered output, as the fit does. Whether the hour is a surplus hour is
+    still decided against the full `load_w`, so a marginal hour keeps the
+    cautious discharge model.
+    """
+    net = solar_w - (load_w + extra_load_w)
+    if net > 0 and "output_w" in hour:
+        return max(net, solar_w - float(hour["output_w"] or 0) - extra_load_w)
+    return net
+
+
 def _advance_soc(soc: float, net_w: float, duration_h: float, capacity_wh: int,
                  charge_efficiency: float, ceiling_pct: float | None) -> float:
     """Limit new charging without erasing already measured battery energy."""
@@ -1933,7 +1954,8 @@ def simulate_soc(
         duration_h = max(0.0, min(1.0, float(h.get("duration_h", 1.0))))
         natural_load = _calibrated_load(h, natural_soc, capacity_wh, drain_calibration_bands or [])
         net = (float(h.get("solar_w") or 0) + float(h.get("ac_battery_charge_w") or 0)
-               if h.get("ac_bypass_active") else float(h.get("solar_w") or 0) - natural_load)
+               if h.get("ac_bypass_active")
+               else _net_inflow_w(h, float(h.get("solar_w") or 0), natural_load))
         updated_soc = _advance_soc(natural_soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
         nat_hourly_pp.append((net * eff if net > 0 else net) * duration_h / capacity_wh * 100.0)
         natural_soc = updated_soc
@@ -1970,7 +1992,7 @@ def simulate_soc(
             tentative_load = _calibrated_load(
                 h, soc, capacity_wh, drain_calibration_bands or [], additional_load_w=extra_w,
             )
-            tentative_net = solar - (tentative_load + extra_w)
+            tentative_net = _net_inflow_w(h, solar, tentative_load, extra_w)
             tentative_soc = _advance_soc(soc, tentative_net, duration_h, capacity_wh, eff, soc_ceiling_pct)
             # From start of hour i+1 onward, assume natural-only (the
             # controller stops). Worst-case SOC achieved:
@@ -1990,7 +2012,8 @@ def simulate_soc(
                         float(future_hour.get("solar_w") or 0)
                         + float(future_hour.get("ac_battery_charge_w") or 0)
                         if future_hour.get("ac_bypass_active")
-                        else float(future_hour.get("solar_w") or 0) - future_load)
+                        else _net_inflow_w(
+                            future_hour, float(future_hour.get("solar_w") or 0), future_load))
                     future_duration = max(0.0, min(1.0, float(future_hour.get("duration_h", 1.0))))
                     future_soc = _advance_soc(
                         future_soc, future_net, future_duration, capacity_wh, eff, soc_ceiling_pct,
@@ -2008,7 +2031,7 @@ def simulate_soc(
         # Interval-aware Euler step. Apply CHARGE_EFFICIENCY when
         # net inflow positive — discharge already accounts for inverter
         # losses on the load side.
-        net = solar - (load + applied_extra)
+        net = _net_inflow_w(h, solar, load, applied_extra)
         soc = _advance_soc(soc, net, duration_h, capacity_wh, eff, soc_ceiling_pct)
         # Smart-charge floor — the user has Kasa-driven grid top-up that
         # holds SOC at or above target_sunrise_soc_pct. Modeling it as a
