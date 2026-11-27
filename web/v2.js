@@ -127,7 +127,7 @@
     const hours = (h) => (h < 1 ? Math.round(h * 60) + ' min' : h.toFixed(1) + ' hours');
     $('bat-time').textContent = toFull ? 'Full in ' + hours(toFull) : toEmpty ? 'Empty in ' + hours(toEmpty) : 'Holding steady';
 
-    const solar = num(t.solar_input_w), grid = num(t.ac_input_w), home = num(t.output_power_w);
+    const solar = num(t.solar_input_w), grid = num(t.grid_w) ?? num(t.ac_input_w), home = num(t.output_power_w);
     $('now-solar').textContent = watts(solar);
     $('now-grid').textContent = watts(grid);
     $('now-home').textContent = watts(home);
@@ -538,17 +538,19 @@
       svg.replaceChildren(svgEl('text', { class: 'empty', x: '50%', y: '50%', 'text-anchor': 'middle' }, 'No readings in this range yet.'));
       return;
     }
-    const peak = Math.max(500, ...powerRows.map((r) => Math.max(r.solar_w || 0, r.ac_input_w || 0, r.output_w || 0)));
+    // Grid is everything bought: battery charging plus home use the grid carries meanwhile.
+    const gridW = (r) => r.grid_w ?? r.ac_input_w ?? 0;
+    const peak = Math.max(500, ...powerRows.map((r) => Math.max(r.solar_w || 0, gridW(r), r.output_w || 0)));
     const yMax = niceMax(peak);
     const x1 = powerRows[powerRows.length - 1].ts;
     const f = frame(svg, x1 - powerHours * 3600, x1, yMax, (v) => (v >= 1000 ? (v / 1000) + ' kW' : v + ' W'));
     axes(f, powerHours === 1 ? 0.25 : powerHours === 6 ? 1 : 4);
     svg.append(svgEl('polyline', { class: 's-home', points: path(f, powerRows, 'output_w') }));
-    svg.append(svgEl('polyline', { class: 's-grid', points: path(f, powerRows, 'ac_input_w') }));
+    svg.append(svgEl('polyline', { class: 's-grid', points: path(f, powerRows.map((r) => ({ ts: r.ts, w: gridW(r) })), 'w') }));
     svg.append(svgEl('polyline', { class: 's-solar', points: path(f, powerRows, 'solar_w') }));
     hover(f, (ts) => {
       const r = nearest(powerRows, ts);
-      return r && { ts: r.ts, lines: ['Solar ' + watts(r.solar_w || 0), 'Grid ' + watts(r.ac_input_w || 0), 'Home ' + watts(r.output_w || 0)] };
+      return r && { ts: r.ts, lines: ['Solar ' + watts(r.solar_w || 0), 'Grid ' + watts(gridW(r)), 'Home ' + watts(r.output_w || 0)] };
     });
   }
   function drawCharts() { drawBattery(); drawPower(); if (pages[current]?.draw) pages[current].draw(); }

@@ -313,7 +313,9 @@ def compute_savings(history: list[dict[str, Any]],
         input_kwh = float(row.get("input_wh") or 0) / 1000.0
         # Prefer the directly-tracked AC input if present; fall back to
         # input - solar for pre-migration rows.
-        ac_in = row.get("ac_input_wh")
+        # `grid_wh` is everything bought from the grid, including home use the
+        # grid carried while charging; `ac_input_wh` is the battery's share.
+        ac_in = row.get("grid_wh", row.get("ac_input_wh"))
         if ac_in is not None:
             grid_kwh = max(0.0, float(ac_in) / 1000.0)
         else:

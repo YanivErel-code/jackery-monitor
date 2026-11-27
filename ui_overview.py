@@ -83,7 +83,7 @@ def grid_today(plan: dict, hourly_rows, day_start: float, tz_offset_seconds: int
     rates = {cost_module.rate_at(plan, day_start + h * HOUR_S, tz_offset_seconds) for h in range(24)}
     tiers = {rate: {"rate": rate, "tier": _tier(rate, rates), "kwh": 0.0, "cost": 0.0} for rate in rates}
     for row in hourly_rows or []:
-        ts, wh = _num(row.get("ts")), _num(row.get("ac_input_wh"), 0.0)
+        ts, wh = _num(row.get("ts")), _num(row.get("grid_wh"), _num(row.get("ac_input_wh"), 0.0))
         if ts is None or ts < day_start or not wh or wh <= 0:
             continue
         rate = cost_module.rate_at(plan, ts, tz_offset_seconds)
@@ -275,12 +275,21 @@ def build_overview(*, now: float, device_sn: str, decision: dict | None, snapsho
     capacity = _num(snapshot.get("capacity_wh"))
     charge_w = _num((snapshot.get("charge_rate") or {}).get("value"), 0.0)
 
+    # On a bypass device the grid also carries the home while charging, so
+    # the purchase is the battery's charge plus the forecast home use.
+    bypass = config.get("ac_input_excludes_load") is True
+    hours = [(_num(r.get("ts"), 0.0), _num(r.get("duration_h"), 0.0), _num(r.get("output_w"), _num(r.get("load_w"), 0.0)))
+             for r in snapshot.get("baseline_forecast") or []] if bypass else []
+
+    def home_w(ts: float) -> float:
+        return next((w for end, dur, w in hours if end - dur * HOUR_S <= ts < end), 0.0)
+
     est_kwh = est_cost = 0.0
     for block in blocks:
         cursor = max(block["start"], now)
         while cursor < block["end"]:
             step = min(block["end"], (int(cursor // 900) + 1) * 900) - cursor
-            kwh = charge_w * step / HOUR_S / 1000.0
+            kwh = (charge_w + home_w(cursor)) * step / HOUR_S / 1000.0
             est_kwh += kwh
             est_cost += kwh * cost_module.rate_at(cost_plan, cursor, tz)
             cursor += step

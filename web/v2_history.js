@@ -37,7 +37,7 @@
       el('div', { class: 'muted small', text: 'used by the home' }),
       el('div', { class: 'rows' },
         el('div', { class: 'row' }, el('span', { text: 'From solar' }), el('b', { text: kwh(p?.solar_wh) })),
-        el('div', { class: 'row' }, el('span', { text: 'From the grid' }), el('b', { text: kwh(p?.ac_input_wh) })),
+        el('div', { class: 'row' }, el('span', { text: 'From the grid' }), el('b', { text: kwh(p?.grid_wh ?? p?.ac_input_wh) })),
         money ? el('div', { class: 'row' }, el('span', { text: 'Saved, after grid cost' }), el('b', { text: usd(money.net_savings) })) : null))));
   }
 

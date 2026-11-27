@@ -375,6 +375,11 @@ def _weather_row(r: tuple) -> dict:
     return row
 
 
+# AC input above this means the unit is on the grid (same floor the history
+# query uses to count AC minutes).
+GRID_ON_W = 50
+
+
 class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMixin):
     """Top-level energy DB.
 
@@ -387,6 +392,24 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
         + automation_firings tables
     Mixin methods are first-class on EnergyDB instances — no caller
     changes when methods move between this class and a mixin."""
+
+    # Whether a device's home loads run straight from the grid while it
+    # charges (its AC input reading is then the battery's share only). The
+    # server points this at the charging settings; a class attribute so
+    # read-only readers share it.
+    grid_carries_home = staticmethod(lambda device_sn: False)
+
+    def _grid_sql(self, device_sn: str, suffix: str = "wh") -> str:
+        """SQL for one minute's energy (or power) bought from the grid.
+
+        `ac_input_*` stays the battery-side reading that the forecaster's
+        fits rely on. On a bypass device the grid also carries the home for
+        every minute the unit is taking AC, so what was bought is both."""
+        ac, out = (("ac_input_wh", "output_wh") if suffix == "wh"
+                   else ("last_ac_input_w", "last_output_w"))
+        if not self.grid_carries_home(device_sn):
+            return ac
+        return f"({ac} + CASE WHEN last_ac_input_w > {GRID_ON_W} THEN {out} ELSE 0 END)"
 
     def __init__(self, path: str = DEFAULT_DB) -> None:
         self.path = path
@@ -711,12 +734,14 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
             row = connection.execute(
                 "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
                 "COALESCE(SUM(solar_wh),0), COALESCE(SUM(solar_charge_diverted_wh),0), "
-                "COALESCE(SUM(ac_input_wh),0) FROM samples "
+                "COALESCE(SUM(ac_input_wh),0), "
+                f"COALESCE(SUM({self._grid_sql(device_sn)}),0) FROM samples "
                 "WHERE device_sn=? AND bucket>=?", (device_sn, since),
             ).fetchone()
         return {"device_sn": device_sn, "today": {
             "input_wh": row[0], "output_wh": row[1], "solar_wh": row[2],
-            "solar_charge_diverted_wh": row[3], "ac_input_wh": row[4], "since": since,
+            "solar_charge_diverted_wh": row[3], "ac_input_wh": row[4],
+            "grid_wh": row[5], "since": since,
         }}
 
     def totals(self, device_sn: str) -> DeviceTotals:
@@ -734,27 +759,29 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                 "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
                 "COALESCE(SUM(solar_wh),0), "
                 "COALESCE(SUM(solar_charge_diverted_wh),0), "
-                "COALESCE(SUM(ac_input_wh),0) "
+                "COALESCE(SUM(ac_input_wh),0), "
+                f"COALESCE(SUM({self._grid_sql(device_sn)}),0) "
                 "FROM samples WHERE device_sn = ?", (device_sn,)
             ).fetchone()
             out["lifetime"] = {"input_wh": r[0], "output_wh": r[1],
                                "solar_wh": r[2],
                                "solar_charge_diverted_wh": r[3],
-                               "ac_input_wh": r[4]}
+                               "ac_input_wh": r[4], "grid_wh": r[5]}
             # Windows
             for label, since in windows.items():
                 r = c.execute(
                     "SELECT COALESCE(SUM(input_wh),0), COALESCE(SUM(output_wh),0), "
                     "COALESCE(SUM(solar_wh),0), "
                     "COALESCE(SUM(solar_charge_diverted_wh),0), "
-                    "COALESCE(SUM(ac_input_wh),0) "
+                    "COALESCE(SUM(ac_input_wh),0), "
+                    f"COALESCE(SUM({self._grid_sql(device_sn)}),0) "
                     "FROM samples WHERE device_sn = ? AND bucket >= ?",
                     (device_sn, since),
                 ).fetchone()
                 out[label] = {"input_wh": r[0], "output_wh": r[1],
                               "solar_wh": r[2],
                               "solar_charge_diverted_wh": r[3],
-                              "ac_input_wh": r[4],
+                              "ac_input_wh": r[4], "grid_wh": r[5],
                               "since": since}
         return out  # type: ignore[return-value]
 
@@ -779,11 +806,11 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
         since = int(time.time()) - int(days) * 86400
         with self._conn() as c:
             rows = c.execute(
-                """SELECT date(bucket + ?, 'unixepoch') AS d,
+                f"""SELECT date(bucket + ?, 'unixepoch') AS d,
                           COALESCE(SUM(solar_wh), 0) AS sol_wh,
                           COALESCE(SUM(output_wh), 0) AS out_wh,
                           COALESCE(SUM(input_wh), 0) AS in_wh,
-                          COALESCE(SUM(ac_input_wh), 0) AS ac_wh,
+                          COALESCE(SUM({self._grid_sql(device_sn)}), 0) AS grid_wh,
                           COALESCE(SUM(solar_charge_diverted_wh), 0) AS div_wh,
                           MAX(last_solar_w) AS peak_sol_w,
                           MAX(last_output_w) AS peak_out_w,
@@ -1660,7 +1687,7 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                 (device_sn, upper_bound, since - bucket_s),
             ).fetchall()
             rows = c.execute(
-                """SELECT (bucket / ?) * ? AS b,
+                f"""SELECT (bucket / ?) * ? AS b,
                            SUM(input_wh) AS in_wh,
                            SUM(output_wh) AS out_wh,
                            SUM(solar_wh) AS sol_wh,
@@ -1675,7 +1702,9 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                            MAX(last_soc_source_ts) AS soc_source_max,
                            COUNT(last_soc_source_ts) AS soc_source_known,
                            COUNT(*) AS minute_count,
-                           SUM(CASE WHEN last_ac_input_w > 50 THEN 1 ELSE 0 END) AS ac_minutes
+                           SUM(CASE WHEN last_ac_input_w > 50 THEN 1 ELSE 0 END) AS ac_minutes,
+                           SUM({self._grid_sql(device_sn)}) AS grid_wh,
+                           AVG({self._grid_sql(device_sn, "w")}) AS grid_w
                     FROM samples
                     WHERE device_sn = ? AND bucket >= ? AND bucket < ?
                     GROUP BY b
@@ -1756,7 +1785,8 @@ class EnergyDB(MeasurementQualityMixin, ForecastTablesMixin, AutomationTablesMix
                    "solar_w": int(r[8] or 0), "ac_input_w": int(r[9] or 0),
                    "battery_pct": int(r[10]) if r[10] is not None else None,
                    "soc_source_ts_min": r[11], "soc_source_ts_max": r[12],
-                   "soc_source_known_buckets": r[13]}
+                   "soc_source_known_buckets": r[13],
+                   "grid_wh": r[16] or 0, "grid_w": int(r[17] or 0)}
             row["ac_charge_complete"] = (
                 r[14] >= bucket_s / 60 * 0.95 and r[15] == r[14]
                 and int(r[0]) + bucket_s <= as_of
