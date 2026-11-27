@@ -13,6 +13,7 @@ the regression refit is also infrequent. A single 5-day forecast call costs
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -36,6 +37,16 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 REVERSE_GEOCODE_URL = (
     "https://api.bigdatacloud.net/data/reverse-geocode-client"
 )
+# Which weather model Open-Meteo should answer from. Its default ("best
+# match", the US GFS/HRRR models here) is a model's view of a grid cell, not
+# a measurement at the site, and on cloudy days it can be far from what the
+# panels see (overcast in the data while they produced clear-day output on
+# 2026-11-26). Against seven months of panel output (2026-05 to 2026-11) the
+# ECMWF model's sunlight tracked production best: typical daily miss 1.08 kWh
+# in November against 1.56 for the default, 1.33 against 1.78 overall.
+# Set JACKERY_WEATHER_MODEL to another Open-Meteo model name, or to an empty
+# string for Open-Meteo's default.
+WEATHER_MODEL = os.environ.get("JACKERY_WEATHER_MODEL", "ecmwf_ifs025").strip()
 CACHE_TTL_S = 3600  # 1 hour
 DEFAULT_PAST_DAYS = 14
 DEFAULT_FORECAST_DAYS = 5
@@ -85,9 +96,25 @@ async def fetch_irradiance(
     }
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            r = await client.get(API_URL, params=params)
-            r.raise_for_status()
-            j = r.json()
+            j = None
+            if WEATHER_MODEL:
+                # The preferred model first; Open-Meteo's default if it is
+                # unavailable or answers with gaps.
+                try:
+                    r = await client.get(API_URL, params={**params, "models": WEATHER_MODEL})
+                    r.raise_for_status()
+                    j = r.json()
+                    if not _complete(j):
+                        log.warning("weather model %s returned gaps; using the default", WEATHER_MODEL)
+                        j = None
+                except Exception as error:
+                    log.warning("weather model %s unavailable (%s); using the default",
+                                WEATHER_MODEL, str(error) or type(error).__name__)
+            model = WEATHER_MODEL if j is not None else ""
+            if j is None:
+                r = await client.get(API_URL, params=params)
+                r.raise_for_status()
+                j = r.json()
         except Exception as e:
             # httpx timeout exceptions stringify to "" (e.g.
             # ConnectTimeout('')), and callers gate on
@@ -163,7 +190,8 @@ async def fetch_irradiance(
             log.warning("could not persist timezone offset: %s", e)
 
     out = {"hourly": rows, "fetched_at": now, "lat": lat, "lon": lon,
-           "utc_offset_seconds": utc_offset_seconds, "timezone": timezone}
+           "utc_offset_seconds": utc_offset_seconds, "timezone": timezone,
+           "model": model or "best_match"}
 
     with _cache_lock:
         _cache[key] = (now + CACHE_TTL_S, out)
@@ -194,6 +222,13 @@ async def fetch_irradiance(
             log.debug("weather forecast persist failed: %s", e)
 
     return out
+
+
+def _complete(payload: dict) -> bool:
+    """Whether a response carries sunlight for every hour it lists."""
+    hourly = payload.get("hourly") or {}
+    times, ghi = hourly.get("time") or [], hourly.get("shortwave_radiation") or []
+    return bool(times) and len(ghi) == len(times) and all(value is not None for value in ghi)
 
 
 def clear_cache() -> None:
