@@ -5,7 +5,7 @@
  * and Forecast tabs use. */
 (function () {
   'use strict';
-  const { $, el, svgEl, num, pct, usd, clock, tz, getJson, deviceSn, frame, axes, niceMax, xLabel } = window.V2;
+  const { $, el, svgEl, num, pct, usd, watts, clock, tz, getJson, deviceSn, frame, axes, niceMax, xLabel, hover, nearest } = window.V2;
 
   let daily = [];
   let days = 30;
@@ -20,6 +20,7 @@
   const longDay = (date) => date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   const localDay = (ts) => Math.floor((ts + tz()) / 86400);
   const dayStart = (dayIndex) => dayIndex * 86400 - tz();
+  const dayClock = (ts) => tsDate(ts).toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + clock(ts);
   const tsDate = (ts) => { const d = new Date((ts + tz()) * 1000); return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()); };
 
   function tile(label, value, note, warn) {
@@ -61,6 +62,11 @@
     const every = Math.ceil(rows.length / Math.max(2, Math.floor((f.box.r - f.box.l) / 70)));
     rows.forEach((r, i) => {
       if ((rows.length - 1 - i) % every === 0) svg.append(xLabel(f, f.X(i + 0.5), shortDay(dayDate(r.date))));
+    });
+    hover(f, (x) => {
+      const i = Math.min(rows.length - 1, Math.floor(x)), r = rows[i];
+      return { x: i + 0.5, title: longDay(dayDate(r.date)), lines: ['Solar ' + kwhDay(r.solar_kwh || 0) + ' kWh',
+        'Grid ' + kwhDay(r.grid_kwh || 0) + ' kWh', 'Used ' + kwhDay(r.consumed_kwh || 0) + ' kWh'] };
     });
   }
 
@@ -111,6 +117,11 @@
       .filter(([, v]) => num(v) != null).map(([t, v]) => f.X(t).toFixed(1) + ',' + f.Y(v).toFixed(1)).join(' ') }));
     if (low) svg.append(svgEl('text', { x: f.box.l + 6, y: f.Y(low) - 5 }, 'Low-battery alert ' + Math.round(low) + '%'));
     svg.append(svgEl('text', { x: f.box.r - 4, y: f.box.t + 12, 'text-anchor': 'end' }, 'Solar peak ' + (solarPeak / 1000).toFixed(1) + ' kW'));
+    hover(f, (ts) => {
+      const r = nearest(rows.filter((k) => num(k.predicted_soc) != null), ts);
+      return r && { ts: r.ts, y: f.Y(r.predicted_soc), title: dayClock(r.ts),
+        lines: ['Battery ' + pct(r.predicted_soc) + ' without charging', 'Solar ' + watts(r.solar_w || 0)] };
+    });
   }
 
   function renderForecast() {
@@ -188,6 +199,12 @@
     const pts = rows.map((r) => f.X(r.ts - (r.duration_h || 0) * 1800).toFixed(1) + ',' + f.Y(r.solar_w || 0).toFixed(1));
     svg.append(svgEl('polygon', { class: 'area-sun', points: f.X(x0) + ',' + f.box.b + ' ' + pts.join(' ') + ' ' + f.X(x1) + ',' + f.box.b }));
     svg.append(svgEl('polyline', { class: 'line-sun', points: pts.join(' ') }));
+    hover(f, (ts) => {
+      const mid = (k) => k.ts - (k.duration_h || 0) * 1800;
+      const r = rows.reduce((a, k) => (!a || Math.abs(mid(k) - ts) < Math.abs(mid(a) - ts) ? k : a), null);
+      return r && { ts: mid(r), x: mid(r), y: f.Y(r.solar_w || 0), title: dayClock(r.ts - (r.duration_h || 0) * 3600) + ' – ' + clock(r.ts),
+        lines: ['Solar ' + watts(r.solar_w || 0)] };
+    });
     $('sun-note').textContent = rows.some((r) => r.solar_capped) ? 'Some hours are capped at what your panels have actually reached.' : '';
   }
   function drawSunWeek() {
@@ -208,6 +225,13 @@
       if (b.forecast > 0) svg.append(svgEl('rect', { class: 'bar-solar-fc', x, y: f.Y(b.measured + b.forecast), width: w, height: f.Y(b.measured) - f.Y(b.measured + b.forecast) }));
       if (b.today || (bars.length - 1 - i) % skip === 0) svg.append(xLabel(f, f.X(i + 0.5), b.label, b.today ? 'today-mark' : ''));
       if (slot > 44) svg.append(svgEl('text', { x: f.X(i + 0.5), y: f.Y(b.measured + b.forecast) - 5, 'text-anchor': 'middle' }, (b.measured + b.forecast).toFixed(1)));
+    });
+    hover(f, (x) => {
+      const i = Math.min(bars.length - 1, Math.floor(x)), b = bars[i];
+      const lines = [];
+      if (b.measured > 0 || !b.forecast) lines.push('Measured ' + b.measured.toFixed(1) + ' kWh');
+      if (b.forecast > 0) lines.push('Forecast ' + b.forecast.toFixed(1) + ' kWh' + (b.today ? ' still to come' : ''));
+      return { x: i + 0.5, title: b.label, lines };
     });
   }
 

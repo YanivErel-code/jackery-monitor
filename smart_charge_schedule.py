@@ -395,6 +395,11 @@ def _build_schedule(
         ),
         "scheduled_sunrise_soc_pct": round(scheduled_sunrise, 1),
         "scheduled_min_soc_pct": round(minimum, 1),
+        # The validated path itself, so displays draw the plan the scheduler
+        # checked instead of re-deriving an approximation of it.
+        "scheduled_trajectory": [
+            {"ts": int(hour["ts"]), "soc": round(hour["predicted_soc"], 1)} for hour in trace
+        ],
         "retained_charge_until_ts": retained_interval["end"] if retained_interval else None,
         "reserve_soc_pct": reserve,
         "plan_feasible": not warnings,

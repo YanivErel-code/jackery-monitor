@@ -99,11 +99,13 @@ def grid_today(plan: dict, hourly_rows, day_start: float, tz_offset_seconds: int
 
 
 def projection(snapshot: dict, blocks: list[dict], now: float, soc_pct: float | None) -> list[dict]:
-    """Approximate battery path: the saved no-charge forecast plus planned grid charging.
+    """Battery path: the scheduler's validated trajectory, then the saved forecast.
 
-    The scheduler validates its own trajectory but does not store it, so this
-    re-integrates the hourly rows. Each row is stamped with the END of the
-    interval it covers.
+    Up to sunrise this is the path the scheduler checked, so the line agrees
+    with the sunrise and lowest-level numbers shown beside it. Past the end of
+    that path (and for snapshots saved without one) the hourly no-charge rows
+    are re-integrated, which is only approximate. Each row is stamped with the
+    END of the interval it covers.
     """
     capacity = _num(snapshot.get("capacity_wh"))
     if soc_pct is None or not capacity:
@@ -112,11 +114,18 @@ def projection(snapshot: dict, blocks: list[dict], now: float, soc_pct: float | 
     efficiency = _num((snapshot.get("model") or {}).get("charge_efficiency"), DEFAULT_CHARGE_EFFICIENCY)
     points = [{"ts": now, "soc": round(soc_pct, 1)}]
     soc = soc_pct
+    covered_until = now
+    for point in (snapshot.get("schedule_projection") or {}).get("scheduled_trajectory") or []:
+        ts, value = _num(point.get("ts")), _num(point.get("soc"))
+        if ts is None or value is None or ts <= now or ts > now + PROJECTION_HOURS * HOUR_S:
+            continue
+        soc, covered_until = value, ts
+        points.append({"ts": ts, "soc": round(soc, 1)})
     for row in snapshot.get("baseline_forecast") or []:
         end, hours, net_w = _num(row.get("ts")), _num(row.get("duration_h"), 0.0), _num(row.get("net_w"), 0.0)
-        if end is None or end <= now or end > now + PROJECTION_HOURS * HOUR_S:
+        if end is None or end <= covered_until or end > now + PROJECTION_HOURS * HOUR_S:
             continue
-        start = max(now, end - hours * HOUR_S)
+        start = max(covered_until, end - hours * HOUR_S)
         charging_s = sum(max(0.0, min(end, b["end"]) - max(start, b["start"])) for b in blocks)
         wh = net_w * (end - start) / HOUR_S + charge_w * efficiency * charging_s / HOUR_S
         soc = max(0.0, min(100.0, soc + wh / capacity * 100.0))
