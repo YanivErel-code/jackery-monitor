@@ -19,7 +19,7 @@
   let history6 = [];       // 6 h of samples for the battery chart
   let powerHours = 6;
   let powerRows = [];
-  let attention = { review: null, lg: [] };
+  let attention = { review: null, lg: [], forecast: null };
   const pendingPorts = new Set();
 
   // ---------- small helpers ----------
@@ -382,6 +382,9 @@
       for (const w of overview.plan.warnings) notes.push(['alert', 'Charging plan', w]);
     }
     for (const w of attention.lg) notes.push(['warn', 'Laundry monitoring', w]);
+    if (attention.forecast && attention.forecast.status === 'drifting') {
+      notes.push(['warn', 'Forecast running too ' + attention.forecast.direction, attention.forecast.message]);
+    }
     const r = attention.review;
     if (r && (r.status === 'error' || r.status === 'failed')) {
       notes.push(['warn', 'The AI review could not run', (r.error || r.message || 'It failed the last time it ran.') +
@@ -597,6 +600,7 @@
       $('hl-detail').textContent = e.message;
     }
     getJson('/api/algorithm/review_status' + snQuery()).then((r) => { attention.review = r; renderAttention(); }).catch(() => {});
+    getJson('/api/forecast/health' + snQuery()).then((r) => { attention.forecast = r; renderAttention(); }).catch(() => {});
     getJson('/api/lg_thinq/status').then((r) => { attention.lg = r.protection_enabled ? r.warnings || [] : []; renderAttention(); }).catch(() => {});
   }
   async function loadHistory() {

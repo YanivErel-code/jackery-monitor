@@ -49,6 +49,7 @@ RULES: dict[str, tuple[str, dict[str, Any]]] = {
                      {"enabled": True, "after_min": 120}),
     "offline": ("Lost contact with the battery", {"enabled": True, "after_min": 15}),
     "backup_failed": ("Backup failed", {"enabled": True}),
+    "forecast_drift": ("Forecast has been off for several days", {"enabled": True}),
 }
 OPTION_RANGES = {"threshold_pct": (5, 95), "after_min": (1, 1440)}
 
@@ -248,6 +249,14 @@ def conditions(facts: dict[str, Any], config: dict[str, Any],
             str(backup.get("error") or "The last backup did not complete."),
             # Backups run in the small hours and can wait until morning.
             priority="low", page="settings", key=str(backup.get("ts") or ""))
+
+    health = facts.get("forecast_health") or {}
+    if on("forecast_drift") and health.get("status") == "drifting":
+        found["forecast_drift"] = Alert(
+            "forecast_drift", f"Forecast running too {health.get('direction')}",
+            str(health.get("message") or ""),
+            # Nothing to act on at night; one alert per episode.
+            priority="low", page="history")
 
     return found
 
