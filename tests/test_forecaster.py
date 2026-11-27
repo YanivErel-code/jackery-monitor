@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 import forecaster
 
 
@@ -2083,3 +2085,33 @@ def test_intraday_solar_adjustment_never_changes_tomorrows_forecast(monkeypatch)
     result = forecaster.build_forecast(history, weather, 40, 30240, now_ts=now)
     assert result['forecast'][0]['solar_w'] == 480
     assert result['forecast'][1]['solar_w'] == 400
+
+
+def _one_hour(solar_w, **extra):
+    return [{"ts": 3600, "duration_h": 1.0, "solar_w": solar_w, "load_w": 900.0, **extra}]
+
+
+def test_surplus_hour_nets_against_metered_output_like_the_efficiency_fit():
+    # The fitted efficiency is stored / (input - output), so it already
+    # holds the standby and inverter losses of a charging hour.
+    trace = forecaster.simulate_soc(50.0, 10000, _one_hour(2000.0, output_w=500.0),
+                                    charge_efficiency=0.9, round_soc=False)
+    assert trace[0]["predicted_soc"] == pytest.approx(50.0 + 1500 * 0.9 / 100)
+
+
+def test_marginal_hour_keeps_the_full_discharge_model():
+    trace = forecaster.simulate_soc(50.0, 10000, _one_hour(800.0, output_w=500.0),
+                                    charge_efficiency=0.9, round_soc=False)
+    assert trace[0]["predicted_soc"] == pytest.approx(50.0 - 100 / 100)
+
+
+def test_surplus_hour_without_metered_output_is_unchanged():
+    trace = forecaster.simulate_soc(50.0, 10000, _one_hour(2000.0),
+                                    charge_efficiency=0.9, round_soc=False)
+    assert trace[0]["predicted_soc"] == pytest.approx(50.0 + 1100 * 0.9 / 100)
+
+
+def test_diverted_load_still_reduces_a_surplus_hour():
+    trace = forecaster.simulate_soc(50.0, 10000, _one_hour(2000.0, output_w=500.0),
+                                    charge_efficiency=0.9, extra_load_w=400.0, round_soc=False)
+    assert trace[0]["predicted_soc"] == pytest.approx(50.0 + 1100 * 0.9 / 100)
