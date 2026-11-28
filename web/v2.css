@@ -316,3 +316,17 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .big span { font-size: 44px; }
   .next-title { font-size: 24px; }
 }
+
+/* ---------- inside the iOS app on a wide screen with a side strip ----------
+   The app draws the page buttons in that strip (it sets .app-rail on <html>),
+   so the sidebar gives its column back and the view options sit in one row. */
+@media (min-width: 761px) {
+  .app-rail .shell { display: block; }
+  .app-rail .side { display: none; }
+  .app-rail .tools { flex-direction: row; align-items: center; gap: 12px; padding: 20px 32px 0; background: none; border-right: 0; }
+  .app-rail .tools .device-box { flex-direction: row; align-items: center; gap: 10px; padding: 8px 12px; background: var(--card); border: 1px solid var(--border); }
+  .app-rail .tools .device-box select { min-width: 180px; }
+  .app-rail .tools .btn { flex: none; min-height: 44px; padding: 0 16px; }
+  .app-rail .tools .side-note { display: none; }
+  .app-rail main { padding-bottom: calc(env(safe-area-inset-bottom) + 28px); }
+}
