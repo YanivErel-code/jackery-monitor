@@ -113,7 +113,7 @@
   // fills one half of the screen from top to bottom.
   const FLOW = {
     wide: { box: '0 0 360 236', solar: [62, 56], grid: [62, 180], battery: [180, 118], home: [298, 118] },
-    tall: { box: '0 0 280 392', solar: [62, 70], grid: [218, 70], battery: [140, 196], home: [140, 322] },
+    tall: { box: '0 0 220 348', solar: [46, 60], grid: [174, 60], battery: [110, 172], home: [110, 284] },
   };
   let flowShape = 'wide';
   function flowLayout() {
