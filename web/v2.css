@@ -393,8 +393,9 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   :root:not(.app-rail) #page-live > .grid3 > .card:last-child { grid-column: 3; }
   :root:not(.app-rail) #page-live > .status { grid-row: 3; grid-column: 2; padding: 20px; }
   :root:not(.app-rail) #page-live > .grid3 > #flow-card { grid-row: 2; grid-column: 1 / -1; }
-  :root:not(.app-rail) #flow-card .flow { max-width: 480px; }
-  :root:not(.app-rail) #flow-card .net { width: 100%; max-width: 480px; align-self: center; }
+  /* v2.js spreads the picture out to match (the "banner" layout), so it
+     fills the card from side to side. */
+  :root:not(.app-rail) #flow-card .flow { max-width: none; }
 }
 
 /* The picture arrives with the opening movement: the app sets --open from the

@@ -113,13 +113,16 @@
   // fills one half of the screen from top to bottom.
   const FLOW = {
     wide: { box: '0 0 360 236', solar: [62, 56], grid: [62, 180], battery: [180, 118], home: [298, 118] },
+    // Across the top of Live on a wide screen: the same picture, spread out.
+    banner: { box: '0 0 760 236', solar: [70, 56], grid: [70, 180], battery: [380, 118], home: [690, 118] },
     tall: { box: '0 0 220 348', solar: [46, 60], grid: [174, 60], battery: [110, 172], home: [110, 284] },
   };
   let flowShape = 'wide';
   function flowLayout() {
     const root = document.documentElement;
-    const shape = root.classList.contains('app-rail') && !root.classList.contains('fold-h')
-      && window.matchMedia('(min-width: 761px)').matches ? 'tall' : 'wide';
+    const rail = root.classList.contains('app-rail');
+    const shape = rail && !root.classList.contains('fold-h') && window.matchMedia('(min-width: 761px)').matches ? 'tall'
+      : !rail && window.matchMedia('(min-width: 1120px)').matches ? 'banner' : 'wide';
     if (shape === flowShape) return;
     flowShape = shape;
     const at = FLOW[shape], [bx, by] = at.battery, tall = shape === 'tall';
