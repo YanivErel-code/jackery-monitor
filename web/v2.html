@@ -50,9 +50,6 @@
         <select id="device"></select>
         <div class="conn"><span id="conn-dot" class="dot"></span><span id="conn-text">Connecting…</span></div>
       </div>
-      <button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button>
-      <a id="use-v1" class="btn" href="/classic">Open classic view</a>
-      <p class="side-note">To make the classic view the default, use Settings → Default view.</p>
   </aside>
 
   <main>
@@ -447,6 +444,13 @@
           <div class="f-row"><label class="f-label" for="set-default-ui"><b>Open by default</b></label>
             <div class="f-control"><select id="set-default-ui"><option value="2">New dashboard</option><option value="1">Classic view</option></select></div></div>
           <span id="default-msg" class="form-msg" role="status"></span>
+          <div class="f-row"><span class="f-label"><b>Classic view</b><span>The earlier dashboard, with every detail.</span></span>
+            <div class="f-control"><a id="use-v1" class="btn" href="/classic">Open classic view</a></div></div>
+        </section>
+        <section class="card">
+          <h2>Appearance</h2>
+          <div class="f-row"><span class="f-label"><b>Light or dark</b><span>Kept for this browser.</span></span>
+            <div class="f-control"><button id="theme-toggle" class="btn" type="button" aria-pressed="false">Dark mode</button></div></div>
         </section>
         <section class="card">
           <h2>Location</h2>
