@@ -357,9 +357,12 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .app-rail #flow-card .flow { flex: 1; min-height: 0; max-width: none; height: 100%; }
   .app-rail #flow-card .net { font-size: 17px; padding: 14px 16px; }
 
-  /* Charging: the plan and protections on the left; the day's rates and
-     your settings beside them; the day's activity across the bottom. */
-  .app-rail #page-charging > section.card { grid-column: 2; grid-row: 1 / span 2; }
+  /* Charging: the plan beside the day's rates, protections beside your
+     settings, each pair the same height so no space is left over; the
+     day's activity runs across the bottom. */
+  .app-rail #page-charging > header { grid-column: 1 / -1; }
+  .app-rail #page-charging > .grid2 > * { align-self: stretch; }
+  .app-rail #page-charging > section.card { grid-column: 2; grid-row: 2; align-self: stretch; }
   .app-rail #page-charging > .grid2:last-child > :last-child { grid-column: 2; grid-row: 3; }
   .app-rail #page-charging > .grid2:last-child > :first-child { grid-column: 1 / -1; grid-row: 4; }
 
@@ -368,7 +371,8 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .app-rail #hist-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .app-rail #hist-tiles .card { padding: 14px; gap: 8px; }
   .app-rail #hist-tiles .mid-num { font-size: 24px; }
-  .app-rail #hist-tiles .row { font-size: 13px; }
+  .app-rail #hist-tiles .row { font-size: 12px; gap: 6px; }
+  .app-rail #hist-tiles .row b { font-size: 13px; white-space: nowrap; }
   .app-rail #page-history > section:nth-of-type(2) { grid-column: 2; }
 }
 
