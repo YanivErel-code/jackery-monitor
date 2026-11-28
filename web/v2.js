@@ -108,6 +108,44 @@
   }
   window.addEventListener('hashchange', route);
 
+  // The power-flow picture has two arrangements: a wide one for a card in a
+  // row of cards, and a tall one for the open-phone layout, where the card
+  // fills one half of the screen from top to bottom.
+  const FLOW = {
+    wide: { box: '0 0 360 236', solar: [62, 56], grid: [62, 180], battery: [180, 118], home: [298, 118] },
+    tall: { box: '0 0 280 392', solar: [62, 70], grid: [218, 70], battery: [140, 196], home: [140, 322] },
+  };
+  let flowShape = 'wide';
+  function flowLayout() {
+    const root = document.documentElement;
+    const shape = root.classList.contains('app-rail') && !root.classList.contains('fold-h')
+      && window.matchMedia('(min-width: 761px)').matches ? 'tall' : 'wide';
+    if (shape === flowShape) return;
+    flowShape = shape;
+    const at = FLOW[shape], [bx, by] = at.battery, tall = shape === 'tall';
+    const set = (id, attrs) => { for (const [k, v] of Object.entries(attrs)) $(id).setAttribute(k, v); };
+    $('flow').setAttribute('viewBox', at.box);
+    for (const name of ['solar', 'grid', 'home']) {
+      const [x, y] = at[name];
+      set('flow-node-' + name, { cx: x, cy: y });
+      set('flow-icon-' + name, { transform: 'translate(' + (x - 12) + ' ' + (y - 12) + ')' });
+      // Under the battery, the home's labels go below it, clear of the line.
+      const below = tall && name === 'home';
+      set('flow-name-' + name, { x, y: below ? y + 44 : y - 36 });
+      set('now-' + name, { x, y: below ? y + 62 : y + 46 });
+      set('flow-line-' + name, { x1: x, y1: y, x2: bx, y2: by });
+      const d = name === 'home' ? 'M ' + bx + ' ' + by + ' L ' + x + ' ' + y : 'M ' + x + ' ' + y + ' L ' + bx + ' ' + by;
+      $('flow-path-' + name).setAttribute('d', d);
+    }
+    set('flow-node-battery', { cx: bx, cy: by });
+    // Between the two lines coming down from solar and grid there is no
+    // room above the battery, so its name moves beside it.
+    set('flow-name-battery', tall ? { x: bx - 50, y: by + 4, 'text-anchor': 'end' } : { x: bx, y: by - 50, 'text-anchor': 'middle' });
+    set('flow-soc', { x: bx, y: by + 7 });
+  }
+  window.addEventListener('resize', flowLayout);
+  flowLayout();
+
   // ---------- live readings ----------
   function renderStatus() {
     if (!status) return;

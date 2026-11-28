@@ -11,6 +11,8 @@
   --warn-bg: #FFF4E5; --warn-border: #F0C48A; --warn-text: #7C2D12;
   --alert-bg: #FEE2E2; --alert-border: #F1A7A7; --alert-text: #991B1B;
   --info-bg: #E8ECF1; --info-text: #334155; --grid-strong: #94A3B8;
+  /* Layout values the iOS app overrides on a folding iPhone. */
+  --fold-x: 50vw; --fold-y: 50vh; --fold-gap: 10px; --open: 1;
 }
 :root[data-theme="dark"] {
   --bg: #0E1116; --card: #171C23; --border: #262D37; --line: #222933;
@@ -23,6 +25,7 @@
   --warn-bg: #33240F; --warn-border: #7A5520; --warn-text: #FCD34D;
   --alert-bg: #3B1414; --alert-border: #8A2C2C; --alert-text: #FCA5A5;
   --info-bg: #222933; --info-text: #C5CCD6; --grid-strong: #4B5563;
+  --fold-x: 50vw; --fold-y: 50vh; --fold-gap: 10px; --open: 1;
 }
 
 * { box-sizing: border-box; }
@@ -317,9 +320,13 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .next-title { font-size: 24px; }
 }
 
-/* ---------- inside the iOS app on a wide screen with a side strip ----------
-   The app draws the page buttons in that strip (it sets .app-rail on <html>),
-   so the sidebar gives its column back and the view options sit in one row. */
+/* ---------- inside the iOS app on a folding iPhone ----------
+   The app draws the page buttons in the side strip and sets .app-rail on
+   <html>. On the open phone (wide) the sidebar gives its column back, the
+   view options sit in one row, and Live, Charging and History use two
+   columns that meet at the fold (--fold-x, from the app; the middle of the
+   page until it says). The power-flow picture fills the right half of Live
+   and stays in place while the left half scrolls. */
 @media (min-width: 761px) {
   .app-rail .shell { display: block; }
   .app-rail .side { display: none; }
@@ -328,5 +335,54 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .app-rail .tools .device-box select { min-width: 180px; }
   .app-rail .tools .btn { flex: none; min-height: 44px; padding: 0 16px; }
   .app-rail .tools .side-note { display: none; }
-  .app-rail main { padding-bottom: calc(env(safe-area-inset-bottom) + 28px); }
+  .app-rail main { padding: 20px 32px calc(env(safe-area-inset-bottom) + 28px); }
+  .app-rail .page { max-width: none; }
+
+  .app-rail #page-live, .app-rail #page-charging, .app-rail #page-history {
+    display: grid; align-items: start; row-gap: 0;
+    grid-template-columns: calc(var(--fold-x, 50vw) - 32px - var(--fold-gap, 10px)) minmax(0, 1fr);
+    column-gap: calc(2 * var(--fold-gap, 10px));
+  }
+  .app-rail #page-live > *, .app-rail #page-charging > *, .app-rail #page-history > *,
+  .app-rail #page-live > .grid3 > *, .app-rail #page-charging > .grid2 > * { grid-column: 1; margin-bottom: 20px; }
+  .app-rail #page-live > .grid3, .app-rail #page-charging > .grid2 { display: contents; }
+
+  /* Live: the picture owns the right half. The rows it spans have no gap,
+     so spanning more rows than the page has costs nothing. */
+  .app-rail #flow-card {
+    grid-column: 2; grid-row: 1 / span 40; position: sticky; top: 20px; margin-bottom: 0;
+    height: calc(100vh - 40px - env(safe-area-inset-bottom)); padding: 24px;
+  }
+  .app-rail #flow-card h3 { font-size: 15px; }
+  .app-rail #flow-card .flow { flex: 1; min-height: 0; max-width: none; height: 100%; }
+  .app-rail #flow-card .net { font-size: 17px; padding: 14px 16px; }
+
+  /* Charging: the plan on the left, the day's rates and charging beside it. */
+  .app-rail #page-charging > section.card { grid-column: 2; grid-row: 1 / span 3; align-self: stretch; }
+  .app-rail #page-charging > .grid2:last-child > :last-child { grid-column: 2; }
+
+  /* History: the chart on the left, the day-by-day table beside it. */
+  .app-rail #page-history > header, .app-rail #hist-tiles, .app-rail #hist-devices-card { grid-column: 1 / -1; }
+  .app-rail #page-history > section:nth-of-type(2) { grid-column: 2; }
+}
+
+/* The picture arrives with the opening movement: the app sets --open from the
+   hinge, 0 as the phone starts to open and 1 once it is open. */
+.app-rail .flow-line { stroke-dasharray: 1; stroke-dashoffset: calc(1 - var(--open, 1)); opacity: var(--open, 1); transition: stroke-dashoffset .3s ease-out, opacity .3s; }
+.app-rail .flow-node { transform-box: fill-box; transform-origin: center; transform: scale(calc(.55 + .45 * var(--open, 1))); opacity: var(--open, 1); transition: transform .3s ease-out, opacity .3s; }
+.app-rail .flow-icon, .app-rail .flow text, .app-rail .flow-dot { opacity: var(--open, 1); transition: opacity .3s; }
+@media (prefers-reduced-motion: reduce) {
+  .app-rail .flow-line, .app-rail .flow-node, .app-rail .flow-icon, .app-rail .flow text { transition: none; }
+}
+
+/* Half open with the fold running across (standing on a table): the picture
+   takes the half above the fold and stays there; the numbers scroll in the
+   half below. --fold-y is the fold's position, from the app. */
+@media (max-width: 760px) {
+  .fold-h #page-live > .grid3 { display: contents; }
+  .fold-h #flow-card {
+    order: -1; position: sticky; top: env(safe-area-inset-top); z-index: 3;
+    height: calc(var(--fold-y, 50vh) - env(safe-area-inset-top) - var(--fold-gap, 10px));
+  }
+  .fold-h #flow-card .flow { flex: 1; min-height: 0; max-width: none; height: 100%; }
 }
