@@ -333,23 +333,29 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .app-rail main { padding: 20px 32px calc(env(safe-area-inset-bottom) + 28px); }
   .app-rail .page { max-width: none; }
 
-  .app-rail #page-live, .app-rail #page-charging, .app-rail #page-history {
+  .app-rail #page-charging, .app-rail #page-history {
     display: grid; align-items: start; row-gap: 0;
     grid-template-columns: calc(var(--fold-x, 50vw) - 32px - var(--fold-gap, 10px)) minmax(0, 1fr);
     column-gap: calc(2 * var(--fold-gap, 10px));
   }
-  .app-rail #page-live > *, .app-rail #page-charging > *, .app-rail #page-history > *,
-  .app-rail #page-live > .grid3 > *, .app-rail #page-charging > .grid2 > * { grid-column: 1; margin-bottom: 20px; }
-  .app-rail #page-live > .grid3, .app-rail #page-charging > .grid2 { display: contents; }
+  .app-rail #page-charging > *, .app-rail #page-history > *,
+  .app-rail #page-charging > .grid2 > * { grid-column: 1; margin-bottom: 20px; }
+  .app-rail #page-charging > .grid2 { display: contents; }
 
-  /* Live: the picture owns the right half. The rows it spans have no gap,
-     so spanning more rows than the page has costs nothing. */
-  .app-rail #page-live > .grid3 > #flow-card {
-    grid-column: 2; grid-row: 1 / span 40; position: sticky; top: 20px; margin-bottom: 0;
-    height: calc(100vh - 40px - env(safe-area-inset-bottom)); padding: 24px;
+  /* Live: everything else keeps to the half before the fold; the power-flow
+     picture is the other half of the screen, from top to bottom, with no
+     card around it, and stays put while the first half scrolls. */
+  .app-rail .shell:has(#page-live:not([hidden])) .tools,
+  .app-rail #page-live { margin: 0; width: calc(var(--fold-x, 50vw) - 32px - var(--fold-gap, 10px)); }
+  .app-rail .shell:has(#page-live:not([hidden])) .tools { box-sizing: content-box; padding-right: 0; }
+  .app-rail #flow-card {
+    position: fixed; top: 0; bottom: 0; right: 0; left: calc(var(--fold-x, 50vw) + var(--fold-gap, 10px));
+    padding: 28px 28px calc(env(safe-area-inset-bottom) + 24px) 12px;
+    background: none; border: 0; border-radius: 0; gap: 16px;
   }
   .app-rail #flow-card h3 { font-size: 15px; }
   .app-rail #flow-card .flow { flex: 1; min-height: 0; max-width: none; height: 100%; }
+  .app-rail #flow-card .flow-node { fill: var(--bg); }
   .app-rail #flow-card .net { font-size: 17px; padding: 14px 16px; }
 
   /* Charging: the plan beside the day's rates, protections beside your
