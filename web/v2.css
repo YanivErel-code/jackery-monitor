@@ -350,7 +350,8 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .app-rail .shell:has(#page-live:not([hidden])) .tools { box-sizing: content-box; padding-right: 0; }
   .app-rail #flow-card {
     position: fixed; top: 0; bottom: 0; right: 0; left: calc(var(--fold-x, 50vw) + var(--fold-gap, 10px));
-    padding: 28px 28px calc(env(safe-area-inset-bottom) + 24px) 12px;
+    /* The bar under the picture ends level with the app's column of buttons. */
+    padding: 28px 28px calc(env(safe-area-inset-bottom) + 8px) 12px;
     background: none; border: 0; border-radius: 0; gap: 16px;
   }
   .app-rail #flow-card h3 { font-size: 15px; }
