@@ -380,6 +380,23 @@ details summary { cursor: pointer; color: var(--link); font-weight: 500; min-hei
   .app-rail #page-history > section:nth-of-type(2) { grid-column: 2; }
 }
 
+/* Wide screens: the power-flow picture runs across the top of Live, and the
+   plan's headline takes its place between the battery and the day's energy.
+   The order in the page itself is unchanged, so phones still lead with the
+   headline. */
+@media (min-width: 1120px) {
+  :root:not(.app-rail) #page-live { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  :root:not(.app-rail) #page-live > * { grid-column: 1 / -1; }
+  :root:not(.app-rail) #page-live > .grid3 { display: contents; }
+  :root:not(.app-rail) #page-live > .grid3 > .card { grid-row: 3; grid-column: auto; }
+  :root:not(.app-rail) #page-live > .grid3 > .card:first-child { grid-column: 1; }
+  :root:not(.app-rail) #page-live > .grid3 > .card:last-child { grid-column: 3; }
+  :root:not(.app-rail) #page-live > .status { grid-row: 3; grid-column: 2; padding: 20px; }
+  :root:not(.app-rail) #page-live > .grid3 > #flow-card { grid-row: 2; grid-column: 1 / -1; }
+  :root:not(.app-rail) #flow-card .flow { max-width: 480px; }
+  :root:not(.app-rail) #flow-card .net { width: 100%; max-width: 480px; align-self: center; }
+}
+
 /* The picture arrives with the opening movement: the app sets --open from the
    hinge, 0 as the phone starts to open and 1 once it is open. */
 .app-rail .flow-line { stroke-dasharray: 1; stroke-dashoffset: calc(1 - var(--open, 1)); opacity: var(--open, 1); transition: stroke-dashoffset .3s ease-out, opacity .3s; }
